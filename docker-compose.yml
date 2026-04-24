@@ -1,0 +1,18 @@
+services:
+  bbs:
+    image: ${SYNCHRONET_IMAGE:-bbsio/synchronet:3.19c}
+    restart: unless-stopped
+    volumes:
+      - ./runtime/sbbs:/sbbs-data
+      - ./doors:/door-kits:ro
+      - ./config/install-xtrn:/install-xtrn:ro
+    ports:
+      - "${BBS_HOST:-127.0.0.1}:${TELNET_PORT:-2323}:23"
+      - "${BBS_HOST:-127.0.0.1}:${HTTP_PORT:-8080}:80"
+      - "${BBS_HOST:-127.0.0.1}:${HTTPS_PORT:-8443}:443"
+      - "${BBS_HOST:-127.0.0.1}:${RLOGIN_PORT:-2513}:513"
+      - "${BBS_HOST:-127.0.0.1}:${WS_TERM_PORT:-1123}:1123"
+      - "${BBS_HOST:-127.0.0.1}:${WSS_TERM_PORT:-11235}:11235"
+      - "${BBS_HOST:-127.0.0.1}:${NNTP_PORT:-1119}:119"
+      - "${BBS_HOST:-127.0.0.1}:${IRC_PORT:-6667}:6667"
+

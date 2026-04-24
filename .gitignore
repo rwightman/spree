@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.codex
+
+# Runtime state and generated transcripts.
+runtime/sbbs/
+runtime/transcripts/
+runtime/tmp/
+
+# Proprietary/shareware DOS door distributions are supplied locally and are not
+# committed by default.
+doors/bre/*
+doors/tw2002/*
+!doors/bre/.gitkeep
+!doors/tw2002/.gitkeep

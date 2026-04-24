@@ -1,0 +1,11 @@
+services:
+  bbs:
+    image: ${SYNCHRONET_DOS_IMAGE:-spree/synchronet-dosemu:local}
+    build:
+      context: .
+      dockerfile: docker/synchronet/Dockerfile
+      args:
+        SYNCHRONET_IMAGE: ${SYNCHRONET_BASE_IMAGE:-bbsio/synchronet:3.19c}
+    security_opt:
+      - seccomp=unconfined
+
