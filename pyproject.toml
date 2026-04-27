@@ -3,8 +3,14 @@ name = "bbs-gym"
 version = "0.1.0"
 description = "Local BBS sandbox tooling for LLM agents"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyte>=0.8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

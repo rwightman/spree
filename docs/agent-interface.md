@@ -20,10 +20,23 @@ For multiple agents:
 from bbs_gym.env import BbsGym
 
 with BbsGym() as gym:
-    red = gym.connect("red")
-    blue = gym.connect("blue")
-    print(red.observe(seconds=2.0))
+    red = gym.connect("red", node=1)
+    blue = gym.connect("blue", node=2)
+    observation = red.observe_turn(timeout=10.0, stable_ms=300)
+    print(observation.model_text)
     red.act("red_user")
+```
+
+`observe_turn()` is the preferred model-facing read path. It updates a virtual
+terminal screen, waits for screen stability, and returns structured state such
+as `model_text`, `pretty_screen`, cursor position, matched prompt, readiness
+reason, node, and transcript path. Prompt matches are guardrail metadata by
+default; they are not required for the harness to proceed.
+
+For a command-line smoke test:
+
+```bash
+python -m bbs_gym.cli observe-turn --timeout 5 --stable-ms 300
 ```
 
 ## Next Automation Milestones

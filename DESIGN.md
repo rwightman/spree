@@ -61,7 +61,8 @@ Near-term improvements:
 - Use `pyte` as a virtual terminal screen so observations reflect cursor
   movement, cleared regions, and overwritten ANSI menu text.
 - Add rlogin sessions for automated benchmark runs.
-- Add quiescence/prompt-based turn boundaries instead of fixed sleep windows.
+- Add quiescence-based turn boundaries instead of fixed sleep windows, with
+  prompt matches recorded as context and guardrails.
 
 ## Observation Model
 
@@ -86,6 +87,7 @@ Suggested structured observation:
     "cursor": [row, col],
     "stable_ms": 350,
     "matched_prompt": "tw2-command",
+    "ready_reason": "stable",
     "timestamp": "...",
 }
 ```
@@ -106,6 +108,7 @@ Suggested multimodal observation:
     "cursor": [row, col],
     "stable_ms": 350,
     "matched_prompt": "tw2-command",
+    "ready_reason": "stable",
     "timestamp": "...",
 }
 ```
@@ -140,21 +143,27 @@ Fixed reads such as `observe(seconds=2.0)` are only a low-level primitive. Door
 games have variable output pacing: animated combat, file displays, explicit
 pauses, and prompts that appear after delays.
 
-The benchmark harness should wait for one of these conditions before asking the
-model for the next action:
+The default benchmark harness should use quiescence as the primary signal before
+asking the model for the next action:
 
 - the virtual terminal screen has been stable for a configurable interval,
-- a door/BBS prompt regex has matched,
-- a profile-specific input state has been detected,
-- a hard timeout has elapsed.
+- then record whether a door/BBS prompt regex matched,
+- then record whether a profile-specific input state was detected,
+- otherwise return on a hard timeout.
 
 The first robust implementation should use `pyte` to detect screen changes and
-combine that with per-profile prompt regexes. For example, TW2 can have a
-different prompt set than Synchronet's main menu or message editor.
+combine that with per-profile prompt regexes as metadata. For example, TW2 can
+have a different prompt set than Synchronet's main menu or message editor.
 
-Quiescence is not enough by itself. Some games pause on screens that are not
+Prompt matching is a guardrail, not a required turn boundary. We should avoid
+making normal play depend on exact prompt strings because BBS text varies across
+versions, themes, and local configuration. Profiles may opt into a prompt
+fast-path for special cases, but the default should wait for screen stability.
+
+Quiescence is not perfect by itself. Some games pause on screens that are not
 asking for input, and some prompts update a clock/status line. Each door profile
-needs its own prompt and "safe to act" rules.
+can add "safe to act" hints, but those hints should annotate observations rather
+than becoming the only way to make progress.
 
 ## Action Model
 
@@ -273,6 +282,7 @@ The runner should record enough information to reproduce/debug a match:
     "pretty_screen": "...",
     "model_text": "...",
     "matched_prompt": "tw2-command",
+    "ready_reason": "stable",
     "prompt": "...",
     "action": "...",
     "timestamp": "...",
@@ -360,7 +370,7 @@ locking behavior is verified.
 
 1. Add a `pyte`-backed rendered terminal screen.
 2. Add one scripted end-to-end path into Synchronet TW2.
-3. Add quiescence and prompt-based `observe_turn()` handling.
+3. Add quiescence-first `observe_turn()` handling with prompt guardrails.
 4. Add structured event logs.
 5. Add rlogin login/account provisioning helpers.
 6. Add explicit node allocation in `BbsGym`.
