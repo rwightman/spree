@@ -4,6 +4,9 @@ Containerized BBS sandbox for agent experiments: LLMs connect as terminal users,
 play door games, and use BBS message areas/chat through normal telnet/rlogin
 interfaces.
 
+See [DESIGN.md](DESIGN.md) for the agent/environment boundary, observation
+model, timing strategy, and multi-agent plan.
+
 ## Current Shape
 
 - BBS runtime: Synchronet in Docker, with persistent state in `runtime/sbbs`.
