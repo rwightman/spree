@@ -22,6 +22,10 @@ SB = 250
 SE = 240
 
 
+class SessionDisconnected(RuntimeError):
+    """Raised when the remote terminal connection closes."""
+
+
 @dataclass
 class TelnetSession:
     host: str = "127.0.0.1"
@@ -30,6 +34,7 @@ class TelnetSession:
     transcript_path: Path | None = None
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
     _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _closed_by_peer: bool = field(default=False, init=False, repr=False)
 
     def connect(self) -> None:
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
@@ -77,6 +82,9 @@ class TelnetSession:
                 continue
             chunk = self._sock.recv(4096)
             if not chunk:
+                self._closed_by_peer = True
+                if not out:
+                    raise SessionDisconnected("remote terminal connection closed")
                 break
             app_data = self._handle_telnet(chunk)
             out.extend(app_data)
@@ -135,4 +143,3 @@ class TelnetSession:
                     i += 1
 
         return bytes(out)
-

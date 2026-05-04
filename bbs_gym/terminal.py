@@ -24,6 +24,7 @@ class Observation:
 
     agent_id: str
     node: int | None
+    requested_node: int | None
     pretty_screen: str
     model_text: str
     new_text: str
@@ -41,6 +42,7 @@ class Observation:
         return {
             "agent_id": self.agent_id,
             "node": self.node,
+            "requested_node": self.requested_node,
             "pretty_screen": self.pretty_screen,
             "model_text": self.model_text,
             "new_text": self.new_text,
@@ -102,12 +104,14 @@ class TurnObserver:
         terminal: TerminalScreen | None = None,
         profile: PromptProfile = DEFAULT_PROFILE,
         node: int | None = None,
+        requested_node: int | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.session = session
         self.terminal = terminal or TerminalScreen()
         self.profile = profile
         self.node = node
+        self.requested_node = requested_node
 
     def feed(self, data: bytes) -> bool:
         return self.terminal.feed(data)
@@ -165,6 +169,7 @@ class TurnObserver:
         return Observation(
             agent_id=self.agent_id,
             node=self.node,
+            requested_node=self.requested_node,
             pretty_screen=self.terminal.pretty_screen(),
             model_text=self.terminal.model_text(),
             new_text=new_text,

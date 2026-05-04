@@ -5,10 +5,14 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .codex
+.idea/
+uv.lock
 
 # Runtime state and generated transcripts.
 runtime/sbbs/
 runtime/transcripts/
+runtime/logs/
+runtime/memory/
 runtime/tmp/
 
 # Proprietary/shareware DOS door distributions are supplied locally and are not
