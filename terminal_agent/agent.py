@@ -16,17 +16,15 @@ class TerminalAgent(Protocol):
     agent_id: str
 
     def observe_turn(
-        self,
-        timeout: float = 10.0,
-        stable_ms: int = 300,
-        poll_interval: float = 0.05,
-        profile: PromptProfile | None = None,
-        prompt_fast_path: bool = False,
-    ) -> Observation:
-        ...
+            self,
+            timeout: float = 10.0,
+            stable_ms: int = 300,
+            poll_interval: float = 0.05,
+            profile: PromptProfile | None = None,
+            prompt_fast_path: bool = False,
+    ) -> Observation: ...
 
-    def act_action(self, action: Action) -> None:
-        ...
+    def act_action(self, action: Action) -> None: ...
 
 
 @dataclass
@@ -44,12 +42,12 @@ class TerminalSessionAgent:
         return strip_ansi(data, encoding=self.session.encoding) if plain else data
 
     def observe_turn(
-        self,
-        timeout: float = 10.0,
-        stable_ms: int = 300,
-        poll_interval: float = 0.05,
-        profile: PromptProfile | None = None,
-        prompt_fast_path: bool = False,
+            self,
+            timeout: float = 10.0,
+            stable_ms: int = 300,
+            poll_interval: float = 0.05,
+            profile: PromptProfile | None = None,
+            prompt_fast_path: bool = False,
     ) -> Observation:
         return self.observer.observe_turn(timeout, stable_ms, poll_interval, profile, prompt_fast_path)
 

@@ -13,13 +13,13 @@ from .profiles import DEFAULT_PROFILE, PromptProfile
 
 class BbsGym:
     def __init__(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 2323,
-        transcript_dir: str | Path = "runtime/transcripts",
-        profile: PromptProfile = DEFAULT_PROFILE,
-        columns: int = 80,
-        lines: int = 24,
+            self,
+            host: str = "127.0.0.1",
+            port: int = 2323,
+            transcript_dir: str | Path = "runtime/transcripts",
+            profile: PromptProfile = DEFAULT_PROFILE,
+            columns: int = 80,
+            lines: int = 24,
     ) -> None:
         self.host = host
         self.port = port

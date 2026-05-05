@@ -22,7 +22,7 @@ def test_pty_session_sets_size_term_and_resizes():
     command = (
         "import os, time; "
         "first = os.get_terminal_size(0); "
-        "print(f'TERM:{os.environ.get(\"TERM\", \"\")}', flush=True); "
+        'print(f\'TERM:{os.environ.get("TERM", "")}\', flush=True); '
         "print(f'SIZE1:{first.columns}x{first.lines}', flush=True); "
         "input(); "
         "second = os.get_terminal_size(0); "

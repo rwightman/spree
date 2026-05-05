@@ -99,14 +99,11 @@ class MemoryPatch:
 class ModelAdapter(Protocol):
     name: str
 
-    def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
-        ...
+    def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action: ...
 
-    def compact(self, prompt: CompactionPrompt) -> SessionSummary:
-        ...
+    def compact(self, prompt: CompactionPrompt) -> SessionSummary: ...
 
-    def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch:
-        ...
+    def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch: ...
 
 
 class TextChatAdapter:
@@ -147,14 +144,14 @@ class OpenAICompatibleAdapter(TextChatAdapter):
     """Adapter for OpenAI-compatible `/v1/chat/completions` servers."""
 
     def __init__(
-        self,
-        model: str,
-        base_url: str = "http://localhost:11434/v1",
-        api_key: str | None = None,
-        name: str | None = None,
-        timeout: float = 120.0,
-        temperature: float = 0.2,
-        max_tokens: int = 512,
+            self,
+            model: str,
+            base_url: str = "http://localhost:11434/v1",
+            api_key: str | None = None,
+            name: str | None = None,
+            timeout: float = 120.0,
+            temperature: float = 0.2,
+            max_tokens: int = 512,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -187,16 +184,16 @@ class AnthropicAdapter(TextChatAdapter):
     """Adapter for Anthropic Messages API."""
 
     def __init__(
-        self,
-        model: str,
-        api_key: str | None = None,
-        name: str | None = None,
-        base_url: str = "https://api.anthropic.com/v1",
-        anthropic_version: str = "2023-06-01",
-        timeout: float = 120.0,
-        temperature: float = 0.2,
-        max_tokens: int = 512,
-        cache_system_prompt: bool = True,
+            self,
+            model: str,
+            api_key: str | None = None,
+            name: str | None = None,
+            base_url: str = "https://api.anthropic.com/v1",
+            anthropic_version: str = "2023-06-01",
+            timeout: float = 120.0,
+            temperature: float = 0.2,
+            max_tokens: int = 512,
+            cache_system_prompt: bool = True,
     ) -> None:
         self.model = model
         self.api_key = api_key if api_key is not None else os.getenv("ANTHROPIC_API_KEY", "")
@@ -263,10 +260,10 @@ class ScriptedModelAdapter(TextChatAdapter):
 
 
 def _post_json(
-    url: str,
-    payload: dict[str, object],
-    headers: dict[str, str] | None = None,
-    timeout: float = 120.0,
+        url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: float = 120.0,
 ) -> dict[str, object]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(

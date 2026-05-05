@@ -28,7 +28,7 @@ def smoke(args: argparse.Namespace) -> int:
         return 1
 
     text = strip_ansi(data, encoding="cp437")
-    print(text[-args.tail :])
+    print(text[-args.tail:])
     return 0 if data else 2
 
 
@@ -59,7 +59,7 @@ def observe_turn(args: argparse.Namespace) -> int:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
-    print(observation.model_text[-args.tail :])
+    print(observation.model_text[-args.tail:])
     if observation.matched_prompt:
         print(f"\n[matched_prompt={observation.matched_prompt} stable_ms={observation.stable_ms}]")
     if observation.timed_out:
@@ -154,7 +154,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--port", type=int, default=2323)
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument("--node", type=int)
-    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "scripted"], default="openai-compatible")
+    run_parser.add_argument(
+        "--provider", choices=["openai-compatible", "anthropic", "scripted"], default="openai-compatible"
+    )
     run_parser.add_argument("--base-url", default="http://localhost:11434/v1")
     run_parser.add_argument("--api-key")
     run_parser.add_argument("--no-anthropic-cache", action="store_true")

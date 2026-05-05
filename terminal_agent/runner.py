@@ -115,10 +115,10 @@ class ActivityResult:
 
 class ActivityRunner:
     def __init__(
-        self,
-        profile: ActivityProfile,
-        memory_store: JsonMemoryStore | None = None,
-        log_path: Path | str | None = None,
+            self,
+            profile: ActivityProfile,
+            memory_store: JsonMemoryStore | None = None,
+            log_path: Path | str | None = None,
     ) -> None:
         self.profile = profile
         self.memory_store = memory_store or JsonMemoryStore()
@@ -152,7 +152,7 @@ class ActivityRunner:
 
             if self._should_compact(all_steps, recent_steps):
                 session_summary = self._compact(model, session_summary, recent_steps, observation)
-                recent_steps = recent_steps[-self.profile.recent_steps_to_keep :]
+                recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
 
             prompt = self._build_decision_prompt(
                 agent_id=agent_id,
@@ -183,7 +183,7 @@ class ActivityRunner:
             )
             all_steps.append(step)
             recent_steps.append(step)
-            recent_steps = recent_steps[-self.profile.recent_steps_to_keep :]
+            recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
             self._write_step(step)
 
             if budget.too_many_validation_failures():
@@ -206,13 +206,13 @@ class ActivityRunner:
         )
 
     def _build_decision_prompt(
-        self,
-        agent_id: str,
-        observation: Observation,
-        campaign_memory: dict[str, Any],
-        session_summary: SessionSummary,
-        recent_steps: list[StepRecord],
-        budget: ActivityBudget,
+            self,
+            agent_id: str,
+            observation: Observation,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
     ) -> DecisionPrompt:
         system = "\n".join(
             [
@@ -275,11 +275,11 @@ class ActivityRunner:
         )
 
     def _compact(
-        self,
-        model: ModelAdapter,
-        session_summary: SessionSummary,
-        recent_steps: list[StepRecord],
-        observation: Observation,
+            self,
+            model: ModelAdapter,
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            observation: Observation,
     ) -> SessionSummary:
         prompt = CompactionPrompt(
             system=(
@@ -300,12 +300,12 @@ class ActivityRunner:
         return model.compact(prompt)
 
     def _commit_memory(
-        self,
-        model: ModelAdapter,
-        campaign_memory: dict[str, Any],
-        session_summary: SessionSummary,
-        recent_steps: list[StepRecord],
-        observation: Observation,
+            self,
+            model: ModelAdapter,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            observation: Observation,
     ):
         prompt = MemoryCommitPrompt(
             system="Return a JSON memory patch for durable campaign memory.",

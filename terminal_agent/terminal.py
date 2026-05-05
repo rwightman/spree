@@ -98,12 +98,12 @@ class TurnObserver:
     """Read from a session until the virtual terminal reaches a turn boundary."""
 
     def __init__(
-        self,
-        agent_id: str,
-        session: TerminalSession,
-        terminal: TerminalScreen | None = None,
-        profile: PromptProfile = DEFAULT_PROFILE,
-        metadata: dict[str, Any] | None = None,
+            self,
+            agent_id: str,
+            session: TerminalSession,
+            terminal: TerminalScreen | None = None,
+            profile: PromptProfile = DEFAULT_PROFILE,
+            metadata: dict[str, Any] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.session = session
@@ -115,12 +115,12 @@ class TurnObserver:
         return self.terminal.feed(data)
 
     def observe_turn(
-        self,
-        timeout: float = 10.0,
-        stable_ms: int = 300,
-        poll_interval: float = 0.05,
-        profile: PromptProfile | None = None,
-        prompt_fast_path: bool = False,
+            self,
+            timeout: float = 10.0,
+            stable_ms: int = 300,
+            poll_interval: float = 0.05,
+            profile: PromptProfile | None = None,
+            prompt_fast_path: bool = False,
     ) -> Observation:
         active_profile = profile or self.profile
         start = time.monotonic()
@@ -155,12 +155,12 @@ class TurnObserver:
                 last_change = time.monotonic()
 
     def _observation(
-        self,
-        profile: PromptProfile,
-        new_data: bytes | bytearray,
-        stable_ms: int,
-        matched_prompt: str | None,
-        ready_reason: str,
+            self,
+            profile: PromptProfile,
+            new_data: bytes | bytearray,
+            stable_ms: int,
+            matched_prompt: str | None,
+            ready_reason: str,
     ) -> Observation:
         new_text = strip_ansi(bytes(new_data), encoding=self.terminal.encoding).replace("\ufeff", "")
         new_text = _CONTROL_RE.sub("", new_text)

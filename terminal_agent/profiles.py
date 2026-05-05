@@ -27,6 +27,7 @@ class PromptProfile:
                 return prompt_name
         return None
 
+
 EMPTY_PROFILE = PromptProfile("empty")
 
 SHELL_PROFILE = PromptProfile.from_patterns(

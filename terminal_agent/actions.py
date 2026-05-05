@@ -161,7 +161,7 @@ def _scan_for_json_object(decoder: json.JSONDecoder, text: str) -> tuple[Any, in
         except json.JSONDecodeError:
             continue
         prefix = text[:index].strip()
-        suffix = text[index + end :].strip()
+        suffix = text[index + end:].strip()
         if prefix and not prefix.lower().startswith(("json", "action")):
             continue
         if suffix:
