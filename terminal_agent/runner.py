@@ -6,23 +6,14 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .agent import TerminalAgent
-from .actions import Action, ActionError, ActionPolicy
+from .actions import Action, ActionError, ActionPolicy, render_action_schema
 from .memory import JsonMemoryStore
 from .models import CompactionPrompt, DecisionPrompt, MemoryCommitPrompt, ModelAdapter, SessionSummary
 from .transports.base import SessionDisconnected
 from .terminal import Observation
-
-
-ACTION_SCHEMA_TEXT = """Return exactly one JSON object using one of these forms:
-{"action": "send", "text": "text to type"}
-{"action": "send_raw", "text": "exact terminal text"}
-{"action": "send_multiline", "lines": ["line one", "line two"]}
-{"action": "wait"}
-{"action": "hangup"}
-"""
 
 
 @dataclass
@@ -69,17 +60,23 @@ class ActivityProfile:
     name: str
     objective: str
     action_policy: ActionPolicy = field(default_factory=ActionPolicy)
+    system_guidance: str = ""
     observe_timeout: float = 10.0
     stable_ms: int = 300
     poll_interval: float = 0.05
     recent_steps_to_keep: int = 8
+    screen_tail_chars: int = 800
     compact_every_steps: int = 20
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
+    include_model_responses_in_context: bool = False
+    completion_check: Callable[[Observation], bool] | None = field(default=None, repr=False, compare=False)
 
     def should_exit(self, observation: Observation, action: Action | None, budget: ActivityBudget) -> bool:
-        del observation
-        return action is not None and action.action == "hangup" or not budget.remaining()
+        del budget
+        if action is not None and action.action == "hangup":
+            return True
+        return self.completion_check is not None and self.completion_check(observation)
 
 
 @dataclass
@@ -148,6 +145,28 @@ class ActivityRunner:
 
             if self.profile.should_exit(observation, None, budget):
                 stop_reason = "profile_complete"
+                step = self._terminal_step_record(
+                    step_number=len(all_steps) + 1,
+                    observation=observation,
+                    budget=budget,
+                    stop_reason=stop_reason,
+                )
+                all_steps.append(step)
+                recent_steps.append(step)
+                self._write_step(step)
+                break
+
+            if not budget.remaining():
+                stop_reason = "budget"
+                step = self._terminal_step_record(
+                    step_number=len(all_steps) + 1,
+                    observation=observation,
+                    budget=budget,
+                    stop_reason=stop_reason,
+                )
+                all_steps.append(step)
+                recent_steps.append(step)
+                self._write_step(step)
                 break
 
             if self._should_compact(all_steps, recent_steps):
@@ -163,15 +182,20 @@ class ActivityRunner:
                 budget=budget,
             )
 
-            action: Action | None = None
             action, validation = self._decide_with_retry(model, prompt)
+            executed_action = action
             if action is None:
                 budget.record_validation_failure()
 
             budget.consume_tick()
 
             if action is not None:
-                agent.act_action(action)
+                try:
+                    agent.act_action(action)
+                except ActionError as exc:
+                    executed_action = None
+                    budget.record_validation_failure()
+                    validation = self._execution_error_validation(validation, str(exc))
 
             step = StepRecord(
                 step=budget.decision_ticks,
@@ -189,11 +213,17 @@ class ActivityRunner:
             if budget.too_many_validation_failures():
                 stop_reason = "validation_failures"
                 break
-            if self.profile.should_exit(observation, action, budget):
-                stop_reason = "hangup" if action and action.action == "hangup" else "budget"
+            if executed_action and executed_action.action == "hangup":
+                stop_reason = "hangup"
+                break
+            if self.profile.should_exit(observation, None, budget):
+                stop_reason = "profile_complete"
+                break
+            if not budget.remaining():
+                stop_reason = "budget"
                 break
 
-        if all_steps and last_observation is not None:
+        if self._has_decision_steps(all_steps) and last_observation is not None:
             patch = self._commit_memory(model, campaign_memory, session_summary, recent_steps, last_observation)
             self.memory_store.save_patch(agent_id, patch)
 
@@ -214,14 +244,15 @@ class ActivityRunner:
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
     ) -> DecisionPrompt:
-        system = "\n".join(
-            [
-                "You are controlling an interactive terminal session.",
-                "You may make mistakes and recover from them.",
-                "Return only a JSON action object.",
-                ACTION_SCHEMA_TEXT,
-            ]
-        )
+        system_parts = [
+            "You are controlling an interactive terminal session.",
+            "You may make mistakes and recover from them.",
+            "Return only a JSON action object.",
+            render_action_schema(self.profile.action_policy),
+        ]
+        if self.profile.system_guidance:
+            system_parts.append(f"Activity-specific guidance:\n{self.profile.system_guidance}")
+        system = "\n".join(system_parts)
         user = "\n\n".join(
             [
                 f"Agent: {agent_id}",
@@ -261,6 +292,41 @@ class ActivityRunner:
                 invalid_responses.append(self._invalid_response_record(model, f"repair-{retry}", first_error))
 
         return None, {"accepted": False, "notes": [first_error], "invalid_responses": invalid_responses}
+
+    def _execution_error_validation(self, validation: dict[str, Any], error: str) -> dict[str, Any]:
+        notes = list(validation.get("notes", []))
+        notes.append(f"action_error: {error}")
+        updated = dict(validation)
+        updated["accepted"] = False
+        updated["notes"] = notes
+        return updated
+
+    def _terminal_step_record(
+            self,
+            step_number: int,
+            observation: Observation,
+            budget: ActivityBudget,
+            stop_reason: str,
+    ) -> StepRecord:
+        return StepRecord(
+            step=step_number,
+            observation=observation.as_dict(),
+            prompt={},
+            action=None,
+            validation={
+                "accepted": True,
+                "terminal": True,
+                "stop_reason": stop_reason,
+                "notes": ["terminal_observation", "does_not_consume_decision_tick"],
+            },
+            budget=budget.to_dict(),
+        )
+
+    def _has_decision_steps(self, steps: list[StepRecord]) -> bool:
+        return any(not self._is_terminal_step(step) for step in steps)
+
+    def _is_terminal_step(self, step: StepRecord) -> bool:
+        return bool(step.validation.get("terminal"))
 
     def _build_retry_prompt(self, prompt: DecisionPrompt, error: str, attempt: int) -> DecisionPrompt:
         return DecisionPrompt(
@@ -358,12 +424,14 @@ class ActivityRunner:
         total = 0
         for step in steps:
             obs = step.observation
+            # Compaction should react to the real volume of observed terminal
+            # text even though decision prompts only include a bounded tail.
             for key in ("model_text", "new_text"):
                 value = obs.get(key, "")
                 if isinstance(value, str):
                     total += len(value)
             action = json.dumps(step.action or {}, sort_keys=True)
-            validation = json.dumps(step.validation, sort_keys=True)
+            validation = json.dumps(self._validation_for_context(step.validation), sort_keys=True)
             total += len(action) + len(validation)
         return total
 
@@ -372,11 +440,9 @@ class ActivityRunner:
             return "(none)"
         lines = []
         for step in steps:
-            action = step.action or {"action": "invalid"}
-            validation = step.validation
-            screen = step.observation.get("model_text", "")
-            if isinstance(screen, str):
-                screen = screen[-800:]
+            action = step.action or {"action": "terminal_observation" if self._is_terminal_step(step) else "invalid"}
+            validation = self._validation_for_context(step.validation)
+            screen = self._screen_tail(step.observation.get("model_text", ""))
             lines.append(
                 "\n".join(
                     [
@@ -387,6 +453,28 @@ class ActivityRunner:
                 )
             )
         return "\n\n".join(lines)
+
+    def _screen_tail(self, screen: Any) -> str:
+        if not isinstance(screen, str) or self.profile.screen_tail_chars <= 0:
+            return ""
+        return screen[-self.profile.screen_tail_chars:]
+
+    def _validation_for_context(self, validation: dict[str, Any]) -> dict[str, Any]:
+        if self.profile.include_model_responses_in_context:
+            return validation
+
+        context: dict[str, Any] = {}
+        for key in ("accepted", "notes"):
+            if key in validation:
+                context[key] = validation[key]
+
+        invalid_responses = validation.get("invalid_responses")
+        if isinstance(invalid_responses, list) and invalid_responses:
+            context["invalid_responses"] = [
+                {key: response[key] for key in ("attempt", "error") if isinstance(response, dict) and key in response}
+                for response in invalid_responses
+            ]
+        return context
 
     def _write_step(self, step: StepRecord) -> None:
         if self.log_path is None:

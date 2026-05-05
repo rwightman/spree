@@ -13,7 +13,7 @@ def test_pty_session_observes_local_process_turns():
         ready = observer.observe_turn(timeout=2.0, stable_ms=0)
         assert "READY" in ready.model_text
 
-        session.send("hello")
+        session.send_line("hello")
         echoed = observer.observe_turn(timeout=2.0, stable_ms=50)
         assert "ECHO:hello" in echoed.model_text
 
@@ -42,6 +42,28 @@ def test_pty_session_sets_size_term_and_resizes():
         assert "SIZE1:100x31" in first.model_text
 
         session.resize(columns=120, lines=40)
-        session.send("go")
+        session.send_line("go")
         second = observer.observe_turn(timeout=2.0, stable_ms=50)
         assert "SIZE2:120x40" in second.model_text
+
+
+def test_pty_enter_key_matches_empty_send_line():
+    session = PtySession([sys.executable, "-c", ""])
+    sent: list[bytes] = []
+    session.send_bytes = sent.append  # type: ignore[method-assign]
+
+    session.send_line("")
+    line_bytes = sent[-1]
+    session.send_key("enter")
+
+    assert line_bytes == sent[-1] == b"\n"
+
+
+def test_pty_key_accepts_printable_character():
+    session = PtySession([sys.executable, "-c", ""])
+    sent: list[bytes] = []
+    session.send_bytes = sent.append  # type: ignore[method-assign]
+
+    session.send_key("q")
+
+    assert sent[-1] == b"q"

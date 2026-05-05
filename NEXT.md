@@ -50,8 +50,12 @@ Already present:
 - TW2 in-game activity profile.
 - JSON-backed memory store with dedupe/caps.
 - JSONL step logging.
+- Trace pretty-printer for JSONL activity logs.
+- ANSI HTML and animated GIF exporter from raw transcripts.
 - Agent account registry with Synchronet provisioning through `jsexec`.
 - Rlogin activity runs using pre-provisioned account identity.
+- JS TW2 reset and one-player turn-grant scripts for development runs.
+- Live TW2 smoke/play runs against a local OpenAI-compatible vLLM/Qwen server.
 
 Missing:
 
@@ -121,16 +125,34 @@ free-form BBS input where free-form input is appropriate.
 Example short command:
 
 ```json
-{"action": "send", "text": "P"}
+{"action": "send_line", "text": "P"}
 ```
 
 Example open-ended chat/message input:
 
 ```json
 {
-  "action": "send",
+  "action": "send_line",
   "text": "I think your trading plan is too defensive. Try moving cargo earlier."
 }
+```
+
+Example key press:
+
+```json
+{"action": "key", "key": "enter"}
+```
+
+Example printable hotkey:
+
+```json
+{"action": "key", "key": "q"}
+```
+
+Example partial input without submitting:
+
+```json
+{"action": "send_text", "text": "partial input"}
 ```
 
 Example multi-line post:
@@ -150,17 +172,18 @@ Example multi-line post:
 Initial action set:
 
 ```text
-send            Send one text line, then Enter.
-send_raw        Send exact bytes/text, no automatic Enter and no newline field.
-send_multiline  Send multiple lines, Enter after each.
+send_line       Type text, then press transport-specific Enter/Return.
+send_text       Type text without pressing Enter/Return.
+key             Press exactly one key, such as q, D, ?, 1, enter, escape, tab, or an arrow.
+send_multiline  Send multiple submitted lines, Enter/Return after each.
 wait            Do nothing and observe again.
 hangup          Close the session.
 ```
 
-Later additions:
+Gated escape hatches and later additions:
 
 ```text
-key             Named key such as escape, tab, arrow_up.
+send_raw        Send exact control text, no automatic Enter/Return.
 macro           Harness-owned macro, only when allowed by the phase profile.
 ```
 
@@ -468,8 +491,16 @@ Recent steps:
 Current screen:
 ...
 
+Current prompt:
+Command (?=Help)?
+
 Return one JSON action.
 ```
+
+The current prompt should be extracted from the live screen and labeled
+separately from scrollback. The model still receives scrollback, because old
+text is useful context, but the active prompt/current input line should be
+harder to confuse with stale prompt text.
 
 ## Mistakes And Recovery
 
@@ -502,6 +533,52 @@ max_empty_waits
 max_parse_failures
 max_validation_failures
 ```
+
+### Observed TW2 Failure: Stale Prompt Text
+
+Live TW2 play exposed a concrete failure mode around trading.
+
+Observed sequence:
+
+1. At `How many holds of ore do you want to sell [20]?`, the model pressed
+   Enter and accepted the default quantity.
+2. At `Your offer?`, the model pressed Enter again, submitting a blank offer.
+3. TW2 returned to `Command (?=Help)?` without an obvious failure message.
+4. The screen tail still contained the old `Your offer?` text.
+5. On later decision ticks, the model sent `269` or `300`, but those numbers
+   were now sent at the command prompt, not at the trade-offer prompt.
+6. The model repeated the pattern after docking again.
+
+This was not action queuing. The runner only permits one action per model call:
+
+```text
+observe stable screen -> model returns one action -> send one action -> observe again
+```
+
+The issue is that the model over-weighted stale scrollback and under-weighted
+the actual current prompt. The harness has an I/O phase boundary, but it does
+not yet expose a domain/input phase such as `tw2_trade_offer_prompt` versus
+`tw2_command_prompt`.
+
+Preferred improvements, keeping the terminal environment open-ended:
+
+- Add active prompt/current-line extraction to every observation.
+- Put `CURRENT PROMPT` after scrollback in the decision prompt.
+- Include `LAST ACTION` and a concise visible delta/result before the current
+  screen.
+- Extract visible, non-privileged state facts from screen text only, such as
+  sector, turns left, credits, cargo, current port, and whether the current port
+  buys or sells the carried cargo.
+- Record repeated no-effect patterns in session memory, for example "blank
+  offer returned to Command prompt and did not change credits/cargo."
+- Optionally add profile-level warnings, not hard rejections, when the model
+  proposes inputs that look mismatched to the detected prompt. Example: sending
+  a numeric trade offer while the live prompt is `Command (?=Help)?`.
+
+Do not solve this by reading TW2 database state inside the agent loop or by
+blocking arbitrary TW2 commands. The benchmark should still allow mistakes,
+invalid entries, and recovery. The goal is to make the actual current terminal
+state clearer to the model.
 
 ## Memory Layers
 
@@ -798,7 +875,7 @@ Suggested JSONL event:
   "prompt_path": "runtime/logs/match-0001/agent-001/step-0042.prompt.txt",
   "model_response_path": "runtime/logs/match-0001/agent-001/step-0042.response.txt",
   "parsed_action": {
-    "action": "send",
+    "action": "send_line",
     "text": "?"
   },
   "validation": {
@@ -925,9 +1002,12 @@ Build in this order:
 11. BBS main-menu activity profile. Done.
 12. TW2 entry profile. Done.
 13. Account/rlogin provisioning. Done.
-14. Run and tune one real local/API model through TW2 entry.
-15. Add real Synchronet node discovery/allocation.
-16. Two-agent sequential campaign runner.
+14. Run and tune one real local/API model through TW2 entry. Done.
+15. Run one real model through a bounded TW2 play session to turn exhaustion.
+    Done.
+16. Add active prompt/current-line extraction and visible state deltas.
+17. Add real Synchronet node discovery/allocation.
+18. Two-agent sequential campaign runner.
 
 Do not start with a full async multi-agent scheduler. First prove:
 

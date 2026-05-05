@@ -33,5 +33,26 @@ def test_tw2_entry_profile_exits_when_trade_wars_visible():
     )
 
 
+def test_tw2_entry_profile_does_not_exit_on_bbs_menu_listing():
+    assert not TW2_ENTRY_PROFILE.should_exit(
+        observation("  2 | Trade Wars 2 - 500 Sectors\nWhich or (Q)uit:"),
+        Action("wait"),
+        ActivityBudget(),
+    )
+
+
 def test_activity_profile_factory_returns_tw2_entry_profile():
     assert activity_profile("tw2-entry").name == "tw2-entry"
+
+
+def test_activity_profile_factory_overrides_named_profile_objectives():
+    tw2_game = activity_profile("tw2-game", "custom game objective")
+    tw2_entry = activity_profile("tw2-entry", "custom entry objective")
+
+    assert tw2_game.objective == "custom game objective"
+    assert tw2_entry.objective == "custom entry objective"
+    assert tw2_entry.should_exit(
+        observation("Welcome to Trade Wars (v.ii)"),
+        None,
+        ActivityBudget(),
+    )

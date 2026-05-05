@@ -85,13 +85,7 @@ def run_activity(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    profile = activity_profile(args.activity, args.objective)
-    if type(profile) is ActivityProfile:
-        profile = replace(
-            profile,
-            observe_timeout=args.observe_timeout if args.observe_timeout is not None else profile.observe_timeout,
-            stable_ms=args.stable_ms if args.stable_ms is not None else profile.stable_ms,
-        )
+    profile = build_activity_profile(args)
     runner = ActivityRunner(profile, log_path=args.log_path)
 
     try:
@@ -99,6 +93,7 @@ def run_activity(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             rlogin_port=args.rlogin_port,
+            rlogin_terminal=args.rlogin_terminal,
             transport=args.transport,
             agent_registry=registry,
         ) as gym:
@@ -117,6 +112,16 @@ def run_activity(args: argparse.Namespace) -> int:
 
     print(f"activity={result.activity} agent={result.agent_id} steps={len(result.steps)} stop={result.stop_reason}")
     return 0
+
+
+def build_activity_profile(args: argparse.Namespace) -> ActivityProfile:
+    profile = activity_profile(args.activity, args.objective)
+    overrides: dict[str, object] = {}
+    if args.observe_timeout is not None:
+        overrides["observe_timeout"] = args.observe_timeout
+    if args.stable_ms is not None:
+        overrides["stable_ms"] = args.stable_ms
+    return replace(profile, **overrides) if overrides else profile
 
 
 def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
@@ -289,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--host", default="127.0.0.1")
     run_parser.add_argument("--port", type=int, default=2323)
     run_parser.add_argument("--rlogin-port", type=int, default=2513)
+    run_parser.add_argument("--rlogin-terminal", default="ansi")
     run_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
     run_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     run_parser.add_argument("--agent-id", default="agent-001")

@@ -111,6 +111,15 @@ The raw transcript is authoritative and should always be preserved. The rendered
 model text is what we pass to models most of the time. The pretty render is for
 debugging, replay, and screenshots.
 
+Current trace tooling:
+
+- `scripts/trace_pretty.py` renders JSONL activity logs into a readable text
+  transcript with optional model responses and control-character markers.
+- `scripts/ansi_screencap.py` replays raw transcript bytes through the virtual
+  terminal and emits ANSI HTML frames or animated GIFs for human debugging.
+- GIF frame timing is configurable with `--duration-ms`; color depends on the
+  raw terminal bytes actually sent by Synchronet.
+
 Suggested structured observation:
 
 ```python
@@ -127,6 +136,29 @@ Suggested structured observation:
     "timestamp": "...",
 }
 ```
+
+### Active Prompt Versus Scrollback
+
+The model-oriented observation should distinguish the live input prompt from
+older scrollback. Live TW2 testing showed a failure mode where the screen still
+contained stale text such as `Your offer?`, but the current prompt had already
+returned to `Command (?=Help)?`. The model then sent numeric trade offers at
+the command prompt because old prompt text remained in the screen tail.
+
+The harness should keep the input space open, but shape observations so the
+current state is harder to misread:
+
+- preserve normal scrollback for context,
+- label the detected current prompt or active input line separately,
+- put the current prompt near the end of the model prompt,
+- include the last action and the visible result/delta before the next
+  decision,
+- optionally extract visible facts such as sector, turns left, cargo, and
+  credits from rendered text only.
+
+This is not a privileged game API and should not reject open-ended actions. It
+is observation hygiene: the model should still be able to make mistakes, but it
+should not have to infer the active prompt from stale terminal history.
 
 ## Optional Multimodal Observations
 
@@ -210,11 +242,15 @@ behavior, and replay runs without narrowing the BBS input space too much.
 Examples:
 
 ```json
-{"action": "send", "text": "P"}
+{"action": "send_line", "text": "P"}
 ```
 
 ```json
-{"action": "send_raw", "text": "\u001b"}
+{"action": "key", "key": "enter"}
+```
+
+```json
+{"action": "send_text", "text": "partial input"}
 ```
 
 ```json
@@ -234,6 +270,19 @@ encoding failures, overlong input, and disallowed action types. It should not
 reject ordinary game mistakes such as wrong menu choices, invalid commands, or
 bad quantities; those should flow through to the BBS and be recoverable on later
 decision ticks.
+
+`send_line` types text and submits it with the transport-specific Enter/Return
+key; `send_line` with empty text is equivalent to pressing Enter/Return.
+`send_text` types without submitting. `key` presses exactly one key without an
+automatic Enter/Return; that can be a printable key such as `q`, `D`, `?`, or
+`1`, or a named key such as `enter`, `escape`, `tab`, or an arrow. `send_raw`
+is a gated escape hatch for exact control text and should not be available in
+normal game/menu phases.
+
+The action schema shown to the model must be rendered from the active
+`ActionPolicy`, not hardcoded globally. A BBS menu profile should not advertise
+multi-line posting actions, and a message editor should not force the same
+limits as a one-key door menu.
 
 ## Model Responses And Reasoning Traces
 
@@ -303,7 +352,8 @@ changes.
 Implemented transports:
 
 - `telnet`: realistic user path, prompt-driven login required.
-- `rlogin`: default automation path, pre-provisioned user identity.
+- `rlogin`: default automation path, pre-provisioned user identity, configurable
+  terminal type for ANSI/color negotiation.
 - `pty`: generic local subprocess path used to validate the terminal core
   outside BBSs.
 
@@ -450,6 +500,15 @@ profile, and any extracted scoreboard snapshots.
 Use this first. It is already local, scriptable, and avoids DOS/DOSEMU issues
 while the harness is still evolving.
 
+Current development tooling:
+
+- `make reset-js-tw2` reinitializes the JS TW2 universe.
+- `make grant-js-tw2-turns PLAYER=RLoginSmoke TURNS=30` grants turns to one
+  player without resetting the world.
+- `run-activity --activity tw2-game --transport rlogin ...` has been exercised
+  against a local OpenAI-compatible vLLM/Qwen server through a complete
+  turn-exhaustion session.
+
 ### TradeWars 2002
 
 Target path:
@@ -486,12 +545,15 @@ locking behavior is verified.
 
 ## Next Implementation Milestones
 
-1. Run and tune a live TW2 entry activity through rlogin with a real model.
-2. Add a sequential two-agent campaign runner that composes existing
+1. Add active-prompt/current-line extraction to reduce stale scrollback
+   confusion while preserving open-ended terminal input.
+2. Tune TW2 in-game profile/memory from live traces, especially repeated trade
+   offer mistakes and command-prompt phase confusion.
+3. Add a sequential two-agent campaign runner that composes existing
    `ActivityRunner` sessions.
-3. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
-4. Add snapshot/reset tooling for `runtime/sbbs`.
-5. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
+4. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
+5. Add snapshot/reset tooling for `runtime/sbbs`.
+6. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
    workflows.
-6. Add DOS-door setup verification for TW2002 and BRE.
-7. Add optional PNG observation rendering from the pyte screen buffer.
+7. Add DOS-door setup verification for TW2002 and BRE.
+8. Add optional PNG observation rendering from the pyte screen buffer.

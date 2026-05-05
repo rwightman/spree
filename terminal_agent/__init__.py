@@ -22,11 +22,12 @@ __all__ = [
     "TerminalSessionAgent",
     "TerminalScreen",
     "TurnObserver",
+    "render_action_schema",
     "strip_ansi",
 ]
 
 from .agent import TerminalAgent, TerminalSessionAgent
-from .actions import Action, ActionPolicy
+from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
 from .memory import JsonMemoryStore
 from .models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter

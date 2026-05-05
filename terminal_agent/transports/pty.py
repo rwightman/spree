@@ -14,7 +14,21 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..actions import ActionError, is_printable_key
 from .base import SessionDisconnected
+
+
+PTY_KEY_BYTES = {
+    "enter": b"\n",
+    "escape": b"\x1b",
+    "tab": b"\t",
+    "backspace": b"\x7f",
+    "space": b" ",
+    "up": b"\x1b[A",
+    "down": b"\x1b[B",
+    "right": b"\x1b[C",
+    "left": b"\x1b[D",
+}
 
 
 @dataclass
@@ -80,10 +94,22 @@ class PtySession:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def send(self, text: str, newline: bool = True) -> None:
-        payload = text.encode(self.encoding)
-        if newline:
-            payload += b"\n"
+    def send_text(self, text: str) -> None:
+        self.send_bytes(text.encode(self.encoding))
+
+    def send_line(self, text: str = "") -> None:
+        self.send_text(text)
+        self.send_key("enter")
+
+    def send_key(self, key: str) -> None:
+        payload = PTY_KEY_BYTES.get(key)
+        if payload is None and is_printable_key(key):
+            payload = key.encode(self.encoding)
+        if payload is None:
+            supported = ", ".join(sorted(PTY_KEY_BYTES))
+            raise ActionError(
+                f"unsupported key {key!r}; use one printable character or one of these named keys: {supported}"
+            )
         self.send_bytes(payload)
 
     def send_bytes(self, payload: bytes) -> None:

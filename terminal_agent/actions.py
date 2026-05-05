@@ -12,7 +12,24 @@ class ActionError(ValueError):
     """Raised when a model action cannot be parsed or validated."""
 
 
-CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+DEFAULT_SUPPORTED_KEYS = frozenset(
+    {
+        "enter",
+        "escape",
+        "tab",
+        "backspace",
+        "space",
+        "up",
+        "down",
+        "left",
+        "right",
+    }
+)
+
+
+def is_printable_key(key: str) -> bool:
+    return len(key) == 1 and not CONTROL_RE.search(key)
 
 
 @dataclass(frozen=True)
@@ -26,13 +43,15 @@ class Action:
     action: str
     text: str = ""
     lines: tuple[str, ...] = ()
-    newline: bool = True
+    key: str = ""
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "Action":
         action = data.get("action")
         if not isinstance(action, str):
             raise ActionError("action must be a string")
+        if not action:
+            raise ActionError("action must not be empty")
 
         text = data.get("text", "")
         if text is None:
@@ -52,14 +71,16 @@ class Action:
         if not all(isinstance(line, str) for line in lines):
             raise ActionError("lines must be a list of strings")
 
-        if action == "send_raw" and "newline" in data:
-            raise ActionError("send_raw does not support newline; use send for automatic Enter")
+        key = data.get("key", "")
+        if key is None:
+            key = ""
+        if not isinstance(key, str):
+            raise ActionError("key must be a string when present")
 
-        newline = data.get("newline", True)
-        if not isinstance(newline, bool):
-            raise ActionError("newline must be a boolean when present")
+        if "newline" in data:
+            raise ActionError("newline is not supported; use send_line or key enter")
 
-        return cls(action=action, text=text, lines=lines, newline=newline)
+        return cls(action=action, text=text, lines=lines, key=key)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"action": self.action}
@@ -67,8 +88,8 @@ class Action:
             data["text"] = self.text
         if self.lines:
             data["lines"] = list(self.lines)
-        if self.action == "send":
-            data["newline"] = self.newline
+        if self.key:
+            data["key"] = self.key
         return data
 
 
@@ -77,8 +98,10 @@ class ActionPolicy:
     """Validation policy for an activity phase."""
 
     allowed_actions: frozenset[str] = field(
-        default_factory=lambda: frozenset({"send", "send_raw", "send_multiline", "wait", "hangup"})
+        default_factory=lambda: frozenset({"send_line", "send_text", "send_multiline", "key", "wait", "hangup"})
     )
+    supported_keys: frozenset[str] = field(default_factory=lambda: DEFAULT_SUPPORTED_KEYS)
+    allow_printable_keys: bool = True
     max_text_chars: int = 1024
     max_line_chars: int = 240
     max_lines: int = 20
@@ -90,14 +113,20 @@ class ActionPolicy:
             raise ActionError(f"action {action.action!r} is not allowed")
 
         if action.action in {"wait", "hangup"}:
-            if action.text or action.lines:
-                raise ActionError(f"{action.action} must not include text or lines")
+            if action.text or action.lines or action.key:
+                raise ActionError(f"{action.action} must not include text, lines, or key")
             return action
 
-        if action.action in {"send", "send_raw"}:
+        if action.action in {"send_line", "send_text"}:
             self._validate_text(action.text, "text", self.max_text_chars)
-            if action.lines:
-                raise ActionError(f"{action.action} must not include lines")
+            if action.lines or action.key:
+                raise ActionError(f"{action.action} must not include lines or key")
+            return action
+
+        if action.action == "send_raw":
+            self._validate_text(action.text, "text", self.max_text_chars, allow_control_chars=True)
+            if action.lines or action.key:
+                raise ActionError("send_raw must not include lines or key")
             return action
 
         if action.action == "send_multiline":
@@ -111,12 +140,41 @@ class ActionPolicy:
                 self._validate_text(line, f"line {index}", self.max_line_chars)
             return action
 
+        if action.action == "key":
+            if not action.key:
+                raise ActionError("key action requires key")
+            if action.text or action.lines:
+                raise ActionError("key action must not include text or lines")
+            if action.key in self.supported_keys:
+                return action
+            if self.allow_printable_keys and is_printable_key(action.key):
+                self._validate_text(action.key, "key", 1)
+                return action
+            if self.allow_printable_keys:
+                supported = ", ".join(sorted(self.supported_keys))
+                raise ActionError(
+                    f"unsupported key {action.key!r}; use one printable character or one of these named keys: "
+                    f"{supported}"
+                )
+            else:
+                supported = ", ".join(sorted(self.supported_keys))
+                raise ActionError(
+                    f"unsupported key {action.key!r}; supported keys: {supported}. "
+                )
+
         raise ActionError(f"unsupported action {action.action!r}")
 
-    def _validate_text(self, text: str, label: str, max_chars: int) -> None:
+    def _validate_text(
+            self,
+            text: str,
+            label: str,
+            max_chars: int,
+            allow_control_chars: bool | None = None,
+    ) -> None:
         if len(text) > max_chars:
             raise ActionError(f"{label} too long: {len(text)} > {max_chars}")
-        if not self.allow_control_chars and CONTROL_RE.search(text):
+        allow_controls = self.allow_control_chars if allow_control_chars is None else allow_control_chars
+        if not allow_controls and CONTROL_RE.search(text):
             raise ActionError(f"{label} contains disallowed control characters")
         if self.require_encoding:
             try:
@@ -135,6 +193,56 @@ def parse_action(text: str, policy: ActionPolicy | None = None) -> Action:
         raise ActionError("model response must contain a JSON object")
     action = Action.from_mapping(data)
     return (policy or ActionPolicy()).validate(action)
+
+
+def render_action_schema(policy: ActionPolicy) -> str:
+    """Render only the action forms available under ``policy``."""
+
+    lines = ["Return exactly one JSON action object using one of these allowed forms:"]
+    if "send_line" in policy.allowed_actions:
+        lines.extend(
+            [
+                '{"action": "send_line", "text": "text to type"}',
+                "Use send_line to type text and then press Enter/Return. Empty text presses Enter/Return.",
+            ]
+        )
+    if "send_text" in policy.allowed_actions:
+        lines.extend(
+            [
+                '{"action": "send_text", "text": "text to type"}',
+                "Use send_text to type text without pressing Enter/Return.",
+            ]
+        )
+    if "key" in policy.allowed_actions:
+        supported = ", ".join(sorted(policy.supported_keys))
+        lines.extend(
+            [
+                '{"action": "key", "key": "enter"}',
+                (
+                    "Use key for one keystroke without automatic Enter/Return: one printable key "
+                    f"such as q, D, ?, or 1, or a named key. Supported named keys: {supported}."
+                ),
+            ]
+        )
+    if "send_multiline" in policy.allowed_actions:
+        lines.extend(
+            [
+                '{"action": "send_multiline", "lines": ["line one", "line two"]}',
+                "Use send_multiline for submitted multi-line text; each line is followed by Enter/Return.",
+            ]
+        )
+    if "send_raw" in policy.allowed_actions:
+        lines.extend(
+            [
+                '{"action": "send_raw", "text": "exact terminal text"}',
+                "Use send_raw only when exact control text is required; it does not add Enter/Return.",
+            ]
+        )
+    if "wait" in policy.allowed_actions:
+        lines.append('{"action": "wait"}')
+    if "hangup" in policy.allowed_actions:
+        lines.append('{"action": "hangup"}')
+    return "\n".join(lines)
 
 
 def _extract_json_object(text: str) -> Any:

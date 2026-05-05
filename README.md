@@ -6,6 +6,8 @@ interfaces.
 
 See [DESIGN.md](DESIGN.md) for the agent/environment boundary, observation
 model, timing strategy, and multi-agent plan.
+See [NEXT.md](NEXT.md) for near-term implementation notes and observed failure
+modes from live TW2 runs.
 
 ## Current Shape
 
@@ -18,6 +20,9 @@ model, timing strategy, and multi-agent plan.
   profiles, activities, and CLI commands.
 - Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
   and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
+- Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
+  raw transcripts can be replayed into ANSI HTML or animated GIFs with
+  `scripts/ansi_screencap.py`.
 - Door strategy:
   - Use Synchronet's bundled JS doors first for immediate smoke tests.
   - Stage original DOS doors from `doors/bre` and `doors/tw2002`.
@@ -85,6 +90,18 @@ make install-js-tw2
 This gives you a fast local target for agent-session plumbing before dealing
 with original DOS door setup and registration.
 
+Reset or adjust the JS TW2 game state during development:
+
+```bash
+make reset-js-tw2
+make grant-js-tw2-turns PLAYER=RLoginSmoke TURNS=30
+```
+
+`reset-js-tw2` reinitializes the local JS TW2 universe. `grant-js-tw2-turns`
+updates one TW2 player record without resetting the world, which is useful for
+continuing an interrupted agent session or forcing a daily-turn rollover during
+experiments.
+
 ## Original DOS Doors
 
 Put your legally obtained/extracted door files here:
@@ -134,6 +151,39 @@ The generic PTY path can be checked without the BBS:
 python -m examples.shell_agent
 ```
 
+## Activity Traces And Replays
+
+`run-activity` writes one JSONL record per decision tick. Each record includes
+the observation shown to the model, raw and parsed model responses, validation
+notes, the parsed action, budget state, and the raw transcript path.
+
+Pretty-print a trace:
+
+```bash
+python scripts/trace_pretty.py runtime/logs/activity.jsonl \
+  --show-new-text \
+  --show-controls \
+  --out runtime/logs/activity.pretty.txt
+```
+
+Render a colored terminal frame or animated GIF from the raw transcript:
+
+```bash
+python scripts/ansi_screencap.py runtime/logs/activity.jsonl \
+  --step 42 \
+  --out runtime/logs/activity-step42.ansi.html
+
+python scripts/ansi_screencap.py runtime/logs/activity.jsonl \
+  --gif-out runtime/logs/activity.gif \
+  --start-step 10 \
+  --end-step 60 \
+  --duration-ms 2000
+```
+
+The GIF path requires Pillow. The replay is only as colorful as the raw
+transcript: if Synchronet sends monochrome output for a given rlogin/telnet
+session, the GIF will be monochrome too.
+
 ## Local vLLM OpenAI-Compatible Server
 
 The OpenAI-compatible adapter works with local servers such as vLLM, Ollama, and
@@ -174,6 +224,10 @@ python -m bbs_gym.cli run-activity \
   --transport rlogin \
   --agent-id qwen-local-001
 ```
+
+The rlogin transport defaults to terminal type `ansi`. Use
+`--rlogin-terminal` to compare terminal negotiation strings such as `ansi`,
+`xterm`, or `xterm-256color` when debugging color/ANSI behavior.
 
 ## Notes
 

@@ -23,6 +23,7 @@ class BbsGym:
             columns: int = 80,
             lines: int = 24,
             rlogin_port: int = 2513,
+            rlogin_terminal: str = "ansi",
             transport: str = "telnet",
             agent_registry: AgentRegistry | None = None,
             agent_registry_path: str | Path | None = None,
@@ -30,6 +31,7 @@ class BbsGym:
         self.host = host
         self.port = port
         self.rlogin_port = rlogin_port
+        self.rlogin_terminal = rlogin_terminal
         self.transcript_dir = Path(transcript_dir)
         self.profile = profile
         self.columns = columns
@@ -62,6 +64,7 @@ class BbsGym:
                 password=password,
                 transcript_path=transcript,
                 encoding="cp437",
+                terminal=self.rlogin_terminal,
             )
         else:
             raise ValueError(f"unsupported BBS transport: {active_transport}")
@@ -74,6 +77,8 @@ class BbsGym:
             "port": self.port if active_transport == "telnet" else self.rlogin_port,
             "encoding": session.encoding,
         }
+        if active_transport == "rlogin":
+            metadata["terminal"] = self.rlogin_terminal
         if record is not None:
             metadata.update(
                 {

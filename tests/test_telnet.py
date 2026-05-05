@@ -22,3 +22,24 @@ def test_telnet_negotiation_is_removed_from_application_stream():
 
     assert data == b"Hello"
     assert bytes(session._sock.sent) == bytes([IAC, 252, 1, IAC, 254, 3])
+
+
+def test_telnet_enter_key_matches_empty_send_line():
+    session = TelnetSession()
+    session._sock = FakeSocket()
+
+    session.send_line("")
+    line_bytes = bytes(session._sock.sent)
+    session._sock.sent.clear()
+    session.send_key("enter")
+
+    assert line_bytes == bytes(session._sock.sent) == b"\r\n"
+
+
+def test_telnet_key_accepts_printable_character():
+    session = TelnetSession()
+    session._sock = FakeSocket()
+
+    session.send_key("q")
+
+    assert bytes(session._sock.sent) == b"q"

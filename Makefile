@@ -1,4 +1,6 @@
-.PHONY: init build-dos up up-dos down logs scfg shell install-js-tw2 stage-dos-doors smoke test status doctor
+.PHONY: init build-dos up up-dos down logs scfg shell install-js-tw2 reset-js-tw2 grant-js-tw2-turns stage-dos-doors smoke test status doctor
+
+TURNS ?= 30
 
 init:
 	./scripts/bootstrap.sh
@@ -32,6 +34,15 @@ shell:
 
 install-js-tw2:
 	docker compose exec bbs jsexec install-xtrn.js ../xtrn/tw2 -auto
+
+reset-js-tw2:
+	docker compose cp scripts/sbbs_reset_tw2.js bbs:/tmp/sbbs_reset_tw2.js
+	docker compose exec -T bbs /sbbs/exec/jsexec /tmp/sbbs_reset_tw2.js
+
+grant-js-tw2-turns:
+	test -n "$(PLAYER)" || (echo "usage: make grant-js-tw2-turns PLAYER=RLoginSmoke [TURNS=30]" >&2; exit 2)
+	docker compose cp scripts/sbbs_tw2_grant_turns.js bbs:/tmp/sbbs_tw2_grant_turns.js
+	docker compose exec -T bbs /sbbs/exec/jsexec /tmp/sbbs_tw2_grant_turns.js "$(PLAYER)" "$(TURNS)"
 
 stage-dos-doors:
 	./scripts/stage_dos_doors.sh
