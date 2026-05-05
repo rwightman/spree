@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
-from .actions import Action, ActionPolicy
-from .runner import ActivityBudget, ActivityProfile
-from .terminal import Observation
+from terminal_agent.actions import Action, ActionPolicy
+from terminal_agent.runner import ActivityBudget, ActivityProfile
+from terminal_agent.terminal import Observation
 
 
 TW2_SCREEN_RE = re.compile(r"(?:Trade\s+Wars|Trade\s+Wars\s+\(v\.ii\)|TW2)", re.IGNORECASE)
+
+
+def bbs_action_policy(**kwargs: Any) -> ActionPolicy:
+    return ActionPolicy(require_encoding="cp437", **kwargs)
 
 
 class Tw2EntryProfile(ActivityProfile):
@@ -24,7 +29,7 @@ class Tw2EntryProfile(ActivityProfile):
                 "external programs/doors path such as X or D, then choose Games and "
                 "Trade Wars 2. If you are unsure, ask the BBS for help with ?."
             ),
-            action_policy=ActionPolicy(
+            action_policy=bbs_action_policy(
                 allowed_actions=frozenset({"send", "send_raw", "wait", "hangup"}),
                 max_text_chars=80,
                 max_line_chars=80,
@@ -46,6 +51,7 @@ class Tw2EntryProfile(ActivityProfile):
 BBS_MAIN_MENU_PROFILE = ActivityProfile(
     name="bbs-main-menu",
     objective="Explore the BBS main menu, recover from mistakes, and do not enter sysop/admin areas.",
+    action_policy=bbs_action_policy(),
 )
 
 TW2_ENTRY_PROFILE = Tw2EntryProfile()
@@ -53,7 +59,7 @@ TW2_ENTRY_PROFILE = Tw2EntryProfile()
 TW2_GAME_PROFILE = ActivityProfile(
     name="tw2-game",
     objective="Play the current Trade Wars 2 session through normal terminal commands and recover from mistakes.",
-    action_policy=ActionPolicy(
+    action_policy=bbs_action_policy(
         allowed_actions=frozenset({"send", "send_raw", "send_multiline", "wait", "hangup"}),
         max_text_chars=240,
         max_line_chars=240,
@@ -71,5 +77,13 @@ def activity_profile(name: str, objective: str | None = None) -> ActivityProfile
     if name == "tw2-game":
         return TW2_GAME_PROFILE
     if name == "bbs-main-menu":
-        return BBS_MAIN_MENU_PROFILE if objective is None else ActivityProfile(name=name, objective=objective)
-    return ActivityProfile(name=name, objective=objective or "Explore the current BBS activity.")
+        return (
+            BBS_MAIN_MENU_PROFILE
+            if objective is None
+            else ActivityProfile(name=name, objective=objective, action_policy=bbs_action_policy())
+        )
+    return ActivityProfile(
+        name=name,
+        objective=objective or "Explore the current BBS activity.",
+        action_policy=bbs_action_policy(),
+    )

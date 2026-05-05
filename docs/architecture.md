@@ -8,7 +8,8 @@ same terminal UI that a human BBS user would see.
 
 ```text
 LLM agent process
-  -> bbs_gym TelnetSession
+  -> terminal_agent transport
+  -> bbs_gym Synchronet profile/activity glue
   -> localhost:2323
   -> Synchronet terminal server
   -> message boards, chat, external doors
@@ -41,12 +42,22 @@ Delete that directory only when you intentionally want a fresh BBS.
 
 ## Agent Driver
 
-The Python package starts with a low-level telnet client. The next layer should
-add:
+The generic terminal-agent core lives in `terminal_agent`:
+
+- `actions.py`: structured terminal actions and validation,
+- `agent.py`: the minimal `TerminalAgent` protocol consumed by the runner and
+  `TerminalSessionAgent` for concrete session-backed dispatch,
+- `terminal.py`: pyte-backed screen rendering and quiescence observation,
+- `runner.py`: bounded observe/decide/act activities with compaction,
+- `models.py`: model adapters for OpenAI-compatible APIs, Anthropic, and tests,
+- `profiles.py`: empty/stability-only and shell prompt profiles,
+- `transports/`: telnet and local PTY sessions.
+
+The BBS package stays as domain glue: Synchronet CP437 defaults, BBS/TW2 prompt
+profiles, door-game activity profiles, Docker config, and the CLI surface.
+
+The next BBS layer should add:
 
 - account creation/login scripts,
-- per-agent transcript directories,
-- action/observation step records,
 - match orchestration for multiple agents,
 - reset hooks for each door game.
-

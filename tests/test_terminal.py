@@ -1,11 +1,13 @@
 from pathlib import Path
 
-from bbs_gym.profiles import BBS_PROFILE, PromptProfile
-from bbs_gym.terminal import TerminalScreen, TurnObserver
+from bbs_gym.profiles import BBS_PROFILE
+from terminal_agent.profiles import PromptProfile
+from terminal_agent.terminal import TerminalScreen, TurnObserver
 
 
 class FakeSession:
     transcript_path = Path("runtime/transcripts/fake.raw")
+    encoding = "utf-8"
 
     def __init__(self, chunks):
         self.chunks = list(chunks)
@@ -17,7 +19,7 @@ class FakeSession:
 
 
 def test_terminal_screen_renders_cp437_and_ansi():
-    terminal = TerminalScreen(columns=20, lines=4)
+    terminal = TerminalScreen(columns=20, lines=4, encoding="cp437")
 
     changed = terminal.feed(b"\x1b[31mHi \xb1\x1b[0m\r\nCommand:")
 

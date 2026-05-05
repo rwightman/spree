@@ -51,18 +51,21 @@ with BbsGym() as gym:
 
 Current implementation:
 
-- `TelnetSession` handles telnet connection and basic option negotiation.
+- `terminal_agent` contains the generic terminal-agent core: structured
+  actions, model adapters, memory, runners, pyte-backed observations, and
+  telnet/local-PTY transports.
+- `bbs_gym` contains the Synchronet/BBS shell: CP437 defaults, BBS/TW2 prompt
+  profiles, activity profiles, Docker config, and CLI commands.
 - Raw CP437/ANSI bytes are stored for replay/debugging.
-- `strip_ansi()` gives a rough plain-text observation.
-- `BbsGym` manages multiple named agent sessions.
+- `observe_turn()` uses quiescence-first turn boundaries with prompt matches
+  recorded as guardrail metadata.
+- `BbsGym` manages multiple named BBS agent sessions.
 
 Near-term improvements:
 
-- Use `pyte` as a virtual terminal screen so observations reflect cursor
-  movement, cleared regions, and overwritten ANSI menu text.
 - Add rlogin sessions for automated benchmark runs.
-- Add quiescence-based turn boundaries instead of fixed sleep windows, with
-  prompt matches recorded as context and guardrails.
+- Add explicit node allocation once rlogin can pin sessions to Synchronet
+  nodes.
 
 ## Observation Model
 
@@ -88,6 +91,7 @@ Suggested structured observation:
     "stable_ms": 350,
     "matched_prompt": "tw2-command",
     "ready_reason": "stable",
+    "metadata": {"requested_node": 1, "transport": "telnet"},
     "timestamp": "...",
 }
 ```

@@ -1,5 +1,5 @@
-from bbs_gym.memory import JsonMemoryStore
-from bbs_gym.models import MemoryPatch
+from terminal_agent.memory import JsonMemoryStore
+from terminal_agent.models import MemoryPatch
 
 
 def test_memory_store_dedupes_and_caps_lists(tmp_path):
@@ -18,4 +18,3 @@ def test_memory_store_merges_nested_dicts(tmp_path):
     merged = store.save_patch("agent", MemoryPatch({"notes": {"tw2": ["help", "trade"]}}))
 
     assert merged == {"notes": {"tw2": ["help", "trade"]}}
-

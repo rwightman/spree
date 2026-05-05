@@ -1,8 +1,8 @@
-"""Small telnet client tuned for BBS automation.
+"""Small telnet client for terminal automation.
 
 This intentionally avoids third-party dependencies. It handles enough telnet
-option negotiation to keep classic BBS servers talking while preserving the
-raw CP437/ANSI stream for transcripts.
+option negotiation to keep classic terminal servers talking while preserving
+the raw stream for transcripts.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .base import SessionDisconnected
+
 IAC = 255
 DONT = 254
 DO = 253
@@ -22,16 +24,13 @@ SB = 250
 SE = 240
 
 
-class SessionDisconnected(RuntimeError):
-    """Raised when the remote terminal connection closes."""
-
-
 @dataclass
 class TelnetSession:
     host: str = "127.0.0.1"
     port: int = 2323
     timeout: float = 10.0
     transcript_path: Path | None = None
+    encoding: str = "utf-8"
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
     _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
     _closed_by_peer: bool = field(default=False, init=False, repr=False)
@@ -56,7 +55,7 @@ class TelnetSession:
         self.close()
 
     def send(self, text: str, newline: bool = True) -> None:
-        payload = text.encode("cp437", errors="replace")
+        payload = text.encode(self.encoding)
         if newline:
             payload += b"\r\n"
         self.send_bytes(payload)

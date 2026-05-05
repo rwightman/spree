@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from bbs_gym.actions import Action
 from bbs_gym.activities import TW2_ENTRY_PROFILE
-from bbs_gym.memory import JsonMemoryStore
-from bbs_gym.models import ScriptedModelAdapter
-from bbs_gym.runner import ActivityBudget, ActivityProfile, ActivityRunner
-from bbs_gym.telnet import SessionDisconnected
-from bbs_gym.terminal import Observation
+from terminal_agent.actions import Action
+from terminal_agent.memory import JsonMemoryStore
+from terminal_agent.models import ScriptedModelAdapter
+from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from terminal_agent.terminal import Observation
+from terminal_agent.transports.base import SessionDisconnected
 
 
 class FakeAgent:
@@ -18,8 +18,6 @@ class FakeAgent:
     def observe_turn(self, **_kwargs):
         return Observation(
             agent_id=self.agent_id,
-            node=1,
-            requested_node=1,
             pretty_screen="Command:",
             model_text="Command:",
             new_text="Command:",
@@ -32,6 +30,7 @@ class FakeAgent:
             bytes_read=8,
             timed_out=False,
             timestamp=0.0,
+            metadata={"node": 1, "requested_node": 1},
         )
 
     def act_action(self, action: Action):
@@ -49,8 +48,6 @@ class LongScreenAgent(FakeAgent):
         return Observation(
             **{
                 **observation.as_dict(),
-                "requested_node": observation.requested_node,
-                "node": observation.node,
                 "cursor": tuple(observation.cursor),
                 "transcript_path": Path(observation.as_dict()["transcript_path"]),
                 "model_text": "X" * 200,

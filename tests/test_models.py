@@ -1,4 +1,4 @@
-from bbs_gym.models import AnthropicAdapter, CompactionPrompt, ModelMessage, SessionSummary, TextChatAdapter
+from terminal_agent.models import AnthropicAdapter, CompactionPrompt, ModelMessage, SessionSummary, TextChatAdapter
 
 
 def test_session_summary_parses_structured_mapping():
@@ -39,7 +39,7 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
         captured["timeout"] = timeout
         return {"content": [{"type": "text", "text": '{"action":"wait"}'}]}
 
-    monkeypatch.setattr("bbs_gym.models._post_json", fake_post_json)
+    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
     adapter = AnthropicAdapter(model="test-model", api_key="key")
 
     adapter.chat([ModelMessage("system", "stable schema"), ModelMessage("user", "screen")])

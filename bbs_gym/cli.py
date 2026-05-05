@@ -7,26 +7,27 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from terminal_agent.ansi import strip_ansi
+from terminal_agent.models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from terminal_agent.terminal import TerminalScreen, TurnObserver
+from terminal_agent.transports.telnet import TelnetSession
+
 from .activities import activity_profile
 from .env import BbsGym
-from .models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
-from .ansi import strip_ansi
 from .profiles import BBS_PROFILE, TW2_PROFILE
-from .runner import ActivityBudget, ActivityProfile, ActivityRunner
-from .telnet import TelnetSession
-from .terminal import TurnObserver
 
 
 def smoke(args: argparse.Namespace) -> int:
     transcript = Path(args.transcript) if args.transcript else None
     try:
-        with TelnetSession(args.host, args.port, args.timeout, transcript) as session:
+        with TelnetSession(args.host, args.port, args.timeout, transcript, encoding="cp437") as session:
             data = session.read(args.seconds)
     except OSError as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
-    text = strip_ansi(data)
+    text = strip_ansi(data, encoding="cp437")
     print(text[-args.tail :])
     return 0 if data else 2
 
@@ -35,8 +36,19 @@ def observe_turn(args: argparse.Namespace) -> int:
     transcript = Path(args.transcript) if args.transcript else None
     profile = TW2_PROFILE if args.profile == "tw2" else BBS_PROFILE
     try:
-        with TelnetSession(args.host, args.port, args.timeout, transcript) as session:
-            observer = TurnObserver(args.agent_id, session, profile=profile)
+        with TelnetSession(args.host, args.port, args.timeout, transcript, encoding="cp437") as session:
+            observer = TurnObserver(
+                args.agent_id,
+                session,
+                terminal=TerminalScreen(encoding=session.encoding),
+                profile=profile,
+                metadata={
+                    "transport": "telnet",
+                    "host": args.host,
+                    "port": args.port,
+                    "encoding": session.encoding,
+                },
+            )
             observation = observer.observe_turn(
                 timeout=args.timeout,
                 stable_ms=args.stable_ms,

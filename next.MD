@@ -21,8 +21,10 @@ as users do.
 Already present:
 
 - Dockerized Synchronet BBS.
-- Telnet session handling.
-- `pyte`-backed terminal rendering.
+- Generic `terminal_agent` core for actions, observations, runners, memory,
+  model adapters, and transports.
+- Telnet and local PTY session handling.
+- `pyte`-backed terminal rendering with configurable encoding.
 - `observe_turn()` with quiescence-first readiness.
 - Raw transcripts.
 - Structured observations with:
@@ -34,6 +36,8 @@ Already present:
   - `ready_reason`,
   - transcript path.
 - Basic prompt profiles for Synchronet BBS and TW2.
+- BBS-specific `bbs_gym` shell for Synchronet CP437 defaults, profiles,
+  activities, Docker config, and CLI commands.
 
 Missing:
 

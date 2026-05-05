@@ -83,7 +83,7 @@ class ActionPolicy:
     max_line_chars: int = 240
     max_lines: int = 20
     allow_control_chars: bool = False
-    require_cp437: bool = True
+    require_encoding: str | None = None
 
     def validate(self, action: Action) -> Action:
         if action.action not in self.allowed_actions:
@@ -118,11 +118,13 @@ class ActionPolicy:
             raise ActionError(f"{label} too long: {len(text)} > {max_chars}")
         if not self.allow_control_chars and CONTROL_RE.search(text):
             raise ActionError(f"{label} contains disallowed control characters")
-        if self.require_cp437:
+        if self.require_encoding:
             try:
-                text.encode("cp437")
+                text.encode(self.require_encoding)
             except UnicodeEncodeError as exc:
-                raise ActionError(f"{label} contains characters that cannot be encoded as CP437") from exc
+                raise ActionError(
+                    f"{label} contains characters that cannot be encoded as {self.require_encoding}"
+                ) from exc
 
 
 def parse_action(text: str, policy: ActionPolicy | None = None) -> Action:

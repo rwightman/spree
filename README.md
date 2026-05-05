@@ -12,6 +12,10 @@ model, timing strategy, and multi-agent plan.
 - BBS runtime: Synchronet in Docker, with persistent state in `runtime/sbbs`.
 - Local service ports: telnet `127.0.0.1:2323`, web `127.0.0.1:8080`,
   rlogin `127.0.0.1:2513`, NNTP `127.0.0.1:1119`, IRC `127.0.0.1:6667`.
+- Terminal-agent core: `terminal_agent` owns actions, observations, model
+  adapters, memory, runners, and transports.
+- BBS shell: `bbs_gym` owns Synchronet defaults, CP437 policy, BBS/TW2 prompt
+  profiles, activities, and CLI commands.
 - Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts.
 - Door strategy:
   - Use Synchronet's bundled JS doors first for immediate smoke tests.
@@ -102,6 +106,12 @@ python -m bbs_gym.cli smoke \
 
 The transcript is stored as raw CP437/ANSI bytes. The CLI prints a plain-text
 view with ANSI control sequences removed.
+
+The generic PTY path can be checked without the BBS:
+
+```bash
+python -m examples.shell_agent
+```
 
 ## Notes
 

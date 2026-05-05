@@ -18,9 +18,8 @@ ANSI_RE = re.compile(
 )
 
 
-def strip_ansi(data: bytes) -> str:
-    """Return CP437 text with terminal control sequences removed."""
+def strip_ansi(data: bytes, encoding: str = "utf-8") -> str:
+    """Return decoded text with terminal control sequences removed."""
 
     clean = ANSI_RE.sub(b"", data)
-    return clean.decode("cp437", errors="replace")
-
+    return clean.decode(encoding, errors="replace")

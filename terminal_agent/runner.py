@@ -1,4 +1,4 @@
-"""Single-agent activity runner for BBS gym sessions."""
+"""Single-agent activity runner for terminal sessions."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent import TerminalAgent
 from .actions import Action, ActionError, ActionPolicy
 from .memory import JsonMemoryStore
 from .models import CompactionPrompt, DecisionPrompt, MemoryCommitPrompt, ModelAdapter, SessionSummary
-from .telnet import SessionDisconnected
+from .transports.base import SessionDisconnected
 from .terminal import Observation
 
 
@@ -123,7 +124,7 @@ class ActivityRunner:
         self.memory_store = memory_store or JsonMemoryStore()
         self.log_path = Path(log_path) if log_path else None
 
-    def run(self, agent: Any, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
+    def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
         budget = budget or ActivityBudget()
         agent_id = getattr(agent, "agent_id", "agent")
         campaign_memory = self.memory_store.load(agent_id)
@@ -215,7 +216,7 @@ class ActivityRunner:
     ) -> DecisionPrompt:
         system = "\n".join(
             [
-                "You are controlling a BBS terminal session.",
+                "You are controlling an interactive terminal session.",
                 "You may make mistakes and recover from them.",
                 "Return only a JSON action object.",
                 ACTION_SCHEMA_TEXT,
@@ -282,7 +283,7 @@ class ActivityRunner:
     ) -> SessionSummary:
         prompt = CompactionPrompt(
             system=(
-                "Compact older BBS activity into a conservative JSON session summary. "
+                "Compact older terminal activity into a conservative JSON session summary. "
                 "Return only JSON with keys: current_state, last_error, open_subgoals, "
                 "discovered_facts, failed_actions, strategy_notes. Each list field must "
                 "be a list of strings."
@@ -307,7 +308,7 @@ class ActivityRunner:
         observation: Observation,
     ):
         prompt = MemoryCommitPrompt(
-            system="Return a JSON memory patch for durable BBS campaign memory.",
+            system="Return a JSON memory patch for durable campaign memory.",
             user="\n\n".join(
                 [
                     f"Existing campaign memory:\n{json.dumps(campaign_memory, indent=2, sort_keys=True)}",

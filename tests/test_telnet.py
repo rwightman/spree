@@ -1,5 +1,5 @@
-from bbs_gym.ansi import strip_ansi
-from bbs_gym.telnet import DO, IAC, WILL, TelnetSession
+from terminal_agent.ansi import strip_ansi
+from terminal_agent.transports.telnet import DO, IAC, WILL, TelnetSession
 
 
 class FakeSocket:
@@ -11,7 +11,7 @@ class FakeSocket:
 
 
 def test_strip_ansi_decodes_cp437():
-    assert strip_ansi(b"\x1b[31mHi \xb1\x1b[0m") == "Hi \u2592"
+    assert strip_ansi(b"\x1b[31mHi \xb1\x1b[0m", encoding="cp437") == "Hi \u2592"
 
 
 def test_telnet_negotiation_is_removed_from_application_stream():
@@ -22,4 +22,3 @@ def test_telnet_negotiation_is_removed_from_application_stream():
 
     assert data == b"Hello"
     assert bytes(session._sock.sent) == bytes([IAC, 252, 1, IAC, 254, 3])
-

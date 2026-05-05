@@ -30,8 +30,9 @@ with BbsGym() as gym:
 `observe_turn()` is the preferred model-facing read path. It updates a virtual
 terminal screen, waits for screen stability, and returns structured state such
 as `model_text`, `pretty_screen`, cursor position, matched prompt, readiness
-reason, node, and transcript path. Prompt matches are guardrail metadata by
-default; they are not required for the harness to proceed.
+reason, metadata, and transcript path. Prompt matches are guardrail metadata by
+default; they are not required for the harness to proceed. BBS node requests are
+recorded in observation metadata until rlogin-backed node pinning lands.
 
 For a command-line smoke test:
 
@@ -42,12 +43,14 @@ python -m bbs_gym.cli observe-turn --timeout 5 --stable-ms 300
 ## Activity Runner
 
 The next layer is `ActivityRunner`, which wraps repeated observe/decide/act
-steps in a bounded phase:
+steps in a bounded phase. It consumes any object implementing the
+`terminal_agent.agent.TerminalAgent` protocol: `agent_id`, `observe_turn()`,
+and `act_action()`:
 
 ```python
 from bbs_gym.env import BbsGym
-from bbs_gym.models import OpenAICompatibleAdapter
-from bbs_gym.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from terminal_agent.models import OpenAICompatibleAdapter
+from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
 
 model = OpenAICompatibleAdapter(
     base_url="http://localhost:11434/v1",
@@ -115,6 +118,10 @@ python -m bbs_gym.cli run-activity \
   --max-decision-ticks 50
 ```
 
+For a non-BBS PTY smoke test, `python -m examples.shell_agent` starts
+deterministic `bash --norc --noprofile` with a fixed prompt and drives it
+through the same core terminal-agent classes.
+
 Session compaction now expects structured JSON rather than prose:
 
 ```json
@@ -130,11 +137,11 @@ Session compaction now expects structured JSON rather than prose:
 
 ## Next Automation Milestones
 
-1. Create deterministic user accounts for agents.
-2. Script login and menu navigation to the door menu.
-3. Add a `step(action) -> observation` wrapper around `TelnetSession`.
+1. Prove the TW2 entry activity against a live Synchronet container.
+2. Add rlogin transport for deterministic login and node assignment.
+3. Create deterministic user accounts for agents.
 4. Add per-game reset hooks.
-5. Run two or more agents concurrently against separate BBS accounts.
+5. Run two or more agents through alternating campaign turns.
 
 ## Operational Constraints
 
@@ -142,3 +149,5 @@ Session compaction now expects structured JSON rather than prose:
 - Give each agent a unique account; many door games key state by user alias.
 - Preserve raw transcripts for debugging. Rendered plain text loses control
   codes, cursor movement, and some ANSI art context.
+- Keep generic terminal-agent code in `terminal_agent`; keep BBS policy,
+  Synchronet profiles, and campaign orchestration in `bbs_gym`.

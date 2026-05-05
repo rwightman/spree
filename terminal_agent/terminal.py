@@ -6,12 +6,13 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pyte
 
 from .ansi import strip_ansi
 from .profiles import DEFAULT_PROFILE, PromptProfile
-from .telnet import TelnetSession
+from .transports.base import TerminalSession
 
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -23,8 +24,6 @@ class Observation:
     """Rendered state returned to a model or runner."""
 
     agent_id: str
-    node: int | None
-    requested_node: int | None
     pretty_screen: str
     model_text: str
     new_text: str
@@ -37,12 +36,11 @@ class Observation:
     bytes_read: int
     timed_out: bool
     timestamp: float
+    metadata: dict[str, Any]
 
     def as_dict(self) -> dict[str, object]:
         return {
             "agent_id": self.agent_id,
-            "node": self.node,
-            "requested_node": self.requested_node,
             "pretty_screen": self.pretty_screen,
             "model_text": self.model_text,
             "new_text": self.new_text,
@@ -55,15 +53,17 @@ class Observation:
             "bytes_read": self.bytes_read,
             "timed_out": self.timed_out,
             "timestamp": self.timestamp,
+            "metadata": self.metadata,
         }
 
 
 class TerminalScreen:
-    """Headless ANSI/CP437 screen backed by pyte."""
+    """Headless terminal screen backed by pyte."""
 
-    def __init__(self, columns: int = 80, lines: int = 24) -> None:
+    def __init__(self, columns: int = 80, lines: int = 24, encoding: str = "utf-8") -> None:
         self.columns = columns
         self.lines = lines
+        self.encoding = encoding
         self.screen = pyte.Screen(columns, lines)
         self.stream = pyte.Stream(self.screen)
 
@@ -73,7 +73,7 @@ class TerminalScreen:
 
     def feed(self, data: bytes) -> bool:
         before = self.signature()
-        text = data.decode("cp437", errors="replace").replace("\ufeff", "")
+        text = data.decode(self.encoding, errors="replace").replace("\ufeff", "")
         self.stream.feed(text)
         return self.signature() != before
 
@@ -100,18 +100,16 @@ class TurnObserver:
     def __init__(
         self,
         agent_id: str,
-        session: TelnetSession,
+        session: TerminalSession,
         terminal: TerminalScreen | None = None,
         profile: PromptProfile = DEFAULT_PROFILE,
-        node: int | None = None,
-        requested_node: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.session = session
         self.terminal = terminal or TerminalScreen()
         self.profile = profile
-        self.node = node
-        self.requested_node = requested_node
+        self.metadata = metadata or {}
 
     def feed(self, data: bytes) -> bool:
         return self.terminal.feed(data)
@@ -164,12 +162,10 @@ class TurnObserver:
         matched_prompt: str | None,
         ready_reason: str,
     ) -> Observation:
-        new_text = strip_ansi(bytes(new_data)).replace("\ufeff", "")
+        new_text = strip_ansi(bytes(new_data), encoding=self.terminal.encoding).replace("\ufeff", "")
         new_text = _CONTROL_RE.sub("", new_text)
         return Observation(
             agent_id=self.agent_id,
-            node=self.node,
-            requested_node=self.requested_node,
             pretty_screen=self.terminal.pretty_screen(),
             model_text=self.terminal.model_text(),
             new_text=new_text,
@@ -182,4 +178,5 @@ class TurnObserver:
             bytes_read=len(new_data),
             timed_out=ready_reason == "timeout",
             timestamp=time.time(),
+            metadata=dict(self.metadata),
         )

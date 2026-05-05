@@ -1,6 +1,6 @@
 import pytest
 
-from bbs_gym.actions import ActionError, ActionPolicy, parse_action
+from terminal_agent.actions import ActionError, ActionPolicy, parse_action
 
 
 def test_parse_action_accepts_json_fence():
@@ -31,8 +31,10 @@ def test_action_policy_rejects_control_chars_by_default():
 
 
 def test_action_policy_rejects_text_that_cannot_encode_to_cp437():
+    policy = ActionPolicy(require_encoding="cp437")
+
     with pytest.raises(ActionError):
-        parse_action('{"action": "send", "text": "hello 😀"}')
+        parse_action('{"action": "send", "text": "hello 😀"}', policy)
 
 
 def test_send_raw_rejects_newline_field():
