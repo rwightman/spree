@@ -139,6 +139,27 @@ def test_activity_runner_repairs_invalid_json_once(tmp_path):
     assert result.steps[0].validation["invalid_responses"][0]["response"] == "not json"
 
 
+def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(
+        [
+            '<think>hang up cleanly</think>\n{"action": "hangup"}',
+            '{"durable_facts": ["Ended cleanly."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test response traces"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=5))
+    model_response = result.steps[0].validation["model_response"]
+
+    assert result.stop_reason == "hangup"
+    assert model_response["response"] == '<think>hang up cleanly</think>\n{"action": "hangup"}'
+    assert model_response["parsed_response"] == '{"action": "hangup"}'
+
+
 def test_activity_runner_reports_disconnect(tmp_path):
     runner = ActivityRunner(
         ActivityProfile(name="bbs-menu", objective="test disconnect"),

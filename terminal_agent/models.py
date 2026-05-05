@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Protocol
 
 from .actions import Action, ActionPolicy, parse_action
@@ -111,33 +113,50 @@ class TextChatAdapter:
 
     name: str
     last_response: str = ""
+    last_parsed_response: str = ""
+    output_filters: tuple[Callable[[str], str], ...] | None = None
 
     def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
         self.last_response = self.chat(prompt.messages())
-        return parse_action(self.last_response, policy)
+        self.last_parsed_response = self._filter_output(self.last_response).strip()
+        return parse_action(self.last_parsed_response, policy)
 
     def compact(self, prompt: CompactionPrompt) -> SessionSummary:
         self.last_response = self.chat(prompt.messages()).strip()
+        self.last_parsed_response = self._filter_output(self.last_response).strip()
         try:
-            data = json.loads(self.last_response)
+            data = json.loads(self.last_parsed_response)
         except json.JSONDecodeError:
-            data = {"current_state": self.last_response}
+            data = {"current_state": self._fallback_output_text()}
         if not isinstance(data, dict):
-            data = {"current_state": self.last_response}
+            data = {"current_state": self._fallback_output_text()}
         return SessionSummary.from_mapping(data)
 
     def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch:
         self.last_response = self.chat(prompt.messages()).strip()
+        self.last_parsed_response = self._filter_output(self.last_response).strip()
         try:
-            data = json.loads(self.last_response)
+            data = json.loads(self.last_parsed_response)
         except json.JSONDecodeError:
-            data = {"summary": self.last_response}
+            data = {"summary": self._fallback_output_text()}
         if not isinstance(data, dict):
-            data = {"summary": self.last_response}
+            data = {"summary": self._fallback_output_text()}
         return MemoryPatch(data)
 
     def chat(self, messages: list[ModelMessage]) -> str:
         raise NotImplementedError
+
+    def _filter_output(self, text: str) -> str:
+        filtered = text
+        output_filters = DEFAULT_OUTPUT_FILTERS if self.output_filters is None else self.output_filters
+        for output_filter in output_filters:
+            filtered = output_filter(filtered)
+        return filtered
+
+    def _fallback_output_text(self) -> str:
+        if self.last_parsed_response or self.last_parsed_response != self.last_response:
+            return self.last_parsed_response
+        return self.last_response
 
 
 class OpenAICompatibleAdapter(TextChatAdapter):
@@ -152,6 +171,8 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             timeout: float = 120.0,
             temperature: float = 0.2,
             max_tokens: int = 512,
+            extra_body: dict[str, object] | None = None,
+            output_filters: tuple[Callable[[str], str], ...] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -160,6 +181,8 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.extra_body = dict(extra_body or {})
+        self.output_filters = output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
         payload = {
@@ -168,6 +191,7 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        payload.update(self.extra_body)
         response = _post_json(
             f"{self.base_url}/chat/completions",
             payload,
@@ -257,6 +281,23 @@ class ScriptedModelAdapter(TextChatAdapter):
         if not self.responses:
             return '{"action": "wait"}'
         return self.responses.pop(0)
+
+
+REASONING_BLOCK_RE = re.compile(
+    r"<(think|thinking|reasoning|analysis)\b[^>]*>.*?</\1>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
+UNCLOSED_REASONING_BLOCK_RE = re.compile(
+    r"<(think|thinking|reasoning|analysis)\b[^>]*>.*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def strip_reasoning_blocks(text: str) -> str:
+    return UNCLOSED_REASONING_BLOCK_RE.sub("", REASONING_BLOCK_RE.sub("", text))
+
+
+DEFAULT_OUTPUT_FILTERS = (strip_reasoning_blocks,)
 
 
 def _post_json(

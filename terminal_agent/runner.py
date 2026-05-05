@@ -240,7 +240,7 @@ class ActivityRunner:
         invalid_responses: list[dict[str, str]] = []
         try:
             action = model.decide(prompt, self.profile.action_policy)
-            return action, {"accepted": True, "notes": []}
+            return action, {"accepted": True, "notes": [], "model_response": self._model_response_record(model)}
         except ActionError as first_exc:
             first_error = str(first_exc)
             invalid_responses.append(self._invalid_response_record(model, "initial", first_error))
@@ -253,6 +253,7 @@ class ActivityRunner:
                 return action, {
                     "accepted": True,
                     "notes": [f"repaired_after_error: {first_error}"],
+                    "model_response": self._model_response_record(model),
                     "invalid_responses": invalid_responses,
                 }
             except ActionError as retry_exc:
@@ -325,11 +326,21 @@ class ActivityRunner:
         return "(empty)" if summary.is_empty() else json.dumps(summary.to_dict(), indent=2, sort_keys=True)
 
     def _invalid_response_record(self, model: ModelAdapter, attempt: str, error: str) -> dict[str, str]:
+        record = self._model_response_record(model)
+        record.update(
+            {
+                "attempt": attempt,
+                "error": error,
+            }
+        )
+        return record
+
+    def _model_response_record(self, model: ModelAdapter) -> dict[str, str]:
         raw = getattr(model, "last_response", "")
+        parsed = getattr(model, "last_parsed_response", raw)
         return {
-            "attempt": attempt,
-            "error": error,
             "response": self._truncate(raw, 2_000),
+            "parsed_response": self._truncate(parsed, 2_000),
         }
 
     def _truncate(self, text: str, limit: int) -> str:
