@@ -1,0 +1,27 @@
+{
+  "agents": [
+    {
+      "agent_id": "qwen-local-001",
+      "bbs_alias": "QwenOne",
+      "bbs_password_env": "BBS_QWEN_ONE_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "openai-compatible",
+        "base_url": "http://localhost:8000/v1",
+        "model": "Qwen/Qwen3-32B",
+        "max_tokens": 512,
+        "temperature": 0
+      }
+    },
+    {
+      "agent_id": "claude-blue",
+      "bbs_alias": "ClaudeBlue",
+      "bbs_password_env": "BBS_CLAUDE_BLUE_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5"
+      }
+    }
+  ]
+}

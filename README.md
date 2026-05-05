@@ -16,7 +16,8 @@ model, timing strategy, and multi-agent plan.
   adapters, memory, runners, and transports.
 - BBS shell: `bbs_gym` owns Synchronet defaults, CP437 policy, BBS/TW2 prompt
   profiles, activities, and CLI commands.
-- Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts.
+- Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
+  and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
 - Door strategy:
   - Use Synchronet's bundled JS doors first for immediate smoke tests.
   - Stage original DOS doors from `doors/bre` and `doors/tw2002`.
@@ -51,6 +52,26 @@ For a shell inside the BBS container:
 ```bash
 make shell
 ```
+
+## Synchronet Docker Runtime
+
+The default Compose service runs `bbsio/synchronet:3.19c` and mounts persistent
+BBS state at `runtime/sbbs`. Ports are bound to loopback unless `BBS_HOST` is
+changed in `.env`.
+
+Common operations:
+
+```bash
+docker compose up -d
+docker compose ps
+docker compose logs -f --tail=200 bbs
+docker compose down
+```
+
+The exposed local services are telnet `127.0.0.1:2323`, rlogin
+`127.0.0.1:2513`, web `127.0.0.1:8080`, NNTP `127.0.0.1:1119`, and IRC
+`127.0.0.1:6667`. Telnet is useful for human-realistic smoke tests; rlogin is
+the preferred automation path once agent accounts are provisioned.
 
 ## Immediate Playable TradeWars-Like Door
 
@@ -111,6 +132,47 @@ The generic PTY path can be checked without the BBS:
 
 ```bash
 python -m examples.shell_agent
+```
+
+## Local vLLM OpenAI-Compatible Server
+
+The OpenAI-compatible adapter works with local servers such as vLLM, Ollama, and
+llama.cpp. A minimal vLLM Docker server for a two-GPU Linux box looks like:
+
+```bash
+docker run --rm --gpus all --ipc=host --shm-size 16g \
+  -p 127.0.0.1:8000:8000 \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  vllm/vllm-openai:latest \
+  --model Qwen/Qwen3-32B \
+  --tensor-parallel-size 2 \
+  --dtype auto
+```
+
+Adjust `--model` and `--tensor-parallel-size` for the local hardware. The
+example agent registry points `qwen-local-001` at `http://localhost:8000/v1`.
+For Qwen-style models that emit `<think>` blocks, raw model responses are kept
+in the JSONL trace while the action loop parses a filtered response.
+
+## Agent Accounts
+
+Copy the example identity registry and put real passwords in environment
+variables or an ignored local config:
+
+```bash
+cp config/agents.example.json config/agents.local.json
+python -m bbs_gym.cli accounts list
+python -m bbs_gym.cli accounts check
+python -m bbs_gym.cli accounts provision
+```
+
+`accounts provision` creates or updates Synchronet users through `jsexec`.
+Automated runs can then use deterministic rlogin identity:
+
+```bash
+python -m bbs_gym.cli run-activity \
+  --transport rlogin \
+  --agent-id qwen-local-001
 ```
 
 ## Notes

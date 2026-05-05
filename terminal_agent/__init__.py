@@ -13,6 +13,7 @@ __all__ = [
     "OpenAICompatibleAdapter",
     "PromptProfile",
     "PtySession",
+    "RLoginSession",
     "ScriptedModelAdapter",
     "SessionDisconnected",
     "SHELL_PROFILE",
@@ -34,4 +35,5 @@ from .runner import ActivityBudget, ActivityProfile, ActivityRunner
 from .terminal import Observation, TerminalScreen, TurnObserver
 from .transports.base import SessionDisconnected
 from .transports.pty import PtySession
+from .transports.rlogin import RLoginSession
 from .transports.telnet import TelnetSession

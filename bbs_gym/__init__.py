@@ -2,6 +2,9 @@
 
 __all__ = [
     "BbsGym",
+    "AgentRecord",
+    "AgentRegistry",
+    "AccountConfigError",
     "BBS_MAIN_MENU_PROFILE",
     "TW2_ENTRY_PROFILE",
     "TW2_GAME_PROFILE",
@@ -10,6 +13,7 @@ __all__ = [
     "activity_profile",
 ]
 
+from .accounts import AccountConfigError, AgentRecord, AgentRegistry
 from .activities import BBS_MAIN_MENU_PROFILE, TW2_ENTRY_PROFILE, TW2_GAME_PROFILE, activity_profile
 from .env import BbsGym
 from .profiles import BBS_PROFILE, TW2_PROFILE

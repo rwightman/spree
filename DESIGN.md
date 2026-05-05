@@ -30,9 +30,41 @@ model/harness
 - Agent transcripts: `runtime/transcripts`.
 - Initial game target: Synchronet's bundled JavaScript `tw2` door.
 - Original DOS door target: BRE and TW2002 via the optional DOSEMU image.
+- Optional local model server: vLLM, Ollama, or llama.cpp through an
+  OpenAI-compatible `/v1/chat/completions` endpoint.
 
 Synchronet was chosen because it is actively maintained, has Docker support,
 ships with useful JavaScript doors, and supports classic BBS door dropfiles.
+
+## Package Boundary
+
+The project is split into a reusable terminal-agent core and a BBS-specific
+shell.
+
+`terminal_agent` owns behavior that applies to any interactive terminal target:
+
+- structured terminal actions and validation,
+- model adapters for OpenAI-compatible endpoints, Anthropic, and scripted tests,
+- raw and parsed model-response tracking,
+- JSON-backed memory, compaction, and memory commits,
+- pyte-backed terminal rendering and quiescence observation,
+- bounded activity runners,
+- telnet, rlogin, and local PTY transports,
+- generic prompt profiles such as stability-only and shell prompts.
+
+`bbs_gym` owns Synchronet and BBS policy:
+
+- Docker/Compose runtime defaults,
+- CP437 defaults and BBS prompt profiles,
+- BBS and TW2 activity profiles,
+- agent account registry and Synchronet user provisioning,
+- `BbsGym` connection wiring,
+- future campaign/match scheduling, door resets, and score extraction.
+
+The split is intentional. The terminal boundary, action schema, quiescence
+observer, and model loop are useful for shells, SSH sessions, TUI applications,
+and terminal games outside BBSs. The campaign layer is more BBS-shaped and
+should stay in `bbs_gym` until another domain needs it.
 
 ## Agent Interface
 
@@ -53,19 +85,19 @@ Current implementation:
 
 - `terminal_agent` contains the generic terminal-agent core: structured
   actions, model adapters, memory, runners, pyte-backed observations, and
-  telnet/local-PTY transports.
+  telnet/rlogin/local-PTY transports.
 - `bbs_gym` contains the Synchronet/BBS shell: CP437 defaults, BBS/TW2 prompt
-  profiles, activity profiles, Docker config, and CLI commands.
+  profiles, activity profiles, account provisioning, Docker config, and CLI
+  commands.
 - Raw CP437/ANSI bytes are stored for replay/debugging.
 - `observe_turn()` uses quiescence-first turn boundaries with prompt matches
   recorded as guardrail metadata.
-- `BbsGym` manages multiple named BBS agent sessions.
-
-Near-term improvements:
-
-- Add rlogin sessions for automated benchmark runs.
-- Add explicit node allocation once rlogin can pin sessions to Synchronet
-  nodes.
+- `BbsGym` maps `agent_id` to an optional registry record containing the BBS
+  alias, password source, model config, and metadata.
+- Rlogin is available for deterministic automated login after accounts are
+  provisioned.
+- Requested node values are recorded in observation metadata; true Synchronet
+  node pinning/allocation remains a later BBS-layer feature.
 
 ## Observation Model
 
@@ -171,19 +203,91 @@ than becoming the only way to make progress.
 
 ## Action Model
 
-Actions should be terminal input, not game commands.
+Actions are terminal input, not privileged game commands. The model returns one
+JSON action per decision tick so the harness can validate mechanics, log
+behavior, and replay runs without narrowing the BBS input space too much.
 
 Examples:
 
-```python
-agent.act("agent001")
-agent.act("P")
-agent.act("1")
-agent.act("\x1b", newline=False)
+```json
+{"action": "send", "text": "P"}
 ```
 
-The harness can expose convenience helpers for Enter, Escape, arrow keys, and
-menu macros, but these should still compile down to terminal keystrokes.
+```json
+{"action": "send_raw", "text": "\u001b"}
+```
+
+```json
+{
+  "action": "send_multiline",
+  "lines": [
+    "Subject: Trade route notes",
+    "",
+    "I found a decent early route near sector 42."
+  ]
+}
+```
+
+The action payload may contain open-ended text when the current activity allows
+it, such as message-board posts or chat. Validation rejects malformed JSON,
+encoding failures, overlong input, and disallowed action types. It should not
+reject ordinary game mistakes such as wrong menu choices, invalid commands, or
+bad quantities; those should flow through to the BBS and be recoverable on later
+decision ticks.
+
+## Model Responses And Reasoning Traces
+
+Model adapters are stateless: each call receives the full prompt context the
+harness wants the provider to see. The harness owns memory and compaction rather
+than relying on provider-side memory.
+
+For text-generation backends, the adapter keeps two versions of each response:
+
+- the raw response, preserved in JSONL traces for debugging,
+- the parsed response, after provider/model-specific output filters.
+
+The default output filter removes closed or truncated reasoning blocks such as
+`<think>...</think>`, `<thinking>...</thinking>`, `<reasoning>...</reasoning>`,
+and `<analysis>...</analysis>` before action parsing. This lets Qwen-style local
+models expose reasoning in traces without feeding hidden reasoning text back
+into the terminal action parser.
+
+Provider-specific optimizations are allowed when they do not change the
+internal contract. Anthropic prompt caching is enabled for the stable system
+prompt/action schema. OpenAI-compatible local servers can receive extra request
+body fields from the agent registry when needed.
+
+## Runner, Clocks, And Memory
+
+The model loop has three timing layers:
+
+- I/O tick: read bytes, update the virtual terminal, wait for quiescence, and
+  produce an observation.
+- Decision tick: build a prompt, call the model, parse/validate one JSON action,
+  send terminal input, and record a step.
+- Campaign turn: a higher-level schedule such as one social phase, one door-game
+  session, one BBS day, or one match round.
+
+`ActivityRunner` currently implements bounded single-agent activity sessions on
+top of the first two clocks. A future campaign runner should compose activities
+into fair model-vs-model schedules instead of replacing `ActivityRunner`.
+
+Memory is harness-owned:
+
+- raw logs and transcripts are permanent audit artifacts,
+- recent steps stay in the decision prompt for short-horizon recovery,
+- structured session summaries compact older in-activity context,
+- durable campaign memory is committed only at activity boundaries.
+
+Session summaries use a small JSON shape with fields such as `current_state`,
+`last_error`, `open_subgoals`, `discovered_facts`, `failed_actions`, and
+`strategy_notes`. Campaign memory is also JSON and is portable across model
+adapters. For fair scoring, model swaps should happen only at campaign-turn
+boundaries and must be recorded in match metadata.
+
+Malformed JSON receives one repair attempt with the validation error and action
+schema. If repair fails, the failure consumes a decision tick and the raw bad
+model response is preserved in the trace.
 
 ## Connection And Login
 
@@ -196,10 +300,12 @@ identity during connection setup, avoiding fragile new-user and login prompts.
 That makes runs easier to reproduce across Synchronet versions and local config
 changes.
 
-Planned transports:
+Implemented transports:
 
 - `telnet`: realistic user path, prompt-driven login required.
 - `rlogin`: default automation path, pre-provisioned user identity.
+- `pty`: generic local subprocess path used to validate the terminal core
+  outside BBSs.
 
 The transport choice should be explicit in `BbsGym.connect(...)`.
 
@@ -208,13 +314,16 @@ The transport choice should be explicit in `BbsGym.connect(...)`.
 Agents need deterministic BBS identities because door games usually key player
 state by BBS user number or alias.
 
-Planned account flow:
+Implemented account flow:
 
-1. Generate account definitions for `agent001`, `agent002`, etc.
-2. Provision those accounts through Synchronet tooling or a controlled setup
-   script.
-3. Store generated credentials under ignored runtime state.
-4. Script login for each agent before handing control to the model.
+1. Define agent identities in `config/agents.local.json` or another registry
+   file.
+2. Keep passwords in environment variables or ignored local config.
+3. Run `python -m bbs_gym.cli accounts check` to validate the registry.
+4. Run `python -m bbs_gym.cli accounts provision` to create/update Synchronet
+   users through `jsexec`.
+5. Run activities with `--transport rlogin --agent-id ...` so the BBS account
+   identity is attached before the model loop starts.
 
 Models should not need to complete first-time signup during normal benchmark
 runs.
@@ -235,6 +344,11 @@ agent = gym.connect("agent-001", node=1, transport="rlogin")
 If `node` is omitted, the harness can allocate from a configured pool. The event
 log should record the node because DOS door issues often reduce to node-specific
 paths, locks, or stale dropfiles.
+
+Current status: `BbsGym.connect(..., node=N)` records the requested node in
+metadata, but the rlogin transport does not yet prove or force the actual
+Synchronet node assigned by the server. The next BBS-layer work should discover
+or pin the real node before relying on node-specific scoring/debugging.
 
 Concurrency policy belongs to the game profile:
 
@@ -372,12 +486,12 @@ locking behavior is verified.
 
 ## Next Implementation Milestones
 
-1. Add a `pyte`-backed rendered terminal screen.
-2. Add one scripted end-to-end path into Synchronet TW2.
-3. Add quiescence-first `observe_turn()` handling with prompt guardrails.
-4. Add structured event logs.
-5. Add rlogin login/account provisioning helpers.
-6. Add explicit node allocation in `BbsGym`.
-7. Add an async multi-agent runner.
-8. Add snapshot/reset tooling for `runtime/sbbs`.
-9. Add DOS-door setup verification for TW2002 and BRE.
+1. Run and tune a live TW2 entry activity through rlogin with a real model.
+2. Add a sequential two-agent campaign runner that composes existing
+   `ActivityRunner` sessions.
+3. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
+4. Add snapshot/reset tooling for `runtime/sbbs`.
+5. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
+   workflows.
+6. Add DOS-door setup verification for TW2002 and BRE.
+7. Add optional PNG observation rendering from the pyte screen buffer.

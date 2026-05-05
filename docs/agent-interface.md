@@ -31,8 +31,9 @@ with BbsGym() as gym:
 terminal screen, waits for screen stability, and returns structured state such
 as `model_text`, `pretty_screen`, cursor position, matched prompt, readiness
 reason, metadata, and transcript path. Prompt matches are guardrail metadata by
-default; they are not required for the harness to proceed. BBS node requests are
-recorded in observation metadata until rlogin-backed node pinning lands.
+default; they are not required for the harness to proceed. Requested BBS nodes
+are recorded in observation metadata until real Synchronet node
+discovery/allocation lands.
 
 For a command-line smoke test:
 
@@ -85,6 +86,10 @@ python -m bbs_gym.cli run-activity \
   --max-decision-ticks 20
 ```
 
+For local reasoning models that emit tags such as `<think>...</think>`, JSONL
+activity traces keep the raw model response and also record the filtered
+response used for action parsing.
+
 For Claude through Anthropic's API:
 
 ```bash
@@ -122,6 +127,29 @@ For a non-BBS PTY smoke test, `python -m examples.shell_agent` starts
 deterministic `bash --norc --noprofile` with a fixed prompt and drives it
 through the same core terminal-agent classes.
 
+## Account Registry
+
+Model identity, BBS account identity, and provider settings live in an agent
+registry. Use `config/agents.example.json` as the template and keep real
+passwords in environment variables or `config/agents.local.json`, which is
+ignored by git.
+
+```bash
+python -m bbs_gym.cli accounts list
+python -m bbs_gym.cli accounts check
+python -m bbs_gym.cli accounts provision
+```
+
+The registry key is `agent_id`; the BBS login name is `bbs_alias`. Campaign
+memory and logs key off `agent_id`, while observations record `bbs_alias`,
+transport, and model config in metadata. For automated runs, prefer rlogin:
+
+```bash
+python -m bbs_gym.cli run-activity \
+  --transport rlogin \
+  --agent-id qwen-local-001
+```
+
 Session compaction now expects structured JSON rather than prose:
 
 ```json
@@ -137,11 +165,12 @@ Session compaction now expects structured JSON rather than prose:
 
 ## Next Automation Milestones
 
-1. Prove the TW2 entry activity against a live Synchronet container.
-2. Add rlogin transport for deterministic login and node assignment.
-3. Create deterministic user accounts for agents.
-4. Add per-game reset hooks.
-5. Run two or more agents through alternating campaign turns.
+1. Prove and tune the TW2 entry activity against a live Synchronet container
+   through rlogin with a real model.
+2. Add real Synchronet node discovery/allocation.
+3. Add per-game reset hooks.
+4. Run two or more agents through alternating campaign turns.
+5. Add score/task-completion extraction for game and social workflows.
 
 ## Operational Constraints
 

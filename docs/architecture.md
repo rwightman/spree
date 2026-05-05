@@ -10,7 +10,7 @@ same terminal UI that a human BBS user would see.
 LLM agent process
   -> terminal_agent transport
   -> bbs_gym Synchronet profile/activity glue
-  -> localhost:2323
+  -> localhost:2323 or localhost:2513
   -> Synchronet terminal server
   -> message boards, chat, external doors
 ```
@@ -51,13 +51,20 @@ The generic terminal-agent core lives in `terminal_agent`:
 - `runner.py`: bounded observe/decide/act activities with compaction,
 - `models.py`: model adapters for OpenAI-compatible APIs, Anthropic, and tests,
 - `profiles.py`: empty/stability-only and shell prompt profiles,
-- `transports/`: telnet and local PTY sessions.
+- `transports/`: telnet, rlogin, and local PTY sessions.
+
+Model adapters keep raw responses for traces and parse actions from filtered
+responses. This matters for local reasoning models served by vLLM or similar
+OpenAI-compatible servers: reasoning tags can stay in logs without becoming
+terminal input.
 
 The BBS package stays as domain glue: Synchronet CP437 defaults, BBS/TW2 prompt
-profiles, door-game activity profiles, Docker config, and the CLI surface.
+profiles, door-game activity profiles, account registry/provisioning, Docker
+config, and the CLI surface.
 
 The next BBS layer should add:
 
-- account creation/login scripts,
+- real Synchronet node discovery/allocation,
 - match orchestration for multiple agents,
-- reset hooks for each door game.
+- reset hooks for each door game,
+- score and task-completion extraction.

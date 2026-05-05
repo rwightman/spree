@@ -23,7 +23,7 @@ Already present:
 - Dockerized Synchronet BBS.
 - Generic `terminal_agent` core for actions, observations, runners, memory,
   model adapters, and transports.
-- Telnet and local PTY session handling.
+- Telnet, rlogin, and local PTY session handling.
 - `pyte`-backed terminal rendering with configurable encoding.
 - `observe_turn()` with quiescence-first readiness.
 - Raw transcripts.
@@ -38,25 +38,33 @@ Already present:
 - Basic prompt profiles for Synchronet BBS and TW2.
 - BBS-specific `bbs_gym` shell for Synchronet CP437 defaults, profiles,
   activities, Docker config, and CLI commands.
-
-Missing:
-
-- Account/rlogin provisioning.
-- Campaign scheduling.
-- Scoring/extraction.
-- Actual model-vs-model run against a configured local/API model pair.
-
-Partially implemented:
-
 - Structured actions and validation, including CP437 checks and one JSON repair
   retry with malformed-response logging.
 - Model adapter interfaces.
 - OpenAI-compatible and Anthropic HTTP adapters.
+- Raw/filtered response tracking so reasoning tags can be logged while action
+  parsing sees cleaned JSON.
+- Anthropic prompt caching for stable system prompts.
 - Single-agent activity runner.
 - TW2 entry activity profile.
 - TW2 in-game activity profile.
 - JSON-backed memory store with dedupe/caps.
 - JSONL step logging.
+- Agent account registry with Synchronet provisioning through `jsexec`.
+- Rlogin activity runs using pre-provisioned account identity.
+
+Missing:
+
+- Real Synchronet node discovery/allocation.
+- Campaign scheduling.
+- Scoring/extraction.
+- Actual model-vs-model run against a configured local/API model pair.
+
+The `terminal_agent` package is intentionally separate from `bbs_gym`.
+Terminal observation, action validation, model adapters, memory, and the
+activity runner are generic enough to drive shells, TUI programs, SSH sessions,
+and terminal games. BBS-specific account policy, door profiles, campaign
+scheduling, reset, and scoring stay in `bbs_gym`.
 
 ## Model Adapter Strategy
 
@@ -916,9 +924,10 @@ Build in this order:
 10. End-of-session memory commit call. Done.
 11. BBS main-menu activity profile. Done.
 12. TW2 entry profile. Done.
-13. Account/rlogin provisioning.
-14. Run one real local/API model through TW2 entry.
-15. Two-agent sequential campaign runner.
+13. Account/rlogin provisioning. Done.
+14. Run and tune one real local/API model through TW2 entry.
+15. Add real Synchronet node discovery/allocation.
+16. Two-agent sequential campaign runner.
 
 Do not start with a full async multi-agent scheduler. First prove:
 
@@ -940,9 +949,5 @@ Then add concurrency for doors that need it.
   summarizer for early development?
 - Should social policy be enforced by validator only, by a judge model, or both?
 - How much prompt history should local small models receive before compaction?
-- Should action parsing retry with the same model after malformed JSON, or
-  should malformed output consume a decision tick?
 - Should screenshots be included in the first model loop, or added after the
   text-only runner is stable?
-- How should rlogin account provisioning be implemented for Synchronet in the
-  most robust way?

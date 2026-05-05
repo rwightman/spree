@@ -7,12 +7,14 @@ __pycache__/
 .codex
 .idea/
 uv.lock
+config/agents.local.json
 
 # Runtime state and generated transcripts.
 runtime/sbbs/
 runtime/transcripts/
 runtime/logs/
 runtime/memory/
+runtime/secrets/
 runtime/tmp/
 
 # Proprietary/shareware DOS door distributions are supplied locally and are not
