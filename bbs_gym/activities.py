@@ -10,17 +10,16 @@ from terminal_agent.actions import ActionPolicy
 from terminal_agent.runner import ActivityProfile
 from terminal_agent.terminal import Observation
 
+from .prompt_modules import (
+    BBS_INPUT_MODALITY_PROFILE,
+    BBS_PROMPT_MODULES,
+    TW2_INPUT_MODALITY_PROFILE,
+    TW2_PROMPT_MODULES,
+)
 
 TW2_SCREEN_RE = re.compile(
     r"(?:Trade\s+Wars\s+\(v\.ii\)|TradeWars2/JavaScript|Command\s+\(\?=Help\)\?|Your ship is being initialized)",
     re.IGNORECASE,
-)
-BBS_SYSTEM_GUIDANCE = (
-    "BBS convention: menu letters and numbers are often single-key hotkeys. Use key for those "
-    "one-character choices so you do not send an extra Enter. Use send_line when the BBS is asking "
-    'for a typed line of text. In prompts like "Yes [No]" or "[Yes] No", brackets usually mark the '
-    "currently selected/default choice. If the prompt shows answer letters, use the obvious printable "
-    "key such as Y or N; use arrow keys only when the UI appears to behave like a selector."
 )
 
 
@@ -36,7 +35,8 @@ BBS_MAIN_MENU_PROFILE = ActivityProfile(
     name="bbs-main-menu",
     objective="Explore the BBS main menu, recover from mistakes, and do not enter sysop/admin areas.",
     action_policy=bbs_action_policy(),
-    system_guidance=BBS_SYSTEM_GUIDANCE,
+    input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
+    prompt_modules=BBS_PROMPT_MODULES,
 )
 
 TW2_ENTRY_PROFILE = ActivityProfile(
@@ -48,12 +48,13 @@ TW2_ENTRY_PROFILE = ActivityProfile(
         "Trade Wars 2. If you are unsure, ask the BBS for help with ?."
     ),
     action_policy=bbs_action_policy(
-        allowed_actions=frozenset({"send_line", "send_text", "key", "wait", "hangup"}),
+        allowed_actions=frozenset({"submit_line", "type_text", "press_key", "wait", "hangup"}),
         max_text_chars=80,
         max_line_chars=80,
         max_lines=1,
     ),
-    system_guidance=BBS_SYSTEM_GUIDANCE,
+    input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
+    prompt_modules=BBS_PROMPT_MODULES,
     observe_timeout=10.0,
     stable_ms=300,
     recent_steps_to_keep=4,
@@ -67,12 +68,13 @@ TW2_GAME_PROFILE = ActivityProfile(
     name="tw2-game",
     objective="Play the current Trade Wars 2 session through normal terminal commands and recover from mistakes.",
     action_policy=bbs_action_policy(
-        allowed_actions=frozenset({"send_line", "send_text", "send_multiline", "key", "wait", "hangup"}),
+        allowed_actions=frozenset({"submit_line", "type_text", "submit_lines", "press_key", "wait", "hangup"}),
         max_text_chars=240,
         max_line_chars=240,
         max_lines=5,
     ),
-    system_guidance=BBS_SYSTEM_GUIDANCE,
+    input_modality_profile=TW2_INPUT_MODALITY_PROFILE,
+    prompt_modules=TW2_PROMPT_MODULES,
     recent_steps_to_keep=8,
     screen_tail_chars=1_600,
     compact_every_steps=20,
@@ -92,6 +94,8 @@ def activity_profile(name: str, objective: str | None = None) -> ActivityProfile
             name=name,
             objective=objective or "Explore the current BBS activity.",
             action_policy=bbs_action_policy(),
+            input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
+            prompt_modules=BBS_PROMPT_MODULES,
         )
     if objective is not None:
         return replace(profile, objective=objective)

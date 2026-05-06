@@ -39,11 +39,11 @@ def test_terminal_session_agent_dispatches_generic_actions():
     agent = TerminalSessionAgent("agent", session, TurnObserver("agent", session))
 
     agent.act_action(Action("wait"))
-    agent.act_action(Action("send_line", text="look"))
-    agent.act_action(Action("send_text", text="partial"))
-    agent.act_action(Action("key", key="enter"))
+    agent.act_action(Action("submit_line", text="look"))
+    agent.act_action(Action("type_text", text="partial"))
+    agent.act_action(Action("press_key", key="enter"))
     agent.act_action(Action("send_raw", text="x"))
-    agent.act_action(Action("send_multiline", lines=("one", "two")))
+    agent.act_action(Action("submit_lines", lines=("one", "two")))
     agent.act_action(Action("hangup"))
 
     assert session.sent == [

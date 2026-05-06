@@ -35,11 +35,11 @@ def main() -> None:
         first = agent.observe_turn(timeout=2.0, stable_ms=100, prompt_fast_path=True)
         print(first.model_text[-1000:])
 
-        agent.act_action(Action("send_line", text="printf 'hello from shell\\n'"))
+        agent.act_action(Action("submit_line", text="printf 'hello from shell\\n'"))
         second = agent.observe_turn(timeout=2.0, stable_ms=100, prompt_fast_path=True)
         print(second.model_text[-1000:])
 
-        agent.act_action(Action("send_line", text="exit"))
+        agent.act_action(Action("submit_line", text="exit"))
 
 
 if __name__ == "__main__":

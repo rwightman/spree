@@ -8,10 +8,17 @@ __all__ = [
     "ActivityRunner",
     "AnthropicAdapter",
     "EMPTY_PROFILE",
+    "FullScreenModule",
+    "GENERIC_TERMINAL_MODULES",
+    "InputModalityProfile",
+    "InputModeRule",
     "JsonMemoryStore",
     "Observation",
+    "ObservationHints",
     "OpenAICompatibleAdapter",
+    "PromptModule",
     "PromptProfile",
+    "PromptRenderContext",
     "PtySession",
     "RLoginSession",
     "ScriptedModelAdapter",
@@ -29,8 +36,10 @@ __all__ = [
 from .agent import TerminalAgent, TerminalSessionAgent
 from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
+from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
 from .models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, PromptProfile
 from .runner import ActivityBudget, ActivityProfile, ActivityRunner
 from .terminal import Observation, TerminalScreen, TurnObserver

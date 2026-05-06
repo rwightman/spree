@@ -45,14 +45,14 @@ def test_compact_returns_structured_session_summary():
 def test_decide_filters_reasoning_blocks_but_keeps_raw_response():
     class ThinkingModel(TextChatAdapter):
         def chat(self, _messages):
-            return '<think>choose a safe action</think>\n{"action": "wait"}'
+            return '<think>choose a safe action</think>\n{"action": "wait", "arguments": {}}'
 
     model = ThinkingModel()
     action = model.decide(DecisionPrompt("s", "u"))
 
     assert action.action == "wait"
-    assert model.last_response == '<think>choose a safe action</think>\n{"action": "wait"}'
-    assert model.last_parsed_response == '{"action": "wait"}'
+    assert model.last_response == '<think>choose a safe action</think>\n{"action": "wait", "arguments": {}}'
+    assert model.last_parsed_response == '{"action": "wait", "arguments": {}}'
 
 
 def test_compact_does_not_store_truncated_reasoning_as_summary():
@@ -66,15 +66,15 @@ def test_compact_does_not_store_truncated_reasoning_as_summary():
 
 
 def test_gemma4_filter_strips_thought_channel_and_keeps_json():
-    response = '<|channel>thought\nchoose a safe action<channel|>\n<|channel>final\n{"action": "wait"}'
+    response = '<|channel>thought\nchoose a safe action<channel|>\n<|channel>final\n{"action": "wait", "arguments": {}}'
 
-    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait"}'
+    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait", "arguments": {}}'
 
 
 def test_gemma4_filter_strips_empty_thought_channel_and_keeps_json():
-    response = '<|channel>thought\n<channel|>{"action": "wait"}'
+    response = '<|channel>thought\n<channel|>{"action": "wait", "arguments": {}}'
 
-    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait"}'
+    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait", "arguments": {}}'
 
 
 def test_gemma4_filter_strips_unclosed_thought_channel():
@@ -83,11 +83,11 @@ def test_gemma4_filter_strips_unclosed_thought_channel():
 
 def test_output_filters_infer_gemma4_from_model_id():
     filters = output_filters_for_model("google/gemma-4-31B-it")
-    response = '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action": "wait"}'
+    response = '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action": "wait", "arguments": {}}'
     for output_filter in filters:
         response = output_filter(response)
 
-    assert response.strip() == '{"action": "wait"}'
+    assert response.strip() == '{"action": "wait", "arguments": {}}'
 
 
 def test_output_filters_can_be_disabled():
@@ -99,7 +99,7 @@ def test_openai_compatible_adapter_merges_extra_body(monkeypatch):
 
     def fake_post_json(url, payload, headers, timeout):
         captured["payload"] = payload
-        return {"choices": [{"message": {"content": '{"action":"wait"}'}}]}
+        return {"choices": [{"message": {"content": '{"action":"wait","arguments":{}}'}}]}
 
     monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
     adapter = OpenAICompatibleAdapter(
@@ -118,7 +118,7 @@ def test_openai_compatible_adapter_infers_gemma4_response_filter(monkeypatch):
             "choices": [
                 {
                     "message": {
-                        "content": '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action":"wait"}'
+                        "content": '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action":"wait","arguments":{}}'
                     }
                 }
             ]
@@ -130,7 +130,7 @@ def test_openai_compatible_adapter_infers_gemma4_response_filter(monkeypatch):
     action = adapter.decide(DecisionPrompt("s", "u"))
 
     assert action.action == "wait"
-    assert adapter.last_parsed_response == '{"action":"wait"}'
+    assert adapter.last_parsed_response == '{"action":"wait","arguments":{}}'
 
 
 def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
@@ -140,7 +140,7 @@ def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
                 {
                     "message": {
                         "reasoning": "choose the low-risk action",
-                        "content": '{"action":"wait"}',
+                        "content": '{"action":"wait","arguments":{}}',
                     }
                 }
             ]
@@ -153,7 +153,7 @@ def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
 
     assert action.action == "wait"
     assert adapter.last_reasoning == "choose the low-risk action"
-    assert adapter.last_response == '{"action":"wait"}'
+    assert adapter.last_response == '{"action":"wait","arguments":{}}'
 
 
 def test_openai_compatible_adapter_captures_legacy_reasoning_content(monkeypatch):
@@ -163,7 +163,7 @@ def test_openai_compatible_adapter_captures_legacy_reasoning_content(monkeypatch
                 {
                     "message": {
                         "reasoning_content": "legacy reasoning field",
-                        "content": '{"action":"wait"}',
+                        "content": '{"action":"wait","arguments":{}}',
                     }
                 }
             ]
@@ -191,7 +191,7 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
         captured["payload"] = payload
         captured["headers"] = headers
         captured["timeout"] = timeout
-        return {"content": [{"type": "text", "text": '{"action":"wait"}'}]}
+        return {"content": [{"type": "text", "text": '{"action":"wait","arguments":{}}'}]}
 
     monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
     adapter = AnthropicAdapter(model="test-model", api_key="key")
