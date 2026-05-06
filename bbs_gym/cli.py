@@ -131,7 +131,7 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
     provider = args.provider or _config_str(model_config, "provider") or "openai-compatible"
 
     if provider == "scripted":
-        model = ScriptedModelAdapter(args.scripted_response or ['{"action": "wait"}'])
+        model = ScriptedModelAdapter(args.scripted_response or ['{"action": "wait", "arguments": {}}'])
     elif provider == "anthropic":
         model_name = args.model or _config_str(model_config, "model")
         if not model_name:

@@ -35,6 +35,15 @@ Already present:
   - `matched_prompt`,
   - `ready_reason`,
   - transcript path.
+- Generic observation hints for recent terminal output, likely active prompt,
+  input mode, echoed-input/no-effect detection, and unchanged screens.
+- Prompt modules with assistance levels:
+  - `generic_terminal`,
+  - `bbs_conventions`,
+  - `game_interface`,
+  - `strategic`.
+- Prompt-module provenance in JSONL step traces with rendered `{name, level,
+  text}` records.
 - Basic prompt profiles for Synchronet BBS and TW2.
 - BBS-specific `bbs_gym` shell for Synchronet CP437 defaults, profiles,
   activities, Docker config, and CLI commands.
@@ -138,57 +147,61 @@ free-form BBS input where free-form input is appropriate.
 Example short command:
 
 ```json
-{"action": "send_line", "text": "P"}
+{"action": "press_key", "arguments": {"key": "P"}}
 ```
 
 Example open-ended chat/message input:
 
 ```json
 {
-  "action": "send_line",
-  "text": "I think your trading plan is too defensive. Try moving cargo earlier."
+  "action": "submit_line",
+  "arguments": {
+    "text": "I think your trading plan is too defensive. Try moving cargo earlier."
+  }
 }
 ```
 
 Example key press:
 
 ```json
-{"action": "key", "key": "enter"}
+{"action": "press_key", "arguments": {"key": "enter"}}
 ```
 
 Example printable hotkey:
 
 ```json
-{"action": "key", "key": "q"}
+{"action": "press_key", "arguments": {"key": "q"}}
 ```
 
 Example partial input without submitting:
 
 ```json
-{"action": "send_text", "text": "partial input"}
+{"action": "type_text", "arguments": {"text": "partial input"}}
 ```
 
 Example multi-line post:
 
 ```json
 {
-  "action": "send_multiline",
-  "lines": [
-    "Subject: Trade route notes",
-    "",
-    "I found a decent early route near sector 42.",
-    "Watch for fighters in adjacent sectors."
-  ]
+  "action": "submit_lines",
+  "arguments": {
+    "lines": [
+      "Subject: Trade route notes",
+      "",
+      "I found a decent early route near sector 42.",
+      "Watch for fighters in adjacent sectors."
+    ]
+  }
 }
 ```
 
 Initial action set:
 
 ```text
-send_line       Type text, then press transport-specific Enter/Return.
-send_text       Type text without pressing Enter/Return.
-key             Press exactly one key, such as q, D, ?, 1, enter, escape, tab, or an arrow.
-send_multiline  Send multiple submitted lines, Enter/Return after each.
+press_key       Press exactly one key, such as q, D, ?, 1, enter, escape, tab, or an arrow.
+submit_line     Type text, then press transport-specific Enter/Return.
+type_text       Type text without pressing Enter/Return.
+submit_lines    Send multiple submitted lines, Enter/Return after each.
 wait            Do nothing and observe again.
 hangup          Close the session.
 ```
@@ -471,7 +484,16 @@ Durable campaign memory
 Session summary so far
 Working memory
 Recent steps
-Current screen
+---
+Generic terminal modules:
+  Most recent terminal output
+  Likely active prompt
+  Input mode hint
+  Previous action effect when notable
+BBS convention modules when enabled
+Game-interface modules when enabled
+Full current screen
+---
 Required JSON action schema
 ```
 
@@ -501,11 +523,17 @@ Recent steps:
 1. You typed "?".
 2. The screen showed a command list.
 
-Current screen:
-...
+Most recent terminal output:
+Docking complete.
 
-Current prompt:
+Likely active prompt:
 Command (?=Help)?
+
+Input mode hint:
+hotkey_expected - one-character commands are usually single keypresses
+
+Full current screen:
+...
 
 Return one JSON action.
 ```
@@ -514,6 +542,15 @@ The current prompt should be extracted from the live screen and labeled
 separately from scrollback. The model still receives scrollback, because old
 text is useful context, but the active prompt/current input line should be
 harder to confuse with stale prompt text.
+
+Prompt modules are selected per activity profile. The default baseline is the
+generic terminal module set; BBS and TW2 profiles add domain modules
+explicitly. This keeps benchmark assistance levels clear: a generic terminal
+run can omit BBS and TW2 modules, while a game-interface-assisted TW2 run can
+include TW2 command vocabulary and input-mode rules.
+Reserve `ActivityProfile.system_guidance` for rare, stable system-message
+prose. Prefer modules for tactical and domain guidance because traces record
+exactly which modules rendered and what text they contributed.
 
 ## Mistakes And Recovery
 
@@ -575,10 +612,9 @@ not yet expose a domain/input phase such as `tw2_trade_offer_prompt` versus
 
 Preferred improvements, keeping the terminal environment open-ended:
 
-- Add active prompt/current-line extraction to every observation.
-- Put `CURRENT PROMPT` after scrollback in the decision prompt.
-- Include `LAST ACTION` and a concise visible delta/result before the current
-  screen.
+- Keep active prompt/current-line extraction in every model prompt.
+- Keep recent terminal output, likely active prompt, input mode, and previous
+  action effects above the full screen in the decision prompt.
 - Extract visible, non-privileged state facts from screen text only, such as
   sector, turns left, credits, cargo, current port, and whether the current port
   buys or sells the carried cargo.
@@ -888,8 +924,8 @@ Suggested JSONL event:
   "prompt_path": "runtime/logs/match-0001/agent-001/step-0042.prompt.txt",
   "model_response_path": "runtime/logs/match-0001/agent-001/step-0042.response.txt",
   "parsed_action": {
-    "action": "send_line",
-    "text": "?"
+    "action": "submit_line",
+    "arguments": {"text": "?"}
   },
   "validation": {
     "accepted": true,
@@ -1018,7 +1054,8 @@ Build in this order:
 14. Run and tune one real local/API model through TW2 entry. Done.
 15. Run one real model through a bounded TW2 play session to turn exhaustion.
     Done.
-16. Add active prompt/current-line extraction and visible state deltas.
+16. Add active prompt/current-line extraction and visible state deltas. Done
+    for generic prompt/current-line hints and basic action-effect notes.
 17. Add real Synchronet node discovery/allocation.
 18. Two-agent sequential campaign runner.
 

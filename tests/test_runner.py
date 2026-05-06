@@ -6,6 +6,7 @@ from bbs_gym.activities import TW2_ENTRY_PROFILE
 from terminal_agent.actions import Action, ActionError, ActionPolicy
 from terminal_agent.memory import JsonMemoryStore
 from terminal_agent.models import ScriptedModelAdapter
+from terminal_agent.prompt_modules import GENERIC_TERMINAL_MODULES
 from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
 from terminal_agent.terminal import Observation
 from terminal_agent.transports.base import SessionDisconnected
@@ -114,8 +115,8 @@ def test_activity_runner_sends_actions_and_logs_memory(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(
         [
-            '{"action": "send_line", "text": "?"}',
-            '{"action": "hangup"}',
+            '{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Asked for help."]}',
         ]
     )
@@ -129,7 +130,7 @@ def test_activity_runner_sends_actions_and_logs_memory(tmp_path):
     result = runner.run(agent, model, ActivityBudget(max_decision_ticks=5))
 
     assert result.stop_reason == "hangup"
-    assert [action.action for action in agent.actions] == ["send_line", "hangup"]
+    assert [action.action for action in agent.actions] == ["submit_line", "hangup"]
     assert memory.load("agent-001") == {"durable_facts": ["Asked for help."]}
     assert (tmp_path / "steps.jsonl").read_text(encoding="utf-8").count("\n") == 2
 
@@ -154,8 +155,8 @@ def test_activity_runner_repairs_invalid_json_once(tmp_path):
     model = ScriptedModelAdapter(
         [
             "not json",
-            '{"action": "send_line", "text": "?"}',
-            '{"action": "hangup"}',
+            '{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Recovered from malformed JSON."]}',
         ]
     )
@@ -168,8 +169,8 @@ def test_activity_runner_repairs_invalid_json_once(tmp_path):
 
     assert result.stop_reason == "hangup"
     assert [action.to_dict() for action in agent.actions] == [
-        {"action": "send_line", "text": "?"},
-        {"action": "hangup"},
+        {"action": "submit_line", "arguments": {"text": "?"}},
+        {"action": "hangup", "arguments": {}},
     ]
     assert result.steps[0].validation["accepted"] is True
     assert "repaired_after_error" in result.steps[0].validation["notes"][0]
@@ -178,11 +179,14 @@ def test_activity_runner_repairs_invalid_json_once(tmp_path):
 
 def test_activity_runner_renders_schema_from_action_policy(tmp_path):
     agent = FakeAgent()
-    model = ScriptedModelAdapter(['{"action": "wait"}'])
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
     profile = ActivityProfile(
         name="limited",
         objective="test schema",
-        action_policy=ActionPolicy(allowed_actions=frozenset({"key", "wait"}), supported_keys=frozenset({"enter"})),
+        action_policy=ActionPolicy(
+            allowed_actions=frozenset({"press_key", "wait"}),
+            supported_keys=frozenset({"enter"}),
+        ),
     )
 
     result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
@@ -192,18 +196,46 @@ def test_activity_runner_renders_schema_from_action_policy(tmp_path):
     )
     system_prompt = result.steps[0].prompt["system"]
 
-    assert '"key"' in system_prompt
+    assert '"press_key"' in system_prompt
     assert "Supported named keys: enter" in system_prompt
-    assert '"send_multiline"' not in system_prompt
+    assert '"submit_lines"' not in system_prompt
     assert '"send_raw"' not in system_prompt
+
+
+def test_activity_runner_renders_and_traces_prompt_modules(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
+    profile = ActivityProfile(
+        name="modules",
+        objective="test prompt modules",
+        prompt_modules=GENERIC_TERMINAL_MODULES,
+    )
+
+    result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        agent,
+        model,
+        ActivityBudget(max_decision_ticks=1),
+    )
+
+    user_prompt = result.steps[0].prompt["user"]
+    assert user_prompt.index("Recent steps:") < user_prompt.index("[generic_terminal]")
+    assert user_prompt.index("[generic_terminal]") < user_prompt.index("Full current screen:")
+    assert "Most recent terminal output:\nCommand:" in user_prompt
+    assert result.steps[0].prompt_modules_schema_version == 1
+    assert [module["name"] for module in result.steps[0].prompt_modules] == [
+        "terminal.recent_output",
+        "terminal.active_prompt",
+        "terminal.input_modality",
+        "terminal.full_screen",
+    ]
 
 
 def test_activity_runner_logs_action_execution_errors_without_crashing(tmp_path):
     agent = RejectingAgent()
     model = ScriptedModelAdapter(
         [
-            '{"action": "key", "key": "enter"}',
-            '{"action": "hangup"}',
+            '{"action": "press_key", "arguments": {"key": "enter"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Recovered after action dispatch error."]}',
         ]
     )
@@ -223,7 +255,7 @@ def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(
         [
-            '<think>hang up cleanly</think>\n{"action": "hangup"}',
+            '<think>hang up cleanly</think>\n{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Ended cleanly."]}',
         ]
     )
@@ -236,8 +268,8 @@ def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):
     model_response = result.steps[0].validation["model_response"]
 
     assert result.stop_reason == "hangup"
-    assert model_response["response"] == '<think>hang up cleanly</think>\n{"action": "hangup"}'
-    assert model_response["parsed_response"] == '{"action": "hangup"}'
+    assert model_response["response"] == '<think>hang up cleanly</think>\n{"action": "hangup", "arguments": {}}'
+    assert model_response["parsed_response"] == '{"action": "hangup", "arguments": {}}'
 
 
 def test_activity_runner_logs_separate_model_reasoning(tmp_path):
@@ -249,7 +281,7 @@ def test_activity_runner_logs_separate_model_reasoning(tmp_path):
     agent = FakeAgent()
     model = ReasoningModel(
         [
-            '{"action": "hangup"}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Ended cleanly."]}',
         ]
     )
@@ -269,8 +301,8 @@ def test_activity_runner_excludes_model_responses_from_context_by_default(tmp_pa
     agent = FakeAgent()
     model = ScriptedModelAdapter(
         [
-            '<think>private reasoning</think>\n{"action": "send_line", "text": "?"}',
-            '{"action": "hangup"}',
+            '<think>private reasoning</think>\n{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Ended cleanly."]}',
         ]
     )
@@ -286,7 +318,7 @@ def test_activity_runner_excludes_model_responses_from_context_by_default(tmp_pa
     assert "private reasoning" not in second_prompt
     assert "model_response" not in second_prompt
     assert "parsed_response" not in second_prompt
-    assert 'action={"action": "send_line", "text": "?"}' in second_prompt
+    assert 'action={"action": "submit_line", "arguments": {"text": "?"}}' in second_prompt
     assert 'Validation: {"accepted": true, "notes": []}' in second_prompt
 
 
@@ -294,8 +326,8 @@ def test_activity_runner_can_include_model_responses_in_context(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(
         [
-            '<think>debug reasoning</think>\n{"action": "send_line", "text": "?"}',
-            '{"action": "hangup"}',
+            '<think>debug reasoning</think>\n{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Ended cleanly."]}',
         ]
     )
@@ -320,8 +352,8 @@ def test_activity_runner_uses_profile_screen_tail_chars(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(
         [
-            '{"action": "send_line", "text": "?"}',
-            '{"action": "hangup"}',
+            '{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Ended cleanly."]}',
         ]
     )
@@ -364,7 +396,7 @@ def test_activity_runner_reports_budget_when_wall_clock_expires_after_observe(tm
 
     result = runner.run(
         agent,
-        ScriptedModelAdapter(['{"action": "hangup"}']),
+        ScriptedModelAdapter(['{"action": "hangup", "arguments": {}}']),
         ActivityBudget(max_decision_ticks=5, max_wall_seconds=0.01),
     )
 
@@ -379,9 +411,9 @@ def test_activity_runner_reports_budget_when_wall_clock_expires_after_observe(tm
 def test_activity_runner_compacts_on_recent_context_size(tmp_path):
     model = ScriptedModelAdapter(
         [
-            '{"action": "send_line", "text": "?"}',
+            '{"action": "submit_line", "arguments": {"text": "?"}}',
             '{"current_state": "Compacted summary", "last_error": "", "open_subgoals": [], "discovered_facts": [], "failed_actions": [], "strategy_notes": []}',
-            '{"action": "hangup"}',
+            '{"action": "hangup", "arguments": {}}',
             '{"durable_facts": ["Compacted."]}',
         ]
     )
@@ -407,7 +439,7 @@ def test_activity_runner_stops_when_profile_already_complete(tmp_path):
         TW2_ENTRY_PROFILE,
         memory_store=JsonMemoryStore(tmp_path / "memory"),
         log_path=tmp_path / "steps.jsonl",
-    ).run(agent, ScriptedModelAdapter(['{"action": "send_line", "text": "should-not-run"}']))
+    ).run(agent, ScriptedModelAdapter(['{"action": "submit_line", "arguments": {"text": "should-not-run"}}']))
 
     assert result.stop_reason == "profile_complete"
     assert len(result.steps) == 1
@@ -428,7 +460,7 @@ def test_activity_runner_logs_terminal_observation_after_profile_completion(tmp_
     agent = Tw2AfterActionAgent()
     model = ScriptedModelAdapter(
         [
-            '{"action": "key", "key": "2"}',
+            '{"action": "press_key", "arguments": {"key": "2"}}',
             '{"durable_facts": ["Reached TW2."]}',
         ]
     )
@@ -440,9 +472,11 @@ def test_activity_runner_logs_terminal_observation_after_profile_completion(tmp_
     ).run(agent, model, ActivityBudget(max_decision_ticks=5))
 
     assert result.stop_reason == "profile_complete"
-    assert [action.to_dict() for action in agent.actions] == [{"action": "key", "key": "2"}]
+    assert [action.to_dict() for action in agent.actions] == [
+        {"action": "press_key", "arguments": {"key": "2"}}
+    ]
     assert len(result.steps) == 2
-    assert result.steps[0].action == {"action": "key", "key": "2"}
+    assert result.steps[0].action == {"action": "press_key", "arguments": {"key": "2"}}
     assert result.steps[1].action is None
     assert result.steps[1].validation["terminal"] is True
     assert result.steps[1].budget["decision_ticks"] == 1

@@ -48,6 +48,7 @@ shell.
 - raw and parsed model-response tracking,
 - JSON-backed memory, compaction, and memory commits,
 - pyte-backed terminal rendering and quiescence observation,
+- generic observation hints and prompt modules,
 - bounded activity runners,
 - telnet, rlogin, and local PTY transports,
 - generic prompt profiles such as stability-only and shell prompts.
@@ -160,6 +161,41 @@ This is not a privileged game API and should not reject open-ended actions. It
 is observation hygiene: the model should still be able to make mistakes, but it
 should not have to infer the active prompt from stale terminal history.
 
+Current implementation:
+
+- `terminal_agent.hints` extracts generic `ObservationHints`: recent terminal
+  output since the last action, a likely active prompt/current line, an input
+  mode classification, and notable previous-action effects such as echoed
+  input or unchanged screens.
+- `terminal_agent.prompt_modules` renders those hints as labeled prompt
+  sections and logs module provenance in each decision step.
+- BBS and TW2-specific input strings live in `bbs_gym.prompt_modules`, not in
+  the generic terminal core.
+- Step traces include `prompt_modules_schema_version` and each rendered module
+  as `{name, level, text}` for replay, ablation, and debugging.
+
+### Prompt Modules And Assistance Levels
+
+Prompt modules are small, ordered prompt fragments that can be enabled per
+activity profile. Each module declares an assistance level:
+
+- `generic_terminal`: facts and hints that apply to any terminal, such as
+  recent output, active prompt, input mode, and previous action effects.
+- `bbs_conventions`: BBS interaction conventions, such as hotkeys, bracketed
+  defaults, and rlogin authentication state.
+- `game_interface`: visible game-interface knowledge, such as TW2 input-mode
+  rules or command vocabulary discoverable through the game UI.
+- `strategic`: optional strategy or scoring advice. This level should be off
+  for baseline benchmark runs unless the benchmark explicitly includes it.
+
+The runner groups rendered modules by assistance level in the decision prompt.
+Generic terminal modules are the default baseline, and profiles override module
+sets explicitly so experiments can compare generic-only, generic+BBS, and
+game-interface-assisted runs without hidden prompt leakage.
+`ActivityProfile.system_guidance` remains as an escape hatch for stable,
+always-on prose that should live in the system message; normal tactical or
+domain guidance should be a prompt module so it can be traced and ablated.
+
 ## Optional Multimodal Observations
 
 Multimodal agents can receive a PNG render alongside cleaned terminal text.
@@ -242,25 +278,31 @@ behavior, and replay runs without narrowing the BBS input space too much.
 Examples:
 
 ```json
-{"action": "send_line", "text": "P"}
+{"action": "press_key", "arguments": {"key": "P"}}
 ```
 
 ```json
-{"action": "key", "key": "enter"}
+{"action": "press_key", "arguments": {"key": "enter"}}
 ```
 
 ```json
-{"action": "send_text", "text": "partial input"}
+{"action": "submit_line", "arguments": {"text": "42"}}
+```
+
+```json
+{"action": "type_text", "arguments": {"text": "partial input"}}
 ```
 
 ```json
 {
-  "action": "send_multiline",
-  "lines": [
-    "Subject: Trade route notes",
-    "",
-    "I found a decent early route near sector 42."
-  ]
+    "action": "submit_lines",
+    "arguments": {
+        "lines": [
+            "Subject: Trade route notes",
+            "",
+            "I found a decent early route near sector 42."
+        ]
+    }
 }
 ```
 
@@ -271,11 +313,12 @@ reject ordinary game mistakes such as wrong menu choices, invalid commands, or
 bad quantities; those should flow through to the BBS and be recoverable on later
 decision ticks.
 
-`send_line` types text and submits it with the transport-specific Enter/Return
-key; `send_line` with empty text is equivalent to pressing Enter/Return.
-`send_text` types without submitting. `key` presses exactly one key without an
-automatic Enter/Return; that can be a printable key such as `q`, `D`, `?`, or
-`1`, or a named key such as `enter`, `escape`, `tab`, or an arrow. `send_raw`
+`submit_line` types text and submits it with the transport-specific
+Enter/Return key; `submit_line` with empty text is equivalent to pressing
+Enter/Return. `type_text` types without submitting. `press_key` presses exactly
+one key without an automatic Enter/Return; that can be a printable key such as
+`q`, `D`, `?`, or `1`, or a named key such as `enter`, `escape`, `tab`, or an
+arrow. `send_raw`
 is a gated escape hatch for exact control text and should not be available in
 normal game/menu phases.
 
@@ -551,15 +594,13 @@ locking behavior is verified.
 
 ## Next Implementation Milestones
 
-1. Add active-prompt/current-line extraction to reduce stale scrollback
-   confusion while preserving open-ended terminal input.
-2. Tune TW2 in-game profile/memory from live traces, especially repeated trade
+1. Tune TW2 in-game profile/memory from live traces, especially repeated trade
    offer mistakes and command-prompt phase confusion.
-3. Add a sequential two-agent campaign runner that composes existing
+2. Add a sequential two-agent campaign runner that composes existing
    `ActivityRunner` sessions.
-4. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
-5. Add snapshot/reset tooling for `runtime/sbbs`.
-6. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
+3. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
+4. Add snapshot/reset tooling for `runtime/sbbs`.
+5. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
    workflows.
-7. Add DOS-door setup verification for TW2002 and BRE.
-8. Add optional PNG observation rendering from the pyte screen buffer.
+6. Add DOS-door setup verification for TW2002 and BRE.
+7. Add optional PNG observation rendering from the pyte screen buffer.

@@ -60,19 +60,19 @@ class TerminalSessionAgent:
         if action.action == "hangup":
             self.close()
             return
-        if action.action == "send_line":
+        if action.action == "submit_line":
             self.session.send_line(action.text)
             return
-        if action.action == "send_text":
+        if action.action == "type_text":
             self.session.send_text(action.text)
             return
-        if action.action == "key":
+        if action.action == "press_key":
             self.session.send_key(action.key)
             return
         if action.action == "send_raw":
             self.session.send_bytes(action.text.encode(self.session.encoding))
             return
-        if action.action == "send_multiline":
+        if action.action == "submit_lines":
             for line in action.lines:
                 self.session.send_line(line)
             return

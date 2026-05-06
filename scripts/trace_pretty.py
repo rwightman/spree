@@ -66,6 +66,14 @@ def render_step(
         summary = {key: validation[key] for key in ("accepted", "notes") if key in validation}
         lines.append(f"validation: {json.dumps(summary, sort_keys=True)}")
 
+    prompt_modules = step.get("prompt_modules")
+    if isinstance(prompt_modules, list) and prompt_modules:
+        module_summary = [
+            {key: module[key] for key in ("name", "level") if isinstance(module, dict) and key in module}
+            for module in prompt_modules
+        ]
+        lines.append(f"prompt_modules: {json.dumps(module_summary, sort_keys=True)}")
+
     screen = text_field(step, screen_field)
     if show_controls:
         screen = visible_controls(screen)

@@ -287,7 +287,7 @@ class ScriptedModelAdapter(TextChatAdapter):
     def chat(self, messages: list[ModelMessage]) -> str:
         del messages
         if not self.responses:
-            return '{"action": "wait"}'
+            return '{"action": "wait", "arguments": {}}'
         return self.responses.pop(0)
 
 

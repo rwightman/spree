@@ -10,8 +10,19 @@ from typing import Any, Callable
 
 from .agent import TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
+from .hints import InputModalityProfile, ObservationHints
 from .memory import JsonMemoryStore
 from .models import CompactionPrompt, DecisionPrompt, MemoryCommitPrompt, ModelAdapter, SessionSummary
+from .prompt_modules import (
+    GENERIC_TERMINAL_MODULES,
+    PROMPT_MODULES_SCHEMA_VERSION,
+    PromptModule,
+    PromptModuleResult,
+    PromptRenderContext,
+    collect_prompt_module_results,
+    prompt_module_trace,
+    render_prompt_modules,
+)
 from .transports.base import SessionDisconnected
 from .terminal import Observation
 
@@ -70,6 +81,8 @@ class ActivityProfile:
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
     include_model_responses_in_context: bool = False
+    input_modality_profile: InputModalityProfile = field(default_factory=InputModalityProfile)
+    prompt_modules: tuple[PromptModule, ...] = field(default=GENERIC_TERMINAL_MODULES, repr=False, compare=False)
     completion_check: Callable[[Observation], bool] | None = field(default=None, repr=False, compare=False)
 
     def should_exit(self, observation: Observation, action: Action | None, budget: ActivityBudget) -> bool:
@@ -87,6 +100,8 @@ class StepRecord:
     action: dict[str, Any] | None
     validation: dict[str, Any]
     budget: dict[str, Any]
+    prompt_modules_schema_version: int = PROMPT_MODULES_SCHEMA_VERSION
+    prompt_modules: list[dict[str, str]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -97,6 +112,8 @@ class StepRecord:
             "action": self.action,
             "validation": self.validation,
             "budget": self.budget,
+            "prompt_modules_schema_version": self.prompt_modules_schema_version,
+            "prompt_modules": self.prompt_modules,
             "timestamp": self.timestamp,
         }
 
@@ -130,6 +147,8 @@ class ActivityRunner:
         all_steps: list[StepRecord] = []
         stop_reason = "budget"
         last_observation: Observation | None = None
+        previous_observation: Observation | None = None
+        last_action_for_hints: Action | None = None
 
         while budget.remaining():
             try:
@@ -173,13 +192,28 @@ class ActivityRunner:
                 session_summary = self._compact(model, session_summary, recent_steps, observation)
                 recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
 
-            prompt = self._build_decision_prompt(
+            hints = ObservationHints.from_observation(
+                observation=observation,
+                previous_observation=previous_observation,
+                last_action=last_action_for_hints,
+                modality_profile=self.profile.input_modality_profile,
+            )
+            prompt_module_results = self._prompt_module_results(
                 agent_id=agent_id,
                 observation=observation,
+                hints=hints,
                 campaign_memory=campaign_memory,
                 session_summary=session_summary,
                 recent_steps=recent_steps,
                 budget=budget,
+            )
+            prompt = self._build_decision_prompt(
+                agent_id=agent_id,
+                campaign_memory=campaign_memory,
+                session_summary=session_summary,
+                recent_steps=recent_steps,
+                budget=budget,
+                prompt_module_results=prompt_module_results,
             )
 
             action, validation = self._decide_with_retry(model, prompt)
@@ -204,11 +238,14 @@ class ActivityRunner:
                 action=action.to_dict() if action else None,
                 validation=validation,
                 budget=budget.to_dict(),
+                prompt_modules=prompt_module_trace(prompt_module_results),
             )
             all_steps.append(step)
             recent_steps.append(step)
             recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
             self._write_step(step)
+            previous_observation = observation
+            last_action_for_hints = executed_action
 
             if budget.too_many_validation_failures():
                 stop_reason = "validation_failures"
@@ -238,11 +275,11 @@ class ActivityRunner:
     def _build_decision_prompt(
             self,
             agent_id: str,
-            observation: Observation,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
+            prompt_module_results: list[PromptModuleResult],
     ) -> DecisionPrompt:
         system_parts = [
             "You are controlling an interactive terminal session.",
@@ -253,6 +290,7 @@ class ActivityRunner:
         if self.profile.system_guidance:
             system_parts.append(f"Activity-specific guidance:\n{self.profile.system_guidance}")
         system = "\n".join(system_parts)
+        module_text = render_prompt_modules(prompt_module_results)
         user = "\n\n".join(
             [
                 f"Agent: {agent_id}",
@@ -262,10 +300,35 @@ class ActivityRunner:
                 f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                 f"Session summary: {self._summary_text(session_summary)}",
                 f"Recent steps: {self._recent_steps_text(recent_steps)}",
-                f"Current screen:\n{observation.model_text}",
+                "---",
+                module_text,
+                "---",
             ]
         )
         return DecisionPrompt(system=system, user=user)
+
+    def _prompt_module_results(
+            self,
+            agent_id: str,
+            observation: Observation,
+            hints: ObservationHints,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
+    ) -> list[PromptModuleResult]:
+        context = PromptRenderContext(
+            agent_id=agent_id,
+            activity_name=self.profile.name,
+            objective=self.profile.objective,
+            observation=observation,
+            hints=hints,
+            recent_steps=tuple(recent_steps),
+            campaign_memory=campaign_memory,
+            session_summary=session_summary,
+            budget=budget,
+        )
+        return collect_prompt_module_results(self.profile.prompt_modules, context)
 
     def _decide_with_retry(self, model: ModelAdapter, prompt: DecisionPrompt) -> tuple[Action | None, dict[str, Any]]:
         invalid_responses: list[dict[str, str]] = []

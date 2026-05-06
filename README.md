@@ -15,9 +15,9 @@ modes from live TW2 runs.
 - Local service ports: telnet `127.0.0.1:2323`, web `127.0.0.1:8080`,
   rlogin `127.0.0.1:2513`, NNTP `127.0.0.1:1119`, IRC `127.0.0.1:6667`.
 - Terminal-agent core: `terminal_agent` owns actions, observations, model
-  adapters, memory, runners, and transports.
+  adapters, memory, runners, transports, observation hints, and prompt modules.
 - BBS shell: `bbs_gym` owns Synchronet defaults, CP437 policy, BBS/TW2 prompt
-  profiles, activities, and CLI commands.
+  profiles, activity-specific prompt modules, activities, and CLI commands.
 - Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
   and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
 - Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
@@ -154,8 +154,9 @@ python -m examples.shell_agent
 ## Activity Traces And Replays
 
 `run-activity` writes one JSONL record per decision tick. Each record includes
-the observation shown to the model, raw and parsed model responses, validation
-notes, the parsed action, budget state, and the raw transcript path.
+the observation shown to the model, prompt-module provenance, raw and parsed
+model responses, validation notes, the parsed action, budget state, and the raw
+transcript path.
 
 Pretty-print a trace:
 
