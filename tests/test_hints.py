@@ -55,6 +55,55 @@ def test_observation_hints_use_cursor_line_as_active_prompt():
     assert hints.input_mode_hint == "inspect the screen"
 
 
+def test_observation_hints_recovers_active_prompt_from_cr_redraw():
+    pretty_screen = "\n".join(
+        [
+            "Warps lead to   2, 3, 4, 5, 6, 7",
+            "",
+            "",
+        ]
+    )
+    new_text = "Warps lead to   2, 3, 4, 5, 6, 7\r\n\r\nCommand (?=Help)? \rCommand (?=Help)? \r                  "
+    hints = ObservationHints.from_observation(
+        observation(
+            "Warps lead to 2, 3, 4, 5, 6, 7",
+            pretty_screen=pretty_screen,
+            new_text=new_text,
+            cursor=(2, 18),
+        ),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=InputModalityProfile(),
+    )
+
+    assert hints.active_prompt == "Command (?=Help)?"
+
+
+def test_observation_hints_prefers_new_text_prompt_over_stale_pretty_prompt():
+    pretty_screen = "\n".join(
+        [
+            "Your offer?",
+            "Warps lead to   2, 3, 4, 5, 6, 7",
+            "",
+            "",
+        ]
+    )
+    new_text = "Warps lead to   2, 3, 4, 5, 6, 7\r\n\r\nCommand (?=Help)? \rCommand (?=Help)? \r                  "
+    hints = ObservationHints.from_observation(
+        observation(
+            "Your offer?\nWarps lead to 2, 3, 4, 5, 6, 7",
+            pretty_screen=pretty_screen,
+            new_text=new_text,
+            cursor=(3, 18),
+        ),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=InputModalityProfile(),
+    )
+
+    assert hints.active_prompt == "Command (?=Help)?"
+
+
 def test_observation_hints_classify_with_domain_supplied_rules():
     profile = InputModalityProfile(
         rules=(

@@ -19,13 +19,20 @@ from terminal_agent.runner import ActivityBudget
 from terminal_agent.terminal import Observation
 
 
-def observation(text: str, metadata: dict[str, object] | None = None) -> Observation:
+def observation(
+        text: str,
+        metadata: dict[str, object] | None = None,
+        *,
+        pretty_screen: str | None = None,
+        new_text: str | None = None,
+        cursor: tuple[int, int] | None = None,
+) -> Observation:
     return Observation(
         agent_id="agent",
-        pretty_screen=text,
+        pretty_screen=pretty_screen if pretty_screen is not None else text,
         model_text=text,
-        new_text=text,
-        cursor=(0, len(text)),
+        new_text=new_text if new_text is not None else text,
+        cursor=cursor if cursor is not None else (0, len(text)),
         stable_ms=300,
         matched_prompt=None,
         ready_reason="stable",
@@ -89,6 +96,33 @@ def test_tw2_modality_profile_classifies_tw2_command_prompt():
 
     assert mode == "hotkey_expected"
     assert "one-character commands" in hint
+
+
+def test_tw2_modality_profile_classifies_cr_redraw_command_prompt():
+    pretty_screen = "\n".join(
+        [
+            "Warps lead to   2, 3, 4, 5, 6, 7",
+            "",
+            "",
+        ]
+    )
+    new_text = "Warps lead to   2, 3, 4, 5, 6, 7\r\n\r\nCommand (?=Help)? \rCommand (?=Help)? \r                  "
+    obs = observation(
+        "Warps lead to 2, 3, 4, 5, 6, 7",
+        pretty_screen=pretty_screen,
+        new_text=new_text,
+        cursor=(2, 18),
+    )
+    hints = ObservationHints.from_observation(
+        obs,
+        previous_observation=None,
+        last_action=None,
+        modality_profile=TW2_INPUT_MODALITY_PROFILE,
+    )
+
+    assert hints.active_prompt == "Command (?=Help)?"
+    assert hints.input_mode == "hotkey_expected"
+    assert "press_key" in hints.input_mode_hint
 
 
 def test_rlogin_authenticated_module_only_renders_for_rlogin_transport():
