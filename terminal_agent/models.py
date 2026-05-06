@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from collections.abc import Callable
 from typing import Protocol
 
@@ -29,6 +32,8 @@ class ModelMessage:
 class DecisionPrompt:
     system: str
     user: str
+    mode: str = "stateless_full"
+    stage: str = "full"
 
     def messages(self) -> list[ModelMessage]:
         return [ModelMessage("system", self.system), ModelMessage("user", self.user)]
@@ -277,6 +282,131 @@ class AnthropicAdapter(TextChatAdapter):
             raise RuntimeError(f"unexpected Anthropic response: {response!r}") from exc
 
 
+class CodexCliAdapter(TextChatAdapter):
+    """Adapter that invokes the local ``codex exec`` CLI for each model call."""
+
+    def __init__(
+            self,
+            model: str | None = None,
+            profile: str | None = None,
+            executable: str = "codex",
+            timeout: float = 300.0,
+            sandbox: str = "read-only",
+            cwd: str | Path | None = None,
+            extra_args: list[str] | None = None,
+            stateful: bool = False,
+            session_id: str | None = None,
+            session_file: str | Path | None = None,
+            name: str | None = None,
+            output_filters: tuple[OutputFilter, ...] | None = None,
+    ) -> None:
+        self.model = model
+        self.profile = profile
+        self.executable = executable
+        self.timeout = timeout
+        self.sandbox = sandbox
+        self.cwd = Path(cwd) if cwd is not None else None
+        self.extra_args = list(extra_args or [])
+        self.stateful = stateful
+        self.session_id = session_id
+        self.session_file = Path(session_file) if session_file is not None else None
+        self.name = name or _codex_adapter_name(model, profile)
+        self.output_filters = output_filters_for_model(model or "") if output_filters is None else output_filters
+        if self.session_id is None:
+            self.session_id = self._read_session_file()
+
+    def chat(self, messages: list[ModelMessage]) -> str:
+        prompt_text = _codex_prompt_text(messages)
+        with tempfile.TemporaryDirectory(prefix="terminal-agent-codex-") as temp_dir:
+            output_path = Path(temp_dir) / "last-message.txt"
+            command = self._command(output_path)
+            if self.cwd is not None:
+                self.cwd.mkdir(parents=True, exist_ok=True)
+            try:
+                result = subprocess.run(
+                    command,
+                    input=prompt_text,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout,
+                    cwd=self.cwd,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"codex exec timed out after {self.timeout:g}s") from exc
+            except OSError as exc:
+                raise RuntimeError(f"failed to run codex executable {self.executable!r}: {exc}") from exc
+            if result.returncode != 0:
+                detail = _command_failure_detail(result.stdout, result.stderr)
+                raise RuntimeError(f"codex exec failed with exit code {result.returncode}: {detail}")
+            if self.stateful and self.session_id is None:
+                self.session_id = _extract_codex_session_id(result.stdout)
+                if self.session_id is None:
+                    raise RuntimeError("codex exec did not report a session id in --json output")
+                self._write_session_file()
+            if output_path.exists():
+                output = output_path.read_text(encoding="utf-8").strip()
+                if output:
+                    return output
+            return result.stdout.strip()
+
+    def _command(self, output_path: Path) -> list[str]:
+        if self.stateful and self.session_id:
+            return self._resume_command(output_path)
+
+        command = [
+            self.executable,
+            "exec",
+            "--color",
+            "never",
+            "--skip-git-repo-check",
+            "--sandbox",
+            self.sandbox,
+            "--output-last-message",
+            str(output_path),
+        ]
+        if self.stateful:
+            command.append("--json")
+        else:
+            command.append("--ephemeral")
+        if self.model:
+            command.extend(["--model", self.model])
+        if self.profile:
+            command.extend(["--profile", self.profile])
+        command.extend(self.extra_args)
+        command.append("-")
+        return command
+
+    def _resume_command(self, output_path: Path) -> list[str]:
+        command = [
+            self.executable,
+            "exec",
+            "resume",
+            "--skip-git-repo-check",
+            "--output-last-message",
+            str(output_path),
+            "--json",
+        ]
+        if self.model:
+            command.extend(["--model", self.model])
+        command.extend(self.extra_args)
+        command.append(self.session_id or "")
+        command.append("-")
+        return command
+
+    def _read_session_file(self) -> str | None:
+        if self.session_file is None or not self.session_file.exists():
+            return None
+        session_id = self.session_file.read_text(encoding="utf-8").strip()
+        return session_id or None
+
+    def _write_session_file(self) -> None:
+        if self.session_file is None or self.session_id is None:
+            return
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
+
+
 class ScriptedModelAdapter(TextChatAdapter):
     """Deterministic adapter for tests and dry runs."""
 
@@ -343,6 +473,92 @@ def output_filters_for_model(model: str, filter_family: str | None = None) -> tu
     if family == "gemma4":
         return GEMMA4_OUTPUT_FILTERS
     return DEFAULT_OUTPUT_FILTERS
+
+
+def _codex_adapter_name(model: str | None, profile: str | None) -> str:
+    if model and profile:
+        return f"codex:{model}:{profile}"
+    if model:
+        return f"codex:{model}"
+    if profile:
+        return f"codex:{profile}"
+    return "codex"
+
+
+def _codex_prompt_text(messages: list[ModelMessage]) -> str:
+    lines = [
+        "You are being invoked non-interactively as a decision model for a terminal-agent harness.",
+        "Do not run shell commands, inspect files, or modify the workspace.",
+        "Return only the final text requested by the harness.",
+        "",
+    ]
+    for message in messages:
+        role = message.role.upper()
+        lines.extend([f"{role} MESSAGE:", message.content.strip(), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _command_failure_detail(stdout: str, stderr: str) -> str:
+    detail = "\n".join(part for part in (stderr.strip(), stdout.strip()) if part)
+    if not detail:
+        return "(no output)"
+    return detail[-2000:]
+
+
+UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+SESSION_ID_KEYS = ("session_id", "conversation_id", "thread_id")
+
+
+def _extract_codex_session_id(stdout: str) -> str | None:
+    """Extract a Codex session id from ``codex exec --json`` event output."""
+
+    fallback: str | None = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        preferred = _find_uuid_for_keys(event, SESSION_ID_KEYS)
+        if preferred:
+            return preferred
+        if fallback is None:
+            fallback = _find_uuid_anywhere(event)
+    return fallback
+
+
+def _find_uuid_for_keys(value: object, keys: tuple[str, ...]) -> str | None:
+    if isinstance(value, dict):
+        for key in keys:
+            item = value.get(key)
+            if isinstance(item, str) and UUID_RE.fullmatch(item):
+                return item
+        for item in value.values():
+            found = _find_uuid_for_keys(item, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_uuid_for_keys(item, keys)
+            if found:
+                return found
+    return None
+
+
+def _find_uuid_anywhere(value: object) -> str | None:
+    if isinstance(value, str):
+        match = UUID_RE.search(value)
+        return match.group(0) if match else None
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _find_uuid_anywhere(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_uuid_anywhere(item)
+            if found:
+                return found
+    return None
 
 
 def _infer_filter_family(model: str) -> str:

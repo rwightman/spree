@@ -113,9 +113,13 @@ Adapters can implement this for:
   - llama.cpp `llama-server`.
 - OpenAI GPT API.
 - Anthropic Claude API.
+- Codex CLI through `codex exec`.
 
 The local and OpenAI API paths can share most of an OpenAI-compatible adapter.
 Claude should get a separate Anthropic adapter with the same internal contract.
+Codex should use a subprocess adapter that formats the same stateless prompt,
+runs `codex exec`, captures the final message, and feeds that text through the
+normal parser.
 
 Use the smallest common model API surface first:
 
@@ -125,6 +129,28 @@ chat messages -> text response
 
 Avoid depending on provider-specific tool calling, Responses API, JSON schema
 enforcement, or multimodal input until each backend has been tested explicitly.
+
+Prompt modes:
+
+```text
+stateless_full   Send full harness context on every decision tick.
+stateful_delta   Send one full bootstrap prompt, then smaller delta prompts for resumed provider sessions.
+```
+
+`stateful_delta` should only be used with a provider path that preserves prior
+context, such as a future Codex CLI resume mode. It is not a substitute for
+harness-owned memory; traces and JSON memory remain the authoritative record.
+
+Codex stateful mode:
+
+```text
+first tick     codex exec --json ...
+later ticks    codex exec resume <session_id> ...
+```
+
+The adapter captures the session id from Codex JSONL events. `--codex-stateful`
+automatically selects `stateful_delta` prompts unless the run explicitly sets a
+different prompt mode.
 
 Model families can need different response filters. The harness should keep raw
 responses in traces but parse actions from filtered text. Current families:

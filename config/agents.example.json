@@ -22,6 +22,18 @@
         "provider": "anthropic",
         "model": "claude-sonnet-4-5"
       }
+    },
+    {
+      "agent_id": "codex-debug",
+      "bbs_alias": "CodexDbg",
+      "bbs_password_env": "BBS_CODEX_DEBUG_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "timeout": 300
+      }
     }
   ]
 }

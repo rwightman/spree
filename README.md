@@ -20,6 +20,8 @@ modes from live TW2 runs.
   profiles, activity-specific prompt modules, activities, and CLI commands.
 - Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
   and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
+- Model providers: OpenAI-compatible chat endpoints, Anthropic Messages, Codex
+  CLI subprocess calls, and scripted test responses.
 - Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
   raw transcripts can be replayed into ANSI HTML or animated GIFs with
   `scripts/ansi_screencap.py`.
@@ -209,6 +211,56 @@ ids use the Gemma 4 channel/thought filter, while the default filter handles
 common `<think>...</think>` style reasoning blocks. Override with
 `--response-filter auto|default|gemma4|none` or `response_filter` in the agent
 registry.
+
+## Codex CLI Provider
+
+The `codex` provider invokes `codex exec` once per decision tick and parses its
+final message through the same action JSON path as the other providers. This is
+useful for debugging and for trying Codex as a player without standing up a
+separate API server.
+
+```bash
+python -m bbs_gym.cli run-activity \
+  --transport rlogin \
+  --agent-id codex-debug \
+  --provider codex \
+  --model gpt-5.5 \
+  --codex-sandbox read-only \
+  --activity tw2-game
+```
+
+Useful options are `--codex-profile`, `--codex-executable`,
+`--codex-timeout`, `--codex-cwd`, and repeated `--codex-arg=...` values for
+extra `codex exec` flags. The adapter also supports the same fields in
+`config/agents.local.json` under the agent's `model` object. Codex calls are
+stateless from the harness perspective; the full prompt is sent each tick and
+harness memory remains the source of truth.
+
+Prompt construction defaults to `--prompt-mode stateless_full`, which sends the
+full harness context every decision tick. `--prompt-mode stateful_delta` sends a
+full bootstrap prompt once and then shorter delta prompts with the current
+observation and previous-step summary. That mode is intended for future resumed
+provider sessions such as Codex CLI resume; use it only when the provider
+actually preserves prior context.
+
+For Codex CLI, `--codex-stateful` captures the Codex session id from `--json`
+on the first call and resumes that same session on later decision ticks. When
+`--codex-stateful` is set and no explicit `--prompt-mode` is provided, the
+activity automatically uses `--prompt-mode stateful_delta`.
+
+```bash
+python -m bbs_gym.cli run-activity \
+  --transport rlogin \
+  --agent-id codex-debug \
+  --provider codex \
+  --model gpt-5.5 \
+  --codex-stateful \
+  --activity tw2-entry
+```
+
+Use `--codex-session-file runtime/codex-sessions/codex-debug.session` if you
+want the captured Codex session id persisted for later runs. Without a session
+file, the session id is only kept in memory for the current process.
 
 ## Agent Accounts
 

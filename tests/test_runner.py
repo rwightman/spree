@@ -230,6 +230,64 @@ def test_activity_runner_renders_and_traces_prompt_modules(tmp_path):
     ]
 
 
+def test_activity_runner_keeps_stateless_full_prompt_as_default(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test prompt mode"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(agent, model, ActivityBudget(max_decision_ticks=1))
+
+    prompt = result.steps[0].prompt
+
+    assert prompt["mode"] == "stateless_full"
+    assert prompt["stage"] == "full"
+    assert "Allowed terminal actions:" in prompt["system"]
+    assert "Campaign memory:" in prompt["user"]
+    assert "Recent steps:" in prompt["user"]
+
+
+def test_activity_runner_stateful_delta_bootstraps_then_sends_delta_prompts(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Ended cleanly."]}',
+        ]
+    )
+    profile = ActivityProfile(
+        name="bbs-menu",
+        objective="test stateful prompt mode",
+        prompt_mode="stateful_delta",
+    )
+
+    result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        agent,
+        model,
+        ActivityBudget(max_decision_ticks=5),
+    )
+    first_prompt = result.steps[0].prompt
+    second_prompt = result.steps[1].prompt
+
+    assert first_prompt["mode"] == "stateful_delta"
+    assert first_prompt["stage"] == "bootstrap"
+    assert "Allowed terminal actions:" in first_prompt["system"]
+    assert "stateful session bootstrap" in first_prompt["system"]
+    assert "Campaign memory:" in first_prompt["user"]
+    assert "Recent steps:" in first_prompt["user"]
+
+    assert second_prompt["mode"] == "stateful_delta"
+    assert second_prompt["stage"] == "delta"
+    assert "Allowed terminal actions:" not in second_prompt["system"]
+    assert "Campaign memory:" not in second_prompt["user"]
+    assert "Recent steps:" not in second_prompt["user"]
+    assert "Previous step:" in second_prompt["user"]
+    assert 'action={"action": "wait", "arguments": {}}' in second_prompt["user"]
+    assert "[generic_terminal]" in second_prompt["user"]
+
+
 def test_activity_runner_logs_action_execution_errors_without_crashing(tmp_path):
     agent = RejectingAgent()
     model = ScriptedModelAdapter(

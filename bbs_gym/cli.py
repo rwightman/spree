@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from terminal_agent.ansi import strip_ansi
-from terminal_agent.models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from terminal_agent.models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from terminal_agent.models import output_filters_for_model
 from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
 from terminal_agent.terminal import TerminalScreen, TurnObserver
@@ -82,11 +82,12 @@ def run_activity(args: argparse.Namespace) -> int:
     try:
         registry = load_agent_registry(args.agents_config, required=False)
         model = build_model(args, registry)
+        model_metadata = build_model_metadata(args, registry)
     except (AccountConfigError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    profile = build_activity_profile(args)
+    profile = build_activity_profile(args, registry)
     runner = ActivityRunner(profile, log_path=args.log_path)
 
     try:
@@ -98,7 +99,7 @@ def run_activity(args: argparse.Namespace) -> int:
             transport=args.transport,
             agent_registry=registry,
         ) as gym:
-            agent = gym.connect(args.agent_id, node=args.node)
+            agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
             result = runner.run(
                 agent,
                 model,
@@ -115,13 +116,20 @@ def run_activity(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_activity_profile(args: argparse.Namespace) -> ActivityProfile:
+def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityProfile:
     profile = activity_profile(args.activity, args.objective)
+    record = registry.maybe_get(args.agent_id) if registry is not None else None
+    model_config = record.model if record is not None else {}
+    provider = getattr(args, "provider", None) or _config_str(model_config, "provider") or "openai-compatible"
     overrides: dict[str, object] = {}
     if args.observe_timeout is not None:
         overrides["observe_timeout"] = args.observe_timeout
     if args.stable_ms is not None:
         overrides["stable_ms"] = args.stable_ms
+    if getattr(args, "prompt_mode", None) is not None:
+        overrides["prompt_mode"] = args.prompt_mode
+    elif provider == "codex" and _codex_stateful(args, model_config):
+        overrides["prompt_mode"] = "stateful_delta"
     return replace(profile, **overrides) if overrides else profile
 
 
@@ -145,7 +153,24 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             max_tokens=_config_int(args.max_tokens, model_config, "max_tokens", 512),
             cache_system_prompt=not args.no_anthropic_cache,
         )
-    else:
+    elif provider == "codex":
+        model = CodexCliAdapter(
+            model=args.model or _config_str(model_config, "model"),
+            profile=getattr(args, "codex_profile", None) or _config_str(model_config, "profile"),
+            executable=getattr(args, "codex_executable", None) or _config_str(model_config, "executable") or "codex",
+            timeout=_config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 300.0),
+            sandbox=getattr(args, "codex_sandbox", None) or _config_str(model_config, "sandbox") or "read-only",
+            cwd=getattr(args, "codex_cwd", None) or _config_str(model_config, "cwd"),
+            extra_args=_config_str_list(model_config, "extra_args") + (getattr(args, "codex_arg", []) or []),
+            stateful=_codex_stateful(args, model_config),
+            session_id=getattr(args, "codex_session_id", None) or _config_str(model_config, "session_id"),
+            session_file=getattr(args, "codex_session_file", None) or _config_str(model_config, "session_file"),
+            output_filters=output_filters_for_model(
+                args.model or _config_str(model_config, "model") or "",
+                args.response_filter or _config_str(model_config, "response_filter"),
+            ),
+        )
+    elif provider == "openai-compatible":
         model_name = args.model or _config_str(model_config, "model")
         if not model_name:
             raise ValueError("--model is required for openai-compatible provider")
@@ -161,7 +186,65 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
                 args.response_filter or _config_str(model_config, "response_filter"),
             ),
         )
+    else:
+        raise ValueError(f"unknown model provider: {provider}")
     return model
+
+
+def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | None) -> dict[str, object]:
+    record = registry.maybe_get(args.agent_id) if registry is not None else None
+    model_config = record.model if record is not None else {}
+    provider = args.provider or _config_str(model_config, "provider") or "openai-compatible"
+
+    if provider == "scripted":
+        return {
+            "provider": "scripted",
+            "scripted_response_count": len(args.scripted_response or []),
+        }
+    if provider == "anthropic":
+        model_name = args.model or _config_str(model_config, "model") or ""
+        return {
+            "provider": "anthropic",
+            "model": model_name,
+            "base_url": args.base_url or _config_str(model_config, "base_url") or "https://api.anthropic.com/v1",
+            "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+            "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+            "cache_system_prompt": not args.no_anthropic_cache,
+        }
+    if provider == "codex":
+        model_name = args.model or _config_str(model_config, "model") or ""
+        return _without_empty_values(
+            {
+                "provider": "codex",
+                "model": model_name,
+                "profile": getattr(args, "codex_profile", None) or _config_str(model_config, "profile"),
+                "executable": getattr(args, "codex_executable", None)
+                or _config_str(model_config, "executable")
+                or "codex",
+                "timeout": _config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 300.0),
+                "sandbox": getattr(args, "codex_sandbox", None) or _config_str(model_config, "sandbox") or "read-only",
+                "cwd": getattr(args, "codex_cwd", None) or _config_str(model_config, "cwd"),
+                "extra_args": _config_str_list(model_config, "extra_args") + (getattr(args, "codex_arg", []) or []),
+                "stateful": _codex_stateful(args, model_config),
+                "session_id": getattr(args, "codex_session_id", None) or _config_str(model_config, "session_id"),
+                "session_file": getattr(args, "codex_session_file", None) or _config_str(model_config, "session_file"),
+                "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
+            }
+        )
+    if provider == "openai-compatible":
+        model_name = args.model or _config_str(model_config, "model") or ""
+        return _without_empty_values(
+            {
+                "provider": "openai-compatible",
+                "model": model_name,
+                "base_url": args.base_url or _config_str(model_config, "base_url") or DEFAULT_OPENAI_BASE_URL,
+                "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+                "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+                "extra_body": _config_dict(model_config, "extra_body"),
+                "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
+            }
+        )
+    raise ValueError(f"unknown model provider: {provider}")
 
 
 def accounts_list(args: argparse.Namespace) -> int:
@@ -255,6 +338,34 @@ def _config_dict(config: dict[str, Any], key: str) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+def _config_str_list(config: dict[str, Any], key: str) -> list[str]:
+    value = config.get(key)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    if isinstance(value, tuple):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _config_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = config.get(key)
+    return value if isinstance(value, bool) else default
+
+
+def _codex_stateful(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
+    if getattr(args, "codex_stateful", False):
+        return True
+    if "stateful" in model_config:
+        return _config_bool(model_config, "stateful")
+    return False
+
+
+def _without_empty_values(data: dict[str, object | None]) -> dict[str, object]:
+    return {key: value for key, value in data.items() if value not in (None, "", [], {})}
+
+
 def _config_float(value: float | None, config: dict[str, Any], key: str, default: float) -> float:
     if value is not None:
         return value
@@ -304,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument("--node", type=int)
-    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "scripted"])
+    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "codex", "scripted"])
     run_parser.add_argument("--base-url")
     run_parser.add_argument("--api-key")
     run_parser.add_argument("--no-anthropic-cache", action="store_true")
@@ -313,12 +424,22 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--temperature", type=float)
     run_parser.add_argument("--max-tokens", type=int)
     run_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
+    run_parser.add_argument("--codex-profile")
+    run_parser.add_argument("--codex-executable")
+    run_parser.add_argument("--codex-timeout", type=float)
+    run_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
+    run_parser.add_argument("--codex-cwd")
+    run_parser.add_argument("--codex-arg", action="append", default=[])
+    run_parser.add_argument("--codex-stateful", action="store_true")
+    run_parser.add_argument("--codex-session-id")
+    run_parser.add_argument("--codex-session-file")
     run_parser.add_argument("--activity", default="bbs-main-menu")
     run_parser.add_argument("--objective")
     run_parser.add_argument("--max-decision-ticks", type=int, default=20)
     run_parser.add_argument("--max-wall-seconds", type=float, default=300.0)
     run_parser.add_argument("--observe-timeout", type=float)
     run_parser.add_argument("--stable-ms", type=int)
+    run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)
 
