@@ -10,12 +10,7 @@ uv.lock
 config/agents.local.json
 
 # Runtime state and generated transcripts.
-runtime/sbbs/
-runtime/transcripts/
-runtime/logs/
-runtime/memory/
-runtime/secrets/
-runtime/tmp/
+runtime/*
 
 # Proprietary/shareware DOS door distributions are supplied locally and are not
 # committed by default.
