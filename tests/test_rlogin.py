@@ -43,7 +43,7 @@ def test_rlogin_enter_key_matches_empty_send_line():
     session._sock.sent.clear()
     session.send_key("enter")
 
-    assert line_bytes == bytes(session._sock.sent) == b"\r\n"
+    assert line_bytes == bytes(session._sock.sent) == b"\r"
 
 
 def test_rlogin_key_accepts_printable_character():
