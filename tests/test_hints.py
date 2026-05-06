@@ -104,6 +104,39 @@ def test_observation_hints_prefers_new_text_prompt_over_stale_pretty_prompt():
     assert hints.active_prompt == "Command (?=Help)?"
 
 
+def test_observation_hints_does_not_treat_brackets_as_prompt_evidence():
+    hints = ObservationHints.from_observation(
+        observation("[ Scanning   0.0% ][ Done      100.0% ]", cursor=(0, 36)),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=InputModalityProfile(),
+    )
+
+    assert hints.active_prompt == "(unknown - inspect the screen)"
+
+
+def test_observation_hints_recognizes_hit_key_prompt_with_trailing_noise():
+    hints = ObservationHints.from_observation(
+        observation("[Hit a key] #", cursor=(0, 13)),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=InputModalityProfile(),
+    )
+
+    assert hints.active_prompt == "[Hit a key] #"
+
+
+def test_observation_hints_recognizes_yes_no_choice_without_trailing_punctuation():
+    hints = ObservationHints.from_observation(
+        observation("[+] Log off? [No] Yes", cursor=(0, 21)),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=InputModalityProfile(),
+    )
+
+    assert hints.active_prompt == "[+] Log off? [No] Yes"
+
+
 def test_observation_hints_classify_with_domain_supplied_rules():
     profile = InputModalityProfile(
         rules=(

@@ -17,6 +17,8 @@ BBS_HOTKEY_CONVENTIONS = (
     "BBS convention: menu letters and numbers are often single-key hotkeys. Use press_key for those one-character "
     "choices so you do not send an extra Enter. Use submit_line when the BBS is asking for a typed line of text. "
     'In prompts like "Yes [No]" or "[Yes] No", brackets usually mark the currently selected/default choice. '
+    "Bracketed shortcuts such as [(Q)uit] mark a single-key shortcut for that choice, while the same prompt may "
+    "also accept typed values for other choices. "
     "If the prompt shows answer letters, use the obvious printable key such as Y or N; use arrow keys only when "
     "the UI appears to behave like a selector."
 )
@@ -40,20 +42,6 @@ BBS_INPUT_MODALITY_PROFILE = InputModalityProfile(
             pattern=r"(?:\([Yy]/[Nn]\)|\[[Yy]es\]\s+No|Yes\s+\[[Nn]o\]|\[[Nn]o\]\s+Yes|No\s+\[[Yy]es\])",
             hint="choose with the obvious printable key when answer letters are visible; use Enter for the bracketed default",
             priority=20,
-            target="active_prompt",
-        ),
-        InputModeRule.from_pattern(
-            mode="line_input_expected",
-            pattern=r"(?:enter|type).{1,80}(?:\:|\?)\s*$",
-            hint="type the requested text and submit it with submit_line",
-            priority=10,
-            target="active_prompt",
-        ),
-        InputModeRule.from_pattern(
-            mode="hotkey_expected",
-            pattern=r"(?:which|selection|command).{0,80}(?:\:|\?)\s*$",
-            hint="one-character menu choices are usually single keypresses; use press_key unless the prompt asks for a value",
-            priority=5,
             target="active_prompt",
         ),
     )
