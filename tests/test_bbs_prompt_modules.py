@@ -76,6 +76,17 @@ def test_bbs_modality_profile_classifies_bracketed_choice_as_hotkey():
     assert "obvious printable key" in hint
 
 
+def test_bbs_modality_profile_leaves_mixed_value_and_shortcut_prompt_unknown():
+    mode, hint = BBS_INPUT_MODALITY_PROFILE.classify(
+        active_prompt="Enter number of bulletin or [(Q)uit]:",
+        recent_output="",
+        screen_tail="Enter number of bulletin or [(Q)uit]:",
+    )
+
+    assert mode == "unknown"
+    assert hint == "inspect the screen"
+
+
 def test_tw2_modality_profile_prioritizes_tw2_line_input_hint():
     mode, hint = TW2_INPUT_MODALITY_PROFILE.classify(
         active_prompt="How many holds of organics do you want to buy [20]?",

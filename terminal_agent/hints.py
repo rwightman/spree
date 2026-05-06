@@ -14,7 +14,11 @@ InputModeTarget = Literal["active_prompt", "recent_output", "screen_tail"]
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _SPACE_RE = re.compile(r"[ \t]+")
 _ECHO_SPACE_RE = re.compile(r"\s+")
-_BRACKETED_PROMPT_RE = re.compile(r"\[[^\]]+\](?:\s*[-\w])?\s*$")
+_INPUT_WAIT_RE = re.compile(r"\b(?:press|hit)\s+(?:any\s+)?(?:a\s+)?(?:key|enter|return)\b", re.IGNORECASE)
+_YES_NO_CHOICE_RE = re.compile(
+    r"\?.*(?:\b[Yy]es\b|\b[Nn]o\b|\([Yy]/[Nn]\)|\[[Yy]es\]|\[[Nn]o\])\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -161,13 +165,10 @@ def _active_prompt(observation: Observation) -> str:
     if new_text_prompt:
         return new_text_prompt
 
-    if nearest_pretty:
-        return nearest_pretty
-
     model_lines = observation.model_text.splitlines()
     for line in reversed(model_lines):
         clean = _clean_line(line)
-        if clean:
+        if clean and _looks_like_prompt(clean):
             return clean
     return "(unknown - inspect the screen)"
 
@@ -195,7 +196,7 @@ def _prompt_from_new_text(new_text: str) -> str:
 
 def _looks_like_prompt(line: str) -> bool:
     clean = _clean_line(line)
-    return clean.endswith(("?", ":", ">")) or bool(_BRACKETED_PROMPT_RE.search(clean))
+    return clean.endswith(("?", ":", ">")) or bool(_INPUT_WAIT_RE.search(clean) or _YES_NO_CHOICE_RE.search(clean))
 
 
 def _clean_line(line: str) -> str:
