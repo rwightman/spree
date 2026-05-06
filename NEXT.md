@@ -44,6 +44,7 @@ Already present:
 - OpenAI-compatible and Anthropic HTTP adapters.
 - Raw/filtered response tracking so reasoning tags can be logged while action
   parsing sees cleaned JSON.
+- Model-family response filters, including Gemma 4 thought-channel filtering.
 - Anthropic prompt caching for stable system prompts.
 - Single-agent activity runner.
 - TW2 entry activity profile.
@@ -115,6 +116,18 @@ chat messages -> text response
 
 Avoid depending on provider-specific tool calling, Responses API, JSON schema
 enforcement, or multimodal input until each backend has been tested explicitly.
+
+Model families can need different response filters. The harness should keep raw
+responses in traces but parse actions from filtered text. Current families:
+
+```text
+default  Strip common XML-ish reasoning tags such as <think>...</think>.
+gemma4   Strip Gemma 4 thought-channel markers such as <|channel>thought.
+none     Disable filtering for debugging.
+```
+
+Selection should default from the model id and be overridable per run or agent
+registry entry.
 
 ## Action Model
 

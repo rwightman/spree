@@ -80,8 +80,11 @@ def render_step(
     if show_model_response and isinstance(validation, dict):
         model_response = validation.get("model_response")
         if isinstance(model_response, dict):
+            reasoning = model_response.get("reasoning", "")
             raw = model_response.get("response", "")
             parsed = model_response.get("parsed_response", "")
+            if isinstance(reasoning, str) and reasoning:
+                lines.extend(["", "reasoning:", visible_controls(reasoning) if show_controls else reasoning])
             if isinstance(raw, str):
                 lines.extend(["", "model_response:", visible_controls(raw) if show_controls else raw])
             if isinstance(parsed, str):

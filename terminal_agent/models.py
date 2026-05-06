@@ -13,6 +13,8 @@ from typing import Protocol
 
 from .actions import Action, ActionPolicy, parse_action
 
+OutputFilter = Callable[[str], str]
+
 
 @dataclass(frozen=True)
 class ModelMessage:
@@ -114,14 +116,17 @@ class TextChatAdapter:
     name: str
     last_response: str = ""
     last_parsed_response: str = ""
-    output_filters: tuple[Callable[[str], str], ...] | None = None
+    last_reasoning: str = ""
+    output_filters: tuple[OutputFilter, ...] | None = None
 
     def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
+        self.last_reasoning = ""
         self.last_response = self.chat(prompt.messages())
         self.last_parsed_response = self._filter_output(self.last_response).strip()
         return parse_action(self.last_parsed_response, policy)
 
     def compact(self, prompt: CompactionPrompt) -> SessionSummary:
+        self.last_reasoning = ""
         self.last_response = self.chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
         try:
@@ -133,6 +138,7 @@ class TextChatAdapter:
         return SessionSummary.from_mapping(data)
 
     def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch:
+        self.last_reasoning = ""
         self.last_response = self.chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
         try:
@@ -172,7 +178,7 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             temperature: float = 0.2,
             max_tokens: int = 512,
             extra_body: dict[str, object] | None = None,
-            output_filters: tuple[Callable[[str], str], ...] | None = None,
+            output_filters: tuple[OutputFilter, ...] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -182,7 +188,7 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.extra_body = dict(extra_body or {})
-        self.output_filters = output_filters
+        self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
         payload = {
@@ -199,7 +205,9 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             timeout=self.timeout,
         )
         try:
-            return response["choices"][0]["message"]["content"]
+            message = response["choices"][0]["message"]
+            self.last_reasoning = _optional_string(message.get("reasoning") or message.get("reasoning_content"))
+            return _optional_string(message.get("content"))
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"unexpected OpenAI-compatible response: {response!r}") from exc
 
@@ -291,13 +299,68 @@ UNCLOSED_REASONING_BLOCK_RE = re.compile(
     r"<(think|thinking|reasoning|analysis)\b[^>]*>.*\Z",
     re.DOTALL | re.IGNORECASE,
 )
+GEMMA_CHANNEL_OPEN = r"<\|channel\|?>"
+GEMMA_CHANNEL_CLOSE = r"(?:<channel\|>|<\|channel\|>)"
+GEMMA_CLOSED_THOUGHT_CHANNEL_RE = re.compile(
+    rf"{GEMMA_CHANNEL_OPEN}\s*thought\b.*?{GEMMA_CHANNEL_CLOSE}\s*",
+    re.DOTALL | re.IGNORECASE,
+)
+GEMMA_THOUGHT_BEFORE_FINAL_RE = re.compile(
+    rf"{GEMMA_CHANNEL_OPEN}\s*thought\b.*?(?={GEMMA_CHANNEL_OPEN}\s*(?:final|answer)\b)",
+    re.DOTALL | re.IGNORECASE,
+)
+GEMMA_UNCLOSED_THOUGHT_CHANNEL_RE = re.compile(
+    rf"{GEMMA_CHANNEL_OPEN}\s*thought\b.*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
+GEMMA_CHANNEL_MARKER_RE = re.compile(
+    rf"(?:{GEMMA_CHANNEL_OPEN}\s*(?:final|answer|assistant)?\b\s*|{GEMMA_CHANNEL_CLOSE}\s*)",
+    re.IGNORECASE,
+)
 
 
 def strip_reasoning_blocks(text: str) -> str:
     return UNCLOSED_REASONING_BLOCK_RE.sub("", REASONING_BLOCK_RE.sub("", text))
 
 
+def strip_gemma4_channel_reasoning(text: str) -> str:
+    filtered = GEMMA_CLOSED_THOUGHT_CHANNEL_RE.sub("", text)
+    filtered = GEMMA_THOUGHT_BEFORE_FINAL_RE.sub("", filtered)
+    filtered = GEMMA_UNCLOSED_THOUGHT_CHANNEL_RE.sub("", filtered)
+    return GEMMA_CHANNEL_MARKER_RE.sub("", filtered)
+
+
 DEFAULT_OUTPUT_FILTERS = (strip_reasoning_blocks,)
+GEMMA4_OUTPUT_FILTERS = DEFAULT_OUTPUT_FILTERS + (strip_gemma4_channel_reasoning,)
+
+
+def output_filters_for_model(model: str, filter_family: str | None = None) -> tuple[OutputFilter, ...]:
+    family = _normalize_filter_family(filter_family) if filter_family else "auto"
+    if family == "auto":
+        family = _infer_filter_family(model)
+    if family == "none":
+        return ()
+    if family == "gemma4":
+        return GEMMA4_OUTPUT_FILTERS
+    return DEFAULT_OUTPUT_FILTERS
+
+
+def _infer_filter_family(model: str) -> str:
+    normalized = model.lower().replace("_", "-").replace("/", "-")
+    if "gemma-4" in normalized or "gemma4" in normalized:
+        return "gemma4"
+    return "default"
+
+
+def _normalize_filter_family(filter_family: str) -> str:
+    normalized = filter_family.lower().replace("_", "-")
+    if normalized in {"auto", "model"}:
+        return "auto"
+    if normalized in {"off", "none", "raw"}:
+        return "none"
+    if normalized in {"gemma4", "gemma-4"}:
+        return "gemma4"
+    return "default"
 
 
 def _post_json(
@@ -326,6 +389,10 @@ def _post_json(
 
 def _string_field(data: dict[str, object], key: str) -> str:
     value = data.get(key, "")
+    return value if isinstance(value, str) else ""
+
+
+def _optional_string(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 

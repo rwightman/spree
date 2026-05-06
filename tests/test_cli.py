@@ -31,6 +31,7 @@ def test_build_model_uses_agent_registry_model_config():
         api_key=None,
         temperature=None,
         max_tokens=None,
+        response_filter=None,
         no_anthropic_cache=False,
     )
 

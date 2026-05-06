@@ -6,6 +6,8 @@ from terminal_agent.models import (
     OpenAICompatibleAdapter,
     SessionSummary,
     TextChatAdapter,
+    output_filters_for_model,
+    strip_gemma4_channel_reasoning,
 )
 
 
@@ -63,6 +65,35 @@ def test_compact_does_not_store_truncated_reasoning_as_summary():
     assert summary.is_empty()
 
 
+def test_gemma4_filter_strips_thought_channel_and_keeps_json():
+    response = '<|channel>thought\nchoose a safe action<channel|>\n<|channel>final\n{"action": "wait"}'
+
+    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait"}'
+
+
+def test_gemma4_filter_strips_empty_thought_channel_and_keeps_json():
+    response = '<|channel>thought\n<channel|>{"action": "wait"}'
+
+    assert strip_gemma4_channel_reasoning(response).strip() == '{"action": "wait"}'
+
+
+def test_gemma4_filter_strips_unclosed_thought_channel():
+    assert strip_gemma4_channel_reasoning("<|channel>thought\nstill reasoning").strip() == ""
+
+
+def test_output_filters_infer_gemma4_from_model_id():
+    filters = output_filters_for_model("google/gemma-4-31B-it")
+    response = '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action": "wait"}'
+    for output_filter in filters:
+        response = output_filter(response)
+
+    assert response.strip() == '{"action": "wait"}'
+
+
+def test_output_filters_can_be_disabled():
+    assert output_filters_for_model("google/gemma-4-31B-it", "none") == ()
+
+
 def test_openai_compatible_adapter_merges_extra_body(monkeypatch):
     captured = {}
 
@@ -79,6 +110,77 @@ def test_openai_compatible_adapter_merges_extra_body(monkeypatch):
     adapter.chat([ModelMessage("user", "screen")])
 
     assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_openai_compatible_adapter_infers_gemma4_response_filter(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '<|channel>thought\nchoose action<channel|>\n<|channel>final\n{"action":"wait"}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(model="google/gemma-4-31B-it")
+
+    action = adapter.decide(DecisionPrompt("s", "u"))
+
+    assert action.action == "wait"
+    assert adapter.last_parsed_response == '{"action":"wait"}'
+
+
+def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning": "choose the low-risk action",
+                        "content": '{"action":"wait"}',
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(model="google/gemma-4-31B-it")
+
+    action = adapter.decide(DecisionPrompt("s", "u"))
+
+    assert action.action == "wait"
+    assert adapter.last_reasoning == "choose the low-risk action"
+    assert adapter.last_response == '{"action":"wait"}'
+
+
+def test_openai_compatible_adapter_captures_legacy_reasoning_content(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "legacy reasoning field",
+                        "content": '{"action":"wait"}',
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(model="test-model")
+
+    adapter.decide(DecisionPrompt("s", "u"))
+
+    assert adapter.last_reasoning == "legacy reasoning field"
+
+
+def test_openai_compatible_adapter_can_disable_response_filters():
+    adapter = OpenAICompatibleAdapter(model="google/gemma-4-31B-it", output_filters=())
+
+    assert adapter.output_filters == ()
 
 
 def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
