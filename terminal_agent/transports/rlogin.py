@@ -19,7 +19,7 @@ from .base import SessionDisconnected
 
 
 RLOGIN_KEY_BYTES = {
-    "enter": b"\r\n",
+    "enter": b"\r",
     "escape": b"\x1b",
     "tab": b"\t",
     "backspace": b"\x7f",
