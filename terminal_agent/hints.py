@@ -14,6 +14,7 @@ InputModeTarget = Literal["active_prompt", "recent_output", "screen_tail"]
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _SPACE_RE = re.compile(r"[ \t]+")
 _ECHO_SPACE_RE = re.compile(r"\s+")
+_BRACKETED_PROMPT_RE = re.compile(r"\[[^\]]+\](?:\s*[-\w])?\s*$")
 
 
 @dataclass(frozen=True)
@@ -148,13 +149,20 @@ def _looks_like_echo_only(new_text: str, visible_input: str) -> bool:
 
 
 def _active_prompt(observation: Observation) -> str:
-    pretty_lines = observation.pretty_screen.splitlines()
-    if pretty_lines:
-        row = observation.cursor[0]
-        for index in range(min(row, len(pretty_lines) - 1), -1, -1):
-            line = _clean_line(pretty_lines[index])
-            if line:
-                return line
+    # The pyte screen is the settled visual state, while new_text is the byte
+    # stream that just arrived. Some BBS/DOS doors write a live prompt, return
+    # the cursor with CR, then blank the cells; recover those prompts from the
+    # stream before falling back to older rendered screen text.
+    nearest_pretty = _nearest_nonempty_pretty_line(observation)
+    if nearest_pretty and _looks_like_prompt(nearest_pretty):
+        return nearest_pretty
+
+    new_text_prompt = _prompt_from_new_text(observation.new_text)
+    if new_text_prompt:
+        return new_text_prompt
+
+    if nearest_pretty:
+        return nearest_pretty
 
     model_lines = observation.model_text.splitlines()
     for line in reversed(model_lines):
@@ -162,6 +170,32 @@ def _active_prompt(observation: Observation) -> str:
         if clean:
             return clean
     return "(unknown - inspect the screen)"
+
+
+def _nearest_nonempty_pretty_line(observation: Observation) -> str:
+    pretty_lines = observation.pretty_screen.splitlines()
+    if not pretty_lines:
+        return ""
+    row = observation.cursor[0]
+    for index in range(min(row, len(pretty_lines) - 1), -1, -1):
+        line = _clean_line(pretty_lines[index])
+        if line:
+            return line
+    return ""
+
+
+def _prompt_from_new_text(new_text: str) -> str:
+    for line in reversed(new_text.split("\n")):
+        for segment in reversed(line.split("\r")):
+            clean = _clean_line(segment)
+            if clean and _looks_like_prompt(clean):
+                return clean
+    return ""
+
+
+def _looks_like_prompt(line: str) -> bool:
+    clean = _clean_line(line)
+    return clean.endswith(("?", ":", ">")) or bool(_BRACKETED_PROMPT_RE.search(clean))
 
 
 def _clean_line(line: str) -> str:

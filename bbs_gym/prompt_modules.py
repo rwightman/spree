@@ -14,7 +14,7 @@ from terminal_agent.prompt_modules import (
 )
 
 BBS_HOTKEY_CONVENTIONS = (
-    "BBS convention: menu letters and numbers are often single-key hotkeys. Use key for those one-character "
+    "BBS convention: menu letters and numbers are often single-key hotkeys. Use press_key for those one-character "
     "choices so you do not send an extra Enter. Use submit_line when the BBS is asking for a typed line of text. "
     'In prompts like "Yes [No]" or "[Yes] No", brackets usually mark the currently selected/default choice. '
     "If the prompt shows answer letters, use the obvious printable key such as Y or N; use arrow keys only when "
@@ -31,7 +31,7 @@ BBS_INPUT_MODALITY_PROFILE = InputModalityProfile(
         InputModeRule.from_pattern(
             mode="any_key_expected",
             pattern=r"(?:press|hit).{0,20}(?:any\s+)?key|press\s+enter",
-            hint="press one key; key enter is a safe default when the screen says any key or Enter",
+            hint="press one key with press_key; press_key enter is a safe default when the screen says any key or Enter",
             priority=30,
             target="active_prompt",
         ),
@@ -52,7 +52,7 @@ BBS_INPUT_MODALITY_PROFILE = InputModalityProfile(
         InputModeRule.from_pattern(
             mode="hotkey_expected",
             pattern=r"(?:which|selection|command).{0,80}(?:\:|\?)\s*$",
-            hint="one-character menu choices are usually single keypresses; use key unless the prompt asks for a value",
+            hint="one-character menu choices are usually single keypresses; use press_key unless the prompt asks for a value",
             priority=5,
             target="active_prompt",
         ),
@@ -71,7 +71,7 @@ TW2_INPUT_MODALITY_PROFILE = InputModalityProfile(
         InputModeRule.from_pattern(
             mode="hotkey_expected",
             pattern=r"command\s+\(\?=help\)\?\s*$",
-            hint="one-character commands are usually single keypresses; use key unless you need to type a value",
+            hint="one-character commands are usually single keypresses; use press_key unless you need to type a value",
             priority=40,
             target="active_prompt",
         ),
