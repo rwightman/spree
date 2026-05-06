@@ -240,6 +240,31 @@ def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):
     assert model_response["parsed_response"] == '{"action": "hangup"}'
 
 
+def test_activity_runner_logs_separate_model_reasoning(tmp_path):
+    class ReasoningModel(ScriptedModelAdapter):
+        def chat(self, messages):
+            self.last_reasoning = "screen says quitting is appropriate"
+            return super().chat(messages)
+
+    agent = FakeAgent()
+    model = ReasoningModel(
+        [
+            '{"action": "hangup"}',
+            '{"durable_facts": ["Ended cleanly."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test reasoning traces"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=5))
+    model_response = result.steps[0].validation["model_response"]
+
+    assert result.stop_reason == "hangup"
+    assert model_response["reasoning"] == "screen says quitting is appropriate"
+
+
 def test_activity_runner_excludes_model_responses_from_context_by_default(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(

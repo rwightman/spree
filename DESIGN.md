@@ -301,6 +301,12 @@ and `<analysis>...</analysis>` before action parsing. This lets Qwen-style local
 models expose reasoning in traces without feeding hidden reasoning text back
 into the terminal action parser.
 
+Response filters are selected by model family when the model id is known.
+Gemma 4 models can emit thought-channel markers such as `<|channel>thought`;
+the Gemma 4 filter strips those thought channels and final-channel markers
+before JSON action parsing. Runs can override the inferred family with
+`--response-filter` or `response_filter` in the agent registry.
+
 Provider-specific optimizations are allowed when they do not change the
 internal contract. Anthropic prompt caching is enabled for the stable system
 prompt/action schema. OpenAI-compatible local servers can receive extra request

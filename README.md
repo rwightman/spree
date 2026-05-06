@@ -203,6 +203,11 @@ Adjust `--model` and `--tensor-parallel-size` for the local hardware. The
 example agent registry points `qwen-local-001` at `http://localhost:8000/v1`.
 For Qwen-style models that emit `<think>` blocks, raw model responses are kept
 in the JSONL trace while the action loop parses a filtered response.
+Response filtering is selected from the model id by default. `gemma-4` model
+ids use the Gemma 4 channel/thought filter, while the default filter handles
+common `<think>...</think>` style reasoning blocks. Override with
+`--response-filter auto|default|gemma4|none` or `response_filter` in the agent
+registry.
 
 ## Agent Accounts
 

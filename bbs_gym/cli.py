@@ -13,6 +13,7 @@ from typing import Any
 
 from terminal_agent.ansi import strip_ansi
 from terminal_agent.models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from terminal_agent.models import output_filters_for_model
 from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
 from terminal_agent.terminal import TerminalScreen, TurnObserver
 from terminal_agent.transports.telnet import TelnetSession
@@ -155,6 +156,10 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             temperature=_config_float(args.temperature, model_config, "temperature", 0.2),
             max_tokens=_config_int(args.max_tokens, model_config, "max_tokens", 512),
             extra_body=_config_dict(model_config, "extra_body"),
+            output_filters=output_filters_for_model(
+                model_name,
+                args.response_filter or _config_str(model_config, "response_filter"),
+            ),
         )
     return model
 
@@ -307,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--scripted-response", action="append", default=[])
     run_parser.add_argument("--temperature", type=float)
     run_parser.add_argument("--max-tokens", type=int)
+    run_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
     run_parser.add_argument("--activity", default="bbs-main-menu")
     run_parser.add_argument("--objective")
     run_parser.add_argument("--max-decision-ticks", type=int, default=20)

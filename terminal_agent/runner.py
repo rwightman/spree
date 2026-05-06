@@ -404,10 +404,14 @@ class ActivityRunner:
     def _model_response_record(self, model: ModelAdapter) -> dict[str, str]:
         raw = getattr(model, "last_response", "")
         parsed = getattr(model, "last_parsed_response", raw)
-        return {
+        record = {
             "response": self._truncate(raw, 2_000),
             "parsed_response": self._truncate(parsed, 2_000),
         }
+        reasoning = getattr(model, "last_reasoning", "")
+        if reasoning:
+            record["reasoning"] = self._truncate(reasoning, 4_000)
+        return record
 
     def _truncate(self, text: str, limit: int) -> str:
         if len(text) <= limit:
