@@ -45,6 +45,7 @@ class BbsGym:
             agent_id: str,
             node: int | None = None,
             transport: str | None = None,
+            model_metadata: dict[str, object] | None = None,
     ) -> TerminalSessionAgent:
         active_transport = transport or self.transport
         transcript = self.transcript_dir / f"{agent_id}.raw"
@@ -83,10 +84,13 @@ class BbsGym:
             metadata.update(
                 {
                     "bbs_alias": record.bbs_alias,
-                    "model": record.model,
                     "account_metadata": record.metadata,
                 }
             )
+        if model_metadata is not None:
+            metadata["model"] = model_metadata
+        elif record is not None:
+            metadata["model"] = record.model
         observer = TurnObserver(agent_id, session, terminal=terminal, profile=self.profile, metadata=metadata)
         agent = TerminalSessionAgent(agent_id, session, observer, metadata)
         self.agents[agent_id] = agent

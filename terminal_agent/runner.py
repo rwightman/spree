@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from .agent import TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
@@ -25,6 +25,9 @@ from .prompt_modules import (
 )
 from .transports.base import SessionDisconnected
 from .terminal import Observation
+
+PromptMode = Literal["stateless_full", "stateful_delta"]
+PromptStage = Literal["full", "bootstrap", "delta"]
 
 
 @dataclass
@@ -81,6 +84,7 @@ class ActivityProfile:
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
     include_model_responses_in_context: bool = False
+    prompt_mode: PromptMode = "stateless_full"
     input_modality_profile: InputModalityProfile = field(default_factory=InputModalityProfile)
     prompt_modules: tuple[PromptModule, ...] = field(default=GENERIC_TERMINAL_MODULES, repr=False, compare=False)
     completion_check: Callable[[Observation], bool] | None = field(default=None, repr=False, compare=False)
@@ -149,6 +153,7 @@ class ActivityRunner:
         last_observation: Observation | None = None
         previous_observation: Observation | None = None
         last_action_for_hints: Action | None = None
+        decision_prompts_sent = 0
 
         while budget.remaining():
             try:
@@ -207,6 +212,7 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
             )
+            prompt_stage = self._prompt_stage(decision_prompts_sent)
             prompt = self._build_decision_prompt(
                 agent_id=agent_id,
                 campaign_memory=campaign_memory,
@@ -214,9 +220,11 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
                 prompt_module_results=prompt_module_results,
+                prompt_stage=prompt_stage,
             )
 
             action, validation = self._decide_with_retry(model, prompt)
+            decision_prompts_sent += 1
             executed_action = action
             if action is None:
                 budget.record_validation_failure()
@@ -234,7 +242,12 @@ class ActivityRunner:
             step = StepRecord(
                 step=budget.decision_ticks,
                 observation=observation.as_dict(),
-                prompt={"system": prompt.system, "user": prompt.user},
+                prompt={
+                    "system": prompt.system,
+                    "user": prompt.user,
+                    "mode": prompt.mode,
+                    "stage": prompt.stage,
+                },
                 action=action.to_dict() if action else None,
                 validation=validation,
                 budget=budget.to_dict(),
@@ -280,6 +293,35 @@ class ActivityRunner:
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
+            prompt_stage: PromptStage,
+    ) -> DecisionPrompt:
+        if self.profile.prompt_mode == "stateful_delta" and prompt_stage == "delta":
+            return self._build_stateful_delta_prompt(
+                agent_id=agent_id,
+                session_summary=session_summary,
+                recent_steps=recent_steps,
+                budget=budget,
+                prompt_module_results=prompt_module_results,
+            )
+        return self._build_stateless_full_prompt(
+            agent_id=agent_id,
+            campaign_memory=campaign_memory,
+            session_summary=session_summary,
+            recent_steps=recent_steps,
+            budget=budget,
+            prompt_module_results=prompt_module_results,
+            prompt_stage=prompt_stage,
+        )
+
+    def _build_stateless_full_prompt(
+            self,
+            agent_id: str,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
+            prompt_module_results: list[PromptModuleResult],
+            prompt_stage: PromptStage,
     ) -> DecisionPrompt:
         system_parts = [
             "You are controlling an interactive terminal session.",
@@ -287,6 +329,11 @@ class ActivityRunner:
             "Return only a JSON action object.",
             render_action_schema(self.profile.action_policy),
         ]
+        if self.profile.prompt_mode == "stateful_delta" and prompt_stage == "bootstrap":
+            system_parts.append(
+                "This is the stateful session bootstrap. Future prompts may omit stable instructions, campaign "
+                "memory, and full recent-step history; keep this context active across resumed calls."
+            )
         if self.profile.system_guidance:
             system_parts.append(f"Activity-specific guidance:\n{self.profile.system_guidance}")
         system = "\n".join(system_parts)
@@ -305,7 +352,44 @@ class ActivityRunner:
                 "---",
             ]
         )
-        return DecisionPrompt(system=system, user=user)
+        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage=prompt_stage)
+
+    def _build_stateful_delta_prompt(
+            self,
+            agent_id: str,
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
+            prompt_module_results: list[PromptModuleResult],
+    ) -> DecisionPrompt:
+        system = "\n".join(
+            [
+                "Continue the existing terminal-control session from the bootstrap prompt.",
+                "Use the action schema, activity objective, stable guidance, and campaign memory already given.",
+                "Return only one JSON action object.",
+            ]
+        )
+        module_text = render_prompt_modules(prompt_module_results)
+        user = "\n\n".join(
+            [
+                f"Agent: {agent_id}",
+                f"Activity: {self.profile.name}",
+                f"Objective reminder: {self.profile.objective}",
+                f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
+                f"Session summary update: {self._summary_text(session_summary)}",
+                f"Previous step: {self._previous_step_delta_text(recent_steps)}",
+                "---",
+                module_text,
+                "---",
+                "Return exactly one JSON action.",
+            ]
+        )
+        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage="delta")
+
+    def _prompt_stage(self, decision_prompts_sent: int) -> PromptStage:
+        if self.profile.prompt_mode == "stateful_delta":
+            return "bootstrap" if decision_prompts_sent == 0 else "delta"
+        return "full"
 
     def _prompt_module_results(
             self,
@@ -520,6 +604,19 @@ class ActivityRunner:
                 )
             )
         return "\n\n".join(lines)
+
+    def _previous_step_delta_text(self, steps: list[StepRecord]) -> str:
+        if not steps:
+            return "(none)"
+        step = steps[-1]
+        action = step.action or {"action": "terminal_observation" if self._is_terminal_step(step) else "invalid"}
+        validation = self._validation_for_context(step.validation)
+        return "\n".join(
+            [
+                f"Step {step.step}: action={json.dumps(action, sort_keys=True)}",
+                f"Validation: {json.dumps(validation, sort_keys=True)}",
+            ]
+        )
 
     def _screen_tail(self, screen: Any) -> str:
         if not isinstance(screen, str) or self.profile.screen_tail_chars <= 0:

@@ -32,6 +32,8 @@ model/harness
 - Original DOS door target: BRE and TW2002 via the optional DOSEMU image.
 - Optional local model server: vLLM, Ollama, or llama.cpp through an
   OpenAI-compatible `/v1/chat/completions` endpoint.
+- Optional Codex provider: local `codex exec` subprocess calls for experiments
+  where Codex itself plays through the same terminal-action contract.
 
 Synchronet was chosen because it is actively maintained, has Docker support,
 ships with useful JavaScript doors, and supports classic BBS door dropfiles.
@@ -44,7 +46,8 @@ shell.
 `terminal_agent` owns behavior that applies to any interactive terminal target:
 
 - structured terminal actions and validation,
-- model adapters for OpenAI-compatible endpoints, Anthropic, and scripted tests,
+- model adapters for OpenAI-compatible endpoints, Anthropic, Codex CLI, and
+  scripted tests,
 - raw and parsed model-response tracking,
 - JSON-backed memory, compaction, and memory commits,
 - pyte-backed terminal rendering and quiescence observation,
@@ -353,7 +356,25 @@ before JSON action parsing. Runs can override the inferred family with
 Provider-specific optimizations are allowed when they do not change the
 internal contract. Anthropic prompt caching is enabled for the stable system
 prompt/action schema. OpenAI-compatible local servers can receive extra request
-body fields from the agent registry when needed.
+body fields from the agent registry when needed. The Codex CLI adapter runs
+`codex exec` as a subprocess for each harness call, captures the final message,
+and parses it through the same action/summary/memory paths as the HTTP
+providers.
+
+Decision prompts support two modes. `stateless_full` is the default and sends
+the complete harness context on every decision tick. `stateful_delta` sends one
+bootstrap prompt with stable instructions, schema, objective, campaign memory,
+and then shorter delta prompts containing current tactical observation, budget,
+session-summary update, and previous-step summary. Stateful delta prompts are
+only appropriate when the provider session preserves earlier context; harness
+memory and traces remain authoritative.
+
+The Codex CLI provider can run with `stateful=True`. In that mode, the first
+call uses `codex exec --json` so the adapter can capture the Codex session id.
+Later calls use `codex exec resume <session_id>` and should use
+`stateful_delta` prompts by default. Session ids can optionally be persisted to a
+file, but provider session state remains an optimization; benchmark replay and
+campaign state still come from harness traces and JSON memory.
 
 ## Runner, Clocks, And Memory
 

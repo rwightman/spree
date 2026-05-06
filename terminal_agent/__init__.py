@@ -7,6 +7,7 @@ __all__ = [
     "ActivityProfile",
     "ActivityRunner",
     "AnthropicAdapter",
+    "CodexCliAdapter",
     "EMPTY_PROFILE",
     "FullScreenModule",
     "GENERIC_TERMINAL_MODULES",
@@ -38,7 +39,7 @@ from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
 from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
-from .models import AnthropicAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from .models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, PromptProfile
 from .runner import ActivityBudget, ActivityProfile, ActivityRunner

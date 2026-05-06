@@ -1,5 +1,6 @@
 from terminal_agent.models import (
     AnthropicAdapter,
+    CodexCliAdapter,
     CompactionPrompt,
     DecisionPrompt,
     ModelMessage,
@@ -156,13 +157,13 @@ def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
     assert adapter.last_response == '{"action":"wait","arguments":{}}'
 
 
-def test_openai_compatible_adapter_captures_legacy_reasoning_content(monkeypatch):
+def test_openai_compatible_adapter_captures_reasoning_content_field(monkeypatch):
     def fake_post_json(url, payload, headers, timeout):
         return {
             "choices": [
                 {
                     "message": {
-                        "reasoning_content": "legacy reasoning field",
+                        "reasoning_content": "reasoning field",
                         "content": '{"action":"wait","arguments":{}}',
                     }
                 }
@@ -174,7 +175,7 @@ def test_openai_compatible_adapter_captures_legacy_reasoning_content(monkeypatch
 
     adapter.decide(DecisionPrompt("s", "u"))
 
-    assert adapter.last_reasoning == "legacy reasoning field"
+    assert adapter.last_reasoning == "reasoning field"
 
 
 def test_openai_compatible_adapter_can_disable_response_filters():
@@ -205,3 +206,109 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
             "cache_control": {"type": "ephemeral"},
         }
     ]
+
+
+def test_codex_cli_adapter_invokes_codex_exec(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        captured["command"] = command
+        captured["input"] = input
+        captured["text"] = text
+        captured["capture_output"] = capture_output
+        captured["timeout"] = timeout
+        captured["cwd"] = cwd
+        captured["check"] = check
+        output_path = command[command.index("--output-last-message") + 1]
+        with open(output_path, "w", encoding="utf-8") as output_file:
+            output_file.write('{"action": "wait", "arguments": {}}')
+        return Result()
+
+    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    adapter = CodexCliAdapter(
+        model="gpt-5.5",
+        profile="bbs",
+        timeout=42.0,
+        sandbox="read-only",
+        extra_args=["--ignore-rules"],
+    )
+
+    action = adapter.decide(DecisionPrompt("system schema", "current screen"))
+
+    assert action.action == "wait"
+    assert captured["command"][:2] == ["codex", "exec"]
+    assert "--ephemeral" in captured["command"]
+    assert captured["command"][captured["command"].index("--model") + 1] == "gpt-5.5"
+    assert captured["command"][captured["command"].index("--profile") + 1] == "bbs"
+    assert captured["command"][captured["command"].index("--sandbox") + 1] == "read-only"
+    assert captured["command"][-2:] == ["--ignore-rules", "-"]
+    assert captured["timeout"] == 42.0
+    assert "SYSTEM MESSAGE:\nsystem schema" in captured["input"]
+    assert "USER MESSAGE:\ncurrent screen" in captured["input"]
+
+
+def test_codex_cli_adapter_resumes_stateful_session(monkeypatch, tmp_path):
+    commands = []
+    session_id = "11111111-2222-3333-4444-555555555555"
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        del input, text, capture_output, timeout, cwd, check
+        commands.append(command)
+        output_path = command[command.index("--output-last-message") + 1]
+        with open(output_path, "w", encoding="utf-8") as output_file:
+            output_file.write('{"action": "wait", "arguments": {}}')
+        if len(commands) == 1:
+            return Result(f'{{"type":"session_configured","session_id":"{session_id}"}}\n')
+        return Result()
+
+    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    session_file = tmp_path / "codex.session"
+    adapter = CodexCliAdapter(model="gpt-5.5", stateful=True, session_file=session_file)
+
+    first = adapter.decide(DecisionPrompt("system schema", "current screen", mode="stateful_delta", stage="bootstrap"))
+    second = adapter.decide(DecisionPrompt("delta system", "delta screen", mode="stateful_delta", stage="delta"))
+
+    assert first.action == "wait"
+    assert second.action == "wait"
+    assert adapter.session_id == session_id
+    assert session_file.read_text(encoding="utf-8").strip() == session_id
+    assert commands[0][:2] == ["codex", "exec"]
+    assert "--ephemeral" not in commands[0]
+    assert "--json" in commands[0]
+    assert commands[0][-1] == "-"
+    assert commands[1][:3] == ["codex", "exec", "resume"]
+    assert session_id in commands[1]
+    assert commands[1][-1] == "-"
+
+
+def test_codex_cli_adapter_raises_on_command_failure(monkeypatch):
+    class Result:
+        returncode = 2
+        stdout = "stdout detail"
+        stderr = "stderr detail"
+
+    def fake_run(*_args, **_kwargs):
+        return Result()
+
+    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    adapter = CodexCliAdapter()
+
+    try:
+        adapter.chat([ModelMessage("user", "screen")])
+    except RuntimeError as exc:
+        assert "codex exec failed" in str(exc)
+        assert "stderr detail" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
