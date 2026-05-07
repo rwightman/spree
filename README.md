@@ -11,6 +11,8 @@ model, timing strategy, and multi-agent plan.
 See [NEXT.md](NEXT.md) for near-term implementation notes and observed failure
 modes from live TW2 runs.
 
+License: Apache-2.0, Copyright 2026 Ross Wightman.
+
 ## Current Shape
 
 - BBS runtime: Synchronet in Docker, with persistent state in `runtime/sbbs`.
@@ -268,22 +270,39 @@ mid-session.
 ## Local vLLM OpenAI-Compatible Server
 
 The OpenAI-compatible adapter works with local servers such as vLLM, Ollama, and
-llama.cpp. A minimal vLLM Docker server for a two-GPU Linux box looks like:
+llama.cpp. The default vLLM Docker setup uses Gemma 4 31B with thinking enabled
+server-wide. This is the setup used for the current local TW2 smoke runs:
 
 ```bash
 docker run --rm --gpus all --ipc=host --shm-size 16g \
   -p 127.0.0.1:8000:8000 \
   -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
   vllm/vllm-openai:latest \
-  --model Qwen/Qwen3-32B \
+  --model google/gemma-4-31B-it \
+  --served-model-name gemma4 \
   --tensor-parallel-size 2 \
-  --dtype auto
+  --max-model-len 16384 \
+  --gpu-memory-utilization 0.90 \
+  --dtype auto \
+  --enable-auto-tool-choice \
+  --reasoning-parser gemma4 \
+  --tool-call-parser gemma4 \
+  --chat-template examples/tool_chat_template_gemma4.jinja \
+  --default-chat-template-kwargs '{"enable_thinking": true}' \
+  --limit-mm-per-prompt image=0,audio=0
 ```
 
-Adjust `--model` and `--tensor-parallel-size` for the local hardware. The
-example agent registry points `qwen-local-001` at `http://localhost:8000/v1`.
-For Qwen-style models that emit `<think>` blocks, raw model responses are kept
-in the JSONL trace while the action loop parses a filtered response.
+The `--served-model-name gemma4` alias matches the README run examples. Adjust
+`--tensor-parallel-size`, `--max-model-len`, and `--gpu-memory-utilization` for
+local hardware. For text-only BBS runs, `--limit-mm-per-prompt image=0,audio=0`
+avoids multimodal profiling overhead.
+
+With `--reasoning-parser gemma4` and
+`--default-chat-template-kwargs '{"enable_thinking": true}'`, vLLM exposes
+Gemma 4 thinking through the OpenAI-compatible response. Raw model responses
+and parsed reasoning are kept in the JSONL trace while the action loop parses a
+filtered final answer.
+
 Response filtering is selected from the model id by default. `gemma-4` model
 ids use the Gemma 4 channel/thought filter, while the default filter handles
 common `<think>...</think>` style reasoning blocks. Override with
@@ -384,3 +403,5 @@ The rlogin transport defaults to terminal type `ansi`. Use
 - [Synchronet external program/dropfile docs](https://www.synchro.net/docs/external_programs.html)
 - [Synchronet install-xtrn module](https://wiki.synchro.net/module:install-xtrn)
 - [TradeWars on Linux/DOSEMU notes](https://www.arcadiabbs.com/setting-up-tradewars-on-linux/)
+- [vLLM Gemma 4 usage guide](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html)
+- [vLLM reasoning outputs](https://docs.vllm.ai/en/latest/features/reasoning_outputs/)
