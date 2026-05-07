@@ -29,10 +29,13 @@ class Observation:
     new_text: str
     cursor: tuple[int, int]
     stable_ms: int
+    byte_quiet_ms: int
     matched_prompt: str | None
     ready_reason: str
     profile: str
     transcript_path: Path | None
+    transcript_byte_start: int
+    transcript_byte_end: int
     bytes_read: int
     timed_out: bool
     timestamp: float
@@ -46,10 +49,13 @@ class Observation:
             "new_text": self.new_text,
             "cursor": list(self.cursor),
             "stable_ms": self.stable_ms,
+            "byte_quiet_ms": self.byte_quiet_ms,
             "matched_prompt": self.matched_prompt,
             "ready_reason": self.ready_reason,
             "profile": self.profile,
             "transcript_path": str(self.transcript_path) if self.transcript_path else None,
+            "transcript_byte_start": self.transcript_byte_start,
+            "transcript_byte_end": self.transcript_byte_end,
             "bytes_read": self.bytes_read,
             "timed_out": self.timed_out,
             "timestamp": self.timestamp,
@@ -140,6 +146,7 @@ class TurnObserver:
             self,
             timeout: float = 10.0,
             stable_ms: int = 300,
+            byte_quiet_ms: int = 0,
             poll_interval: float = 0.05,
             profile: PromptProfile | None = None,
             prompt_fast_path: bool = False,
@@ -147,6 +154,8 @@ class TurnObserver:
         active_profile = profile or self.profile
         start = time.monotonic()
         last_change = start
+        last_byte = start
+        transcript_byte_start = self.session.transcript_position()
         bytes_read = 0
         new_data = bytearray()
         matched_prompt: str | None = active_profile.match(self.terminal.model_text())
@@ -154,33 +163,81 @@ class TurnObserver:
         while True:
             now = time.monotonic()
             elapsed = now - start
-            stable_elapsed_ms = int((now - last_change) * 1000)
-            model_text = self.terminal.model_text()
-            matched_prompt = active_profile.match(model_text)
-
-            if prompt_fast_path and matched_prompt and bytes_read > 0:
-                return self._observation(active_profile, new_data, stable_elapsed_ms, matched_prompt, "prompt")
-
-            if model_text and stable_elapsed_ms >= stable_ms:
-                return self._observation(active_profile, new_data, stable_elapsed_ms, matched_prompt, "stable")
-
             if elapsed >= timeout:
-                return self._observation(active_profile, new_data, stable_elapsed_ms, matched_prompt, "timeout")
+                stable_elapsed_ms = int((now - last_change) * 1000)
+                byte_quiet_elapsed_ms = int((now - last_byte) * 1000)
+                model_text = self.terminal.model_text()
+                matched_prompt = active_profile.match(model_text)
+                return self._observation(
+                    active_profile,
+                    new_data,
+                    stable_elapsed_ms,
+                    byte_quiet_elapsed_ms,
+                    transcript_byte_start,
+                    matched_prompt,
+                    "timeout",
+                )
 
             data = self.session.read(min(poll_interval, max(0.0, timeout - elapsed)))
+            now = time.monotonic()
             if not data:
+                stable_elapsed_ms = int((now - last_change) * 1000)
+                byte_quiet_elapsed_ms = int((now - last_byte) * 1000)
+                model_text = self.terminal.model_text()
+                matched_prompt = active_profile.match(model_text)
+                screen_is_stable = stable_ms <= 0 or stable_elapsed_ms >= stable_ms
+                bytes_are_quiet = byte_quiet_ms <= 0 or byte_quiet_elapsed_ms >= byte_quiet_ms
+                if model_text and screen_is_stable and bytes_are_quiet:
+                    return self._observation(
+                        active_profile,
+                        new_data,
+                        stable_elapsed_ms,
+                        byte_quiet_elapsed_ms,
+                        transcript_byte_start,
+                        matched_prompt,
+                        "stable",
+                    )
                 continue
 
             bytes_read += len(data)
             new_data.extend(data)
+            last_byte = now
             if self.feed(data):
                 last_change = time.monotonic()
+            model_text = self.terminal.model_text()
+            matched_prompt = active_profile.match(model_text)
+            stable_elapsed_ms = int((time.monotonic() - last_change) * 1000)
+            byte_quiet_elapsed_ms = int((time.monotonic() - last_byte) * 1000)
+            if prompt_fast_path and matched_prompt and bytes_read > 0:
+                return self._observation(
+                    active_profile,
+                    new_data,
+                    stable_elapsed_ms,
+                    byte_quiet_elapsed_ms,
+                    transcript_byte_start,
+                    matched_prompt,
+                    "prompt",
+                )
+            screen_is_stable = stable_ms <= 0 or stable_elapsed_ms >= stable_ms
+            bytes_are_quiet = byte_quiet_ms <= 0 or byte_quiet_elapsed_ms >= byte_quiet_ms
+            if model_text and screen_is_stable and bytes_are_quiet:
+                return self._observation(
+                    active_profile,
+                    new_data,
+                    stable_elapsed_ms,
+                    byte_quiet_elapsed_ms,
+                    transcript_byte_start,
+                    matched_prompt,
+                    "stable",
+                )
 
     def _observation(
             self,
             profile: PromptProfile,
             new_data: bytes | bytearray,
             stable_ms: int,
+            byte_quiet_ms: int,
+            transcript_byte_start: int,
             matched_prompt: str | None,
             ready_reason: str,
     ) -> Observation:
@@ -193,10 +250,13 @@ class TurnObserver:
             new_text=new_text,
             cursor=self.terminal.cursor,
             stable_ms=stable_ms,
+            byte_quiet_ms=byte_quiet_ms,
             matched_prompt=matched_prompt,
             ready_reason=ready_reason,
             profile=profile.name,
             transcript_path=self.session.transcript_path,
+            transcript_byte_start=transcript_byte_start,
+            transcript_byte_end=transcript_byte_start + len(new_data),
             bytes_read=len(new_data),
             timed_out=ready_reason == "timeout",
             timestamp=time.time(),

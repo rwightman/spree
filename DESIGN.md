@@ -123,6 +123,10 @@ Current trace tooling:
   terminal and emits ANSI HTML frames or animated GIFs for human debugging.
 - GIF frame timing is configurable with `--duration-ms`; color depends on the
   raw terminal bytes actually sent by Synchronet.
+- Observations record absolute `transcript_byte_start` and
+  `transcript_byte_end` offsets. This lets replay tooling render a later
+  activity correctly even when login, BBS navigation, and door play share one
+  transcript file.
 
 Suggested structured observation:
 
@@ -134,8 +138,13 @@ Suggested structured observation:
     "new_text": "...recent appended text when useful...",
     "cursor": [row, col],
     "stable_ms": 350,
+    "byte_quiet_ms": 0,
     "matched_prompt": "tw2-command",
     "ready_reason": "stable",
+    "transcript_path": "runtime/transcripts/agent-001.raw",
+    "transcript_byte_start": 12000,
+    "transcript_byte_end": 12750,
+    "bytes_read": 750,
     "metadata": {"requested_node": 1, "transport": "telnet"},
     "timestamp": "...",
 }
@@ -517,6 +526,8 @@ The runner should record enough information to reproduce/debug a match:
     "node": 1,
     "step": 42,
     "raw_bytes_path": "...",
+    "transcript_byte_start": 12000,
+    "transcript_byte_end": 12750,
     "pretty_screen": "...",
     "model_text": "...",
     "matched_prompt": "tw2-command",

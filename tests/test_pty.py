@@ -10,11 +10,11 @@ def test_pty_session_observes_local_process_turns():
 
     with PtySession([sys.executable, "-c", command]) as session:
         observer = TurnObserver("local", session)
-        ready = observer.observe_turn(timeout=2.0, stable_ms=0)
+        ready = observer.observe_turn(timeout=2.0, stable_ms=0, byte_quiet_ms=0)
         assert "READY" in ready.model_text
 
         session.send_line("hello")
-        echoed = observer.observe_turn(timeout=2.0, stable_ms=50)
+        echoed = observer.observe_turn(timeout=2.0, stable_ms=50, byte_quiet_ms=50)
         assert "ECHO:hello" in echoed.model_text
 
 
@@ -37,13 +37,13 @@ def test_pty_session_sets_size_term_and_resizes():
         lines=31,
     ) as session:
         observer = TurnObserver("local", session)
-        first = observer.observe_turn(timeout=2.0, stable_ms=50)
+        first = observer.observe_turn(timeout=2.0, stable_ms=50, byte_quiet_ms=50)
         assert "TERM:xterm-256color" in first.model_text
         assert "SIZE1:100x31" in first.model_text
 
         session.resize(columns=120, lines=40)
         session.send_line("go")
-        second = observer.observe_turn(timeout=2.0, stable_ms=50)
+        second = observer.observe_turn(timeout=2.0, stable_ms=50, byte_quiet_ms=50)
         assert "SIZE2:120x40" in second.model_text
 
 
@@ -84,3 +84,10 @@ def test_pty_drains_sent_byte_chunks():
     assert sent == [b"20", b"\n"]
     assert session.drain_sent_bytes() == (b"20", b"\n")
     assert session.drain_sent_bytes() == ()
+
+
+def test_pty_reports_transcript_position():
+    session = PtySession([sys.executable, "-c", ""])
+    session._transcript.extend(b"abc")
+
+    assert session.transcript_position() == 3

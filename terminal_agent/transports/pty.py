@@ -124,6 +124,9 @@ class PtySession:
         self._sent_bytes.clear()
         return chunks
 
+    def transcript_position(self) -> int:
+        return len(self._transcript)
+
     def read(self, seconds: float = 1.0) -> bytes:
         if self._master_fd is None:
             raise RuntimeError("session is not connected")

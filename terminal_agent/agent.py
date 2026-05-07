@@ -28,6 +28,7 @@ class TerminalAgent(Protocol):
             self,
             timeout: float = 10.0,
             stable_ms: int = 300,
+            byte_quiet_ms: int = 0,
             poll_interval: float = 0.05,
             profile: PromptProfile | None = None,
             prompt_fast_path: bool = False,
@@ -54,11 +55,19 @@ class TerminalSessionAgent:
             self,
             timeout: float = 10.0,
             stable_ms: int = 300,
+            byte_quiet_ms: int = 0,
             poll_interval: float = 0.05,
             profile: PromptProfile | None = None,
             prompt_fast_path: bool = False,
     ) -> Observation:
-        return self.observer.observe_turn(timeout, stable_ms, poll_interval, profile, prompt_fast_path)
+        return self.observer.observe_turn(
+            timeout=timeout,
+            stable_ms=stable_ms,
+            byte_quiet_ms=byte_quiet_ms,
+            poll_interval=poll_interval,
+            profile=profile,
+            prompt_fast_path=prompt_fast_path,
+        )
 
     def act(self, text: str) -> None:
         self.session.send_line(text)
