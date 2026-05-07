@@ -15,7 +15,9 @@ from terminal_agent.prompt_modules import (
 
 BBS_HOTKEY_CONVENTIONS = (
     "BBS convention: menu letters and numbers are often single-key hotkeys. Use press_key for those one-character "
-    "choices so you do not send an extra Enter. Use submit_line when the BBS is asking for a typed line of text. "
+    "choices so you do not send an extra Enter. Use submit_line when it is available and the BBS is asking for an "
+    "ordinary typed line of text. If submit_line is not available, use type_text and only press Enter when the "
+    "prompt still appears to be waiting for typed text. "
     'In prompts like "Yes [No]" or "[Yes] No", brackets usually mark the currently selected/default choice. '
     "Bracketed shortcuts such as [(Q)uit] mark a single-key shortcut for that choice, while the same prompt may "
     "also accept typed values for other choices. "
@@ -25,7 +27,10 @@ BBS_HOTKEY_CONVENTIONS = (
 
 TW2_COMMAND_VOCABULARY = (
     "Trade Wars 2 command vocabulary is discoverable in-game with ?. Common command prompts use one-key commands "
-    "such as P for port/dock, M for move, C for computer, I for information, and Q for quit/back out."
+    "such as P for port/dock, M for move, C for computer, I for information, and Q for quit/back out. TW2 gameplay "
+    "is keystroke-oriented: enter numeric quantities, destinations, and offers with type_text, then observe. Some "
+    "TW2 prompts accept a complete value immediately; if the same prompt remains with your typed digits visible, "
+    "use press_key enter to submit them."
 )
 
 BBS_INPUT_MODALITY_PROFILE = InputModalityProfile(
@@ -52,7 +57,10 @@ TW2_INPUT_MODALITY_PROFILE = InputModalityProfile(
         InputModeRule.from_pattern(
             mode="line_input_expected",
             pattern=r"(?:how many|your offer|to which).{0,80}\?\s*$",
-            hint="type the requested value and submit it with submit_line, or finish already-typed text with press_key enter",
+            hint=(
+                "type the requested value with type_text; if the same prompt remains with the text echoed, finish it "
+                "with press_key enter"
+            ),
             priority=50,
             target="active_prompt",
         ),

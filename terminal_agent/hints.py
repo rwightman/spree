@@ -121,7 +121,7 @@ def _previous_action_effects(
     if visible_input and _looks_like_echo_only(observation.new_text, visible_input):
         effects.append(
             "Previous input appears to have been echoed on screen without other new output. "
-            "If it was meant as a line response, submit it with press_key enter or use submit_line next time."
+            "If it was meant as a line response, submit it with press_key enter."
         )
 
     if observation.model_text == previous_observation.model_text and not observation.new_text.strip():

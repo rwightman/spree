@@ -82,6 +82,19 @@ def test_render_action_schema_only_lists_allowed_actions():
     assert "Supported named keys: enter" in schema
 
 
+def test_render_action_schema_describes_type_text_as_primary_when_submit_line_is_unavailable():
+    policy = ActionPolicy(
+        allowed_actions=frozenset({"type_text", "press_key", "wait"}),
+        supported_keys=frozenset({"enter"}),
+    )
+
+    schema = render_action_schema(policy)
+
+    assert '"submit_line"' not in schema
+    assert "Some programs accept typed values immediately" in schema
+    assert "Most prompts want submit_line" not in schema
+
+
 def test_action_to_dict_emits_action_arguments_shape():
     action = parse_action('{"action": "submit_line", "arguments": {"text": ""}}')
 

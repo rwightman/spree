@@ -98,7 +98,8 @@ def test_tw2_modality_profile_prioritizes_tw2_line_input_hint():
     )
 
     assert mode == "line_input_expected"
-    assert "already-typed text" in hint
+    assert "type_text" in hint
+    assert "press_key enter" in hint
 
 
 def test_tw2_modality_profile_classifies_tw2_command_prompt():

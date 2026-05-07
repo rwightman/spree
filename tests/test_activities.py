@@ -69,6 +69,12 @@ def test_activity_profile_factory_overrides_named_profile_objectives():
     )
 
 
+def test_tw2_game_profile_restricts_line_submission_macros():
+    tw2_game = activity_profile("tw2-game")
+
+    assert tw2_game.action_policy.allowed_actions == frozenset({"type_text", "press_key", "wait", "hangup"})
+
+
 def test_tw2_input_modality_profile_classifies_value_prompts():
     obs = observation("How many fighters do you want to buy [0]-1?")
     hints = ObservationHints.from_observation(
@@ -79,7 +85,8 @@ def test_tw2_input_modality_profile_classifies_value_prompts():
     )
 
     assert hints.input_mode == "line_input_expected"
-    assert "submit_line" in hints.input_mode_hint
+    assert "type_text" in hints.input_mode_hint
+    assert "press_key enter" in hints.input_mode_hint
 
 
 def test_prompt_module_assistance_levels_are_ablatable():

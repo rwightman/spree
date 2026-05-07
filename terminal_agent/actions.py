@@ -240,15 +240,22 @@ def render_action_schema(policy: ActionPolicy) -> str:
             ]
         )
     if "type_text" in policy.allowed_actions:
+        if "submit_line" in policy.allowed_actions:
+            type_text_description = (
+                "Type text without pressing Enter/Return. The cursor advances and the terminal may wait for "
+                "more input. Most prompts want submit_line; use type_text only for partial input that you "
+                "will finish later."
+            )
+        else:
+            type_text_description = (
+                "Type text without pressing Enter/Return. Some programs accept typed values immediately. If the "
+                "same prompt remains with your text echoed, use press_key enter to submit it."
+            )
         lines.extend(
             [
                 "type_text",
                 '{"action": "type_text", "arguments": {"text": "42"}}',
-                (
-                    "Type text without pressing Enter/Return. The cursor advances and the terminal may wait for "
-                    "more input. Most prompts want submit_line; use type_text only for partial input that you "
-                    "will finish later."
-                ),
+                type_text_description,
             ]
         )
     if "submit_lines" in policy.allowed_actions:
