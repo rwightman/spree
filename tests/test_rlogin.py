@@ -53,3 +53,13 @@ def test_rlogin_key_accepts_printable_character():
     session.send_key("q")
 
     assert bytes(session._sock.sent) == b"q"
+
+
+def test_rlogin_drains_sent_byte_chunks():
+    session = RLoginSession()
+    session._sock = FakeSocket()
+
+    session.send_line("20")
+
+    assert session.drain_sent_bytes() == (b"20", b"\r")
+    assert session.drain_sent_bytes() == ()

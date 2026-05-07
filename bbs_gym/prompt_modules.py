@@ -69,15 +69,15 @@ TW2_INPUT_MODALITY_PROFILE = InputModalityProfile(
 
 
 @dataclass(frozen=True)
-class RLoginAuthenticatedModule:
-    name: str = "bbs.rlogin_authenticated"
+class AuthenticatedSessionModule:
+    name: str = "bbs.authenticated_session"
     level: AssistanceLevel = "bbs_conventions"
 
     def render(self, context: PromptRenderContext) -> str | None:
-        if context.observation.metadata.get("transport") != "rlogin":
+        if not context.observation.metadata.get("authenticated"):
             return None
         return (
-            "RLogin sessions are already authenticated. The first screens may be welcome banners or bulletins, "
+            "This BBS session is already authenticated. The first screens may be welcome banners or bulletins, "
             "not a login prompt."
         )
 
@@ -94,7 +94,7 @@ class TraceOnlyModule:
 
 BBS_PROMPT_MODULES: tuple[PromptModule, ...] = (
     *GENERIC_TERMINAL_MODULES,
-    RLoginAuthenticatedModule(),
+    AuthenticatedSessionModule(),
     StaticPromptModule(
         name="bbs.hotkey_conventions",
         level="bbs_conventions",

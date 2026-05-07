@@ -5,7 +5,7 @@ from bbs_gym.prompt_modules import (
     BBS_PROMPT_MODULES,
     TW2_INPUT_MODALITY_PROFILE,
     TW2_PROMPT_MODULES,
-    RLoginAuthenticatedModule,
+    AuthenticatedSessionModule,
 )
 from terminal_agent.hints import ObservationHints
 from terminal_agent.models import SessionSummary
@@ -136,11 +136,12 @@ def test_tw2_modality_profile_classifies_cr_redraw_command_prompt():
     assert "press_key" in hints.input_mode_hint
 
 
-def test_rlogin_authenticated_module_only_renders_for_rlogin_transport():
-    module = RLoginAuthenticatedModule()
+def test_authenticated_session_module_only_renders_for_authenticated_sessions():
+    module = AuthenticatedSessionModule()
 
     assert module.render(context("Welcome", {"transport": "telnet"})) is None
-    assert "already authenticated" in module.render(context("Welcome", {"transport": "rlogin"}))
+    assert "already authenticated" in module.render(context("Welcome", {"transport": "rlogin", "authenticated": True}))
+    assert "already authenticated" in module.render(context("Welcome", {"transport": "telnet", "authenticated": True}))
 
 
 def test_bbs_and_tw2_module_sets_have_expected_sizes():

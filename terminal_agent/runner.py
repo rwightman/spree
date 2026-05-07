@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from .agent import TerminalAgent
+from .agent import ActionExecution, TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
 from .hints import InputModalityProfile, ObservationHints
 from .memory import JsonMemoryStore
@@ -103,6 +103,7 @@ class StepRecord:
     prompt: dict[str, str]
     action: dict[str, Any] | None
     validation: dict[str, Any]
+    execution: dict[str, Any]
     budget: dict[str, Any]
     prompt_modules_schema_version: int = PROMPT_MODULES_SCHEMA_VERSION
     prompt_modules: list[dict[str, str]] = field(default_factory=list)
@@ -115,6 +116,7 @@ class StepRecord:
             "prompt": self.prompt,
             "action": self.action,
             "validation": self.validation,
+            "execution": self.execution,
             "budget": self.budget,
             "prompt_modules_schema_version": self.prompt_modules_schema_version,
             "prompt_modules": self.prompt_modules,
@@ -226,6 +228,7 @@ class ActivityRunner:
             action, validation = self._decide_with_retry(model, prompt)
             decision_prompts_sent += 1
             executed_action = action
+            execution: dict[str, Any] = {}
             if action is None:
                 budget.record_validation_failure()
 
@@ -233,7 +236,7 @@ class ActivityRunner:
 
             if action is not None:
                 try:
-                    agent.act_action(action)
+                    execution = self._execution_record(agent.act_action(action))
                 except ActionError as exc:
                     executed_action = None
                     budget.record_validation_failure()
@@ -250,6 +253,7 @@ class ActivityRunner:
                 },
                 action=action.to_dict() if action else None,
                 validation=validation,
+                execution=execution,
                 budget=budget.to_dict(),
                 prompt_modules=prompt_module_trace(prompt_module_results),
             )
@@ -348,6 +352,7 @@ class ActivityRunner:
                 f"Session summary: {self._summary_text(session_summary)}",
                 f"Recent steps: {self._recent_steps_text(recent_steps)}",
                 "---",
+                f"Current step: {budget.decision_ticks + 1}",
                 module_text,
                 "---",
             ]
@@ -379,6 +384,7 @@ class ActivityRunner:
                 f"Session summary update: {self._summary_text(session_summary)}",
                 f"Previous step: {self._previous_step_delta_text(recent_steps)}",
                 "---",
+                f"Current step: {budget.decision_ticks + 1}",
                 module_text,
                 "---",
                 "Return exactly one JSON action.",
@@ -466,8 +472,12 @@ class ActivityRunner:
                 "stop_reason": stop_reason,
                 "notes": ["terminal_observation", "does_not_consume_decision_tick"],
             },
+            execution={},
             budget=budget.to_dict(),
         )
+
+    def _execution_record(self, result: ActionExecution) -> dict[str, Any]:
+        return result.to_dict()
 
     def _has_decision_steps(self, steps: list[StepRecord]) -> bool:
         return any(not self._is_terminal_step(step) for step in steps)
@@ -590,31 +600,29 @@ class ActivityRunner:
         if not steps:
             return "(none)"
         lines = []
-        for step in steps:
-            action = step.action or {"action": "terminal_observation" if self._is_terminal_step(step) else "invalid"}
-            validation = self._validation_for_context(step.validation)
-            screen = self._screen_tail(step.observation.get("model_text", ""))
-            lines.append(
-                "\n".join(
-                    [
-                        f"Step {step.step}: action={json.dumps(action, sort_keys=True)}",
-                        f"Validation: {json.dumps(validation, sort_keys=True)}",
-                        f"Screen tail:\n{screen}",
-                    ]
-                )
-            )
+        for index, step in enumerate(steps):
+            after_text = "Current terminal observation below."
+            if index + 1 < len(steps):
+                after_text = self._observation_effect_text(steps[index + 1].observation)
+            lines.append(self._step_context_text(step, after_text))
         return "\n\n".join(lines)
 
     def _previous_step_delta_text(self, steps: list[StepRecord]) -> str:
         if not steps:
             return "(none)"
         step = steps[-1]
+        return self._step_context_text(step, "Current terminal observation below.")
+
+    def _step_context_text(self, step: StepRecord, after_text: str) -> str:
         action = step.action or {"action": "terminal_observation" if self._is_terminal_step(step) else "invalid"}
         validation = self._validation_for_context(step.validation)
         return "\n".join(
             [
-                f"Step {step.step}: action={json.dumps(action, sort_keys=True)}",
+                f"Step {step.step}",
+                f"Observed before action:\n{self._screen_tail(step.observation.get('model_text', ''))}",
+                f"Action chosen:\n{json.dumps(action, sort_keys=True)}",
                 f"Validation: {json.dumps(validation, sort_keys=True)}",
+                f"Observed after action:\n{after_text}",
             ]
         )
 
@@ -622,6 +630,12 @@ class ActivityRunner:
         if not isinstance(screen, str) or self.profile.screen_tail_chars <= 0:
             return ""
         return screen[-self.profile.screen_tail_chars:]
+
+    def _observation_effect_text(self, observation: dict[str, Any]) -> str:
+        new_text = self._screen_tail(observation.get("new_text", ""))
+        if new_text:
+            return new_text
+        return self._screen_tail(observation.get("model_text", ""))
 
     def _validation_for_context(self, validation: dict[str, Any]) -> dict[str, Any]:
         if self.profile.include_model_responses_in_context:

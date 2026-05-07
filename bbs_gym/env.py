@@ -12,6 +12,10 @@ from terminal_agent.transports.telnet import TelnetSession
 from .accounts import AgentRegistry, AccountConfigError, load_agent_registry
 from .profiles import DEFAULT_PROFILE, PromptProfile
 
+_TELNET_LOGIN_TIMEOUT = 8.0
+_TELNET_LOGIN_STABLE_MS = 300
+_TELNET_LOGIN_MAX_STEPS = 6
+
 
 class BbsGym:
     def __init__(
@@ -50,7 +54,12 @@ class BbsGym:
         active_transport = transport or self.transport
         transcript = self.transcript_dir / f"{agent_id}.raw"
         record = self.agent_registry.maybe_get(agent_id) if self.agent_registry is not None else None
+        telnet_password: str | None = None
         if active_transport == "telnet":
+            if record is not None:
+                telnet_password = record.resolve_password()
+                if telnet_password is None:
+                    raise AccountConfigError(f"telnet login requires a resolved BBS password for {agent_id!r}")
             session = TelnetSession(self.host, self.port, transcript_path=transcript, encoding="cp437")
         elif active_transport == "rlogin":
             if record is None:
@@ -92,9 +101,57 @@ class BbsGym:
         elif record is not None:
             metadata["model"] = record.model
         observer = TurnObserver(agent_id, session, terminal=terminal, profile=self.profile, metadata=metadata)
+        if active_transport == "telnet" and record is not None:
+            if telnet_password is None:
+                raise AccountConfigError(f"telnet login requires a resolved BBS password for {agent_id!r}")
+            self._login_telnet(observer, session, record.bbs_alias, telnet_password)
+            metadata["authenticated"] = True
+            metadata["login_method"] = "telnet"
+            observer.metadata = metadata
+        elif active_transport == "rlogin":
+            metadata["authenticated"] = True
+            metadata["login_method"] = "rlogin"
         agent = TerminalSessionAgent(agent_id, session, observer, metadata)
         self.agents[agent_id] = agent
         return agent
+
+    def _login_telnet(
+            self,
+            observer: TurnObserver,
+            session: TelnetSession,
+            alias: str,
+            password: str,
+    ) -> None:
+        for _ in range(_TELNET_LOGIN_MAX_STEPS):
+            observation = observer.observe_turn(
+                timeout=_TELNET_LOGIN_TIMEOUT,
+                stable_ms=_TELNET_LOGIN_STABLE_MS,
+            )
+            text = observation.model_text.casefold()
+            if _is_password_prompt(text):
+                session.send_line(password)
+                break
+            if _is_login_prompt(text):
+                session.send_line(alias)
+                break
+            session.send_key("enter")
+        else:
+            raise AccountConfigError("telnet login did not reach the BBS login prompt")
+
+        for _ in range(_TELNET_LOGIN_MAX_STEPS):
+            observation = observer.observe_turn(
+                timeout=_TELNET_LOGIN_TIMEOUT,
+                stable_ms=_TELNET_LOGIN_STABLE_MS,
+            )
+            text = observation.model_text.casefold()
+            if _is_password_prompt(text):
+                session.send_line(password)
+                break
+        else:
+            raise AccountConfigError("telnet login did not reach the BBS password prompt")
+
+        observer.observe_turn(timeout=_TELNET_LOGIN_TIMEOUT, stable_ms=_TELNET_LOGIN_STABLE_MS)
+        session.drain_sent_bytes()
 
     def close(self) -> None:
         for agent in list(self.agents.values()):
@@ -106,3 +163,11 @@ class BbsGym:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+def _is_login_prompt(text: str) -> bool:
+    return "login:" in text or "enter user name" in text or "enter your user name" in text
+
+
+def _is_password_prompt(text: str) -> bool:
+    return "password:" in text

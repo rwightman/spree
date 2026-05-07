@@ -33,7 +33,7 @@ def test_telnet_enter_key_matches_empty_send_line():
     session._sock.sent.clear()
     session.send_key("enter")
 
-    assert line_bytes == bytes(session._sock.sent) == b"\r\n"
+    assert line_bytes == bytes(session._sock.sent) == b"\r"
 
 
 def test_telnet_key_accepts_printable_character():
@@ -43,3 +43,13 @@ def test_telnet_key_accepts_printable_character():
     session.send_key("q")
 
     assert bytes(session._sock.sent) == b"q"
+
+
+def test_telnet_drains_sent_byte_chunks():
+    session = TelnetSession()
+    session._sock = FakeSocket()
+
+    session.send_line("20")
+
+    assert session.drain_sent_bytes() == (b"20", b"\r")
+    assert session.drain_sent_bytes() == ()

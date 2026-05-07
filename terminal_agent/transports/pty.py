@@ -44,6 +44,7 @@ class PtySession:
     _master_fd: int | None = field(default=None, init=False, repr=False)
     _proc: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
 
     def connect(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -116,6 +117,12 @@ class PtySession:
         if self._master_fd is None:
             raise RuntimeError("session is not connected")
         os.write(self._master_fd, payload)
+        self._sent_bytes.append(bytes(payload))
+
+    def drain_sent_bytes(self) -> tuple[bytes, ...]:
+        chunks = tuple(self._sent_bytes)
+        self._sent_bytes.clear()
+        return chunks
 
     def read(self, seconds: float = 1.0) -> bytes:
         if self._master_fd is None:
