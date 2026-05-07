@@ -11,12 +11,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from terminal_agent.ansi import strip_ansi
-from terminal_agent.models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
-from terminal_agent.models import output_filters_for_model
-from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
-from terminal_agent.terminal import TerminalScreen, TurnObserver
-from terminal_agent.transports.telnet import TelnetSession
+from tty_agent.ansi import strip_ansi
+from tty_agent.models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from tty_agent.models import output_filters_for_model
+from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
+from tty_agent.terminal import TerminalScreen, TurnObserver
+from tty_agent.transports.telnet import TelnetSession
 
 from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile

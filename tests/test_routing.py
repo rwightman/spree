@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from bbs_gym.routing import activity_route_set, activity_route_set_names, looks_like_tw2
-from terminal_agent.terminal import Observation
+from tty_agent.terminal import Observation
 
 
 def observation(text: str) -> Observation:

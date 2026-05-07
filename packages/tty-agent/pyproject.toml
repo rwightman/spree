@@ -1,0 +1,23 @@
+[project]
+name = "tty-agent"
+version = "0.1.0"
+description = "Terminal-agent runtime for LLM-driven interactive TTY sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyte>=0.8.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/rwightman/spree"
+Documentation = "https://github.com/rwightman/spree#readme"
+Repository = "https://github.com/rwightman/spree"
+Issues = "https://github.com/rwightman/spree/issues"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tty_agent*"]

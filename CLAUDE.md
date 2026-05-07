@@ -1,11 +1,12 @@
 # CLAUDE.md
 
 ## Build/Test Commands
-- Install: `python -m pip install -e .`
-- Run tests: `pytest tests/`
-- Run specific test: `pytest tests/test_models.py::test_specific_function -v`
-- Run tests in parallel: `pytest -n 4 tests/`
-- Filter tests: `pytest -k "substring-to-match" tests/`
+- Install: `uv sync`
+- Editable install without uv: `python -m pip install -e packages/tty-agent -e packages/bbs-gym`
+- Run tests: `uv run pytest tests/`
+- Run specific test: `uv run pytest tests/test_models.py::test_specific_function -v`
+- Run tests in parallel: `uv run pytest -n 4 tests/`
+- Filter tests: `uv run pytest -k "substring-to-match" tests/`
 - Format changed code: `wruff format .` if `wruff` is installed
 
 ## Code Style Guidelines

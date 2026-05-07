@@ -1,5 +1,5 @@
-from terminal_agent.ansi import strip_ansi
-from terminal_agent.transports.telnet import DO, IAC, WILL, TelnetSession
+from tty_agent.ansi import strip_ansi
+from tty_agent.transports.telnet import DO, IAC, WILL, TelnetSession
 
 
 class FakeSocket:

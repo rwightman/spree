@@ -1,4 +1,4 @@
-"""Composable prompt modules for terminal-agent activities."""
+"""Composable prompt modules for tty-agent activities."""
 
 from __future__ import annotations
 

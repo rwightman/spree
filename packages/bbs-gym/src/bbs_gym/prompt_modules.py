@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from terminal_agent.hints import InputModalityProfile, InputModeRule
-from terminal_agent.prompt_modules import (
+from tty_agent.hints import InputModalityProfile, InputModeRule
+from tty_agent.prompt_modules import (
     GENERIC_TERMINAL_MODULES,
     AssistanceLevel,
     PromptModule,

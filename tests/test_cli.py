@@ -2,7 +2,7 @@ import argparse
 
 from bbs_gym.accounts import AgentRecord, AgentRegistry
 from bbs_gym.cli import build_activity_profile, build_activity_route_set, build_model, build_model_metadata
-from terminal_agent.models import CodexCliAdapter, OpenAICompatibleAdapter
+from tty_agent.models import CodexCliAdapter, OpenAICompatibleAdapter
 
 
 def test_build_model_uses_agent_registry_model_config():

@@ -1,4 +1,4 @@
-from terminal_agent.transports.rlogin import RLoginSession
+from tty_agent.transports.rlogin import RLoginSession
 
 
 class FakeSocket:

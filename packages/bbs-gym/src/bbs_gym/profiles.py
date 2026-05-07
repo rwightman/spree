@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from terminal_agent.profiles import PromptProfile
+from tty_agent.profiles import PromptProfile
 
 
 BBS_PROFILE = PromptProfile.from_patterns(

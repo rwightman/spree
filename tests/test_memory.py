@@ -1,5 +1,5 @@
-from terminal_agent.memory import JsonMemoryStore
-from terminal_agent.models import MemoryPatch
+from tty_agent.memory import JsonMemoryStore
+from tty_agent.models import MemoryPatch
 
 
 def test_memory_store_dedupes_and_caps_lists(tmp_path):

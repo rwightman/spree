@@ -40,10 +40,10 @@ ships with useful JavaScript doors, and supports classic BBS door dropfiles.
 
 ## Package Boundary
 
-The project is split into a reusable terminal-agent core and a BBS-specific
+The project is split into a reusable tty-agent core and a BBS-specific
 shell.
 
-`terminal_agent` owns behavior that applies to any interactive terminal target:
+`tty_agent` owns behavior that applies to any interactive terminal target:
 
 - structured terminal actions and validation,
 - model adapters for OpenAI-compatible endpoints, Anthropic, Codex CLI, and
@@ -87,7 +87,7 @@ with BbsGym() as gym:
 
 Current implementation:
 
-- `terminal_agent` contains the generic terminal-agent core: structured
+- `tty_agent` contains the generic tty-agent core: structured
   actions, model adapters, memory, runners, pyte-backed observations, and
   telnet/rlogin/local-PTY transports.
 - `bbs_gym` contains the Synchronet/BBS shell: CP437 defaults, BBS/TW2 prompt
@@ -175,11 +175,11 @@ should not have to infer the active prompt from stale terminal history.
 
 Current implementation:
 
-- `terminal_agent.hints` extracts generic `ObservationHints`: recent terminal
+- `tty_agent.hints` extracts generic `ObservationHints`: recent terminal
   output since the last action, a likely active prompt/current line, an input
   mode classification, and notable previous-action effects such as echoed
   input or unchanged screens.
-- `terminal_agent.prompt_modules` renders those hints as labeled prompt
+- `tty_agent.prompt_modules` renders those hints as labeled prompt
   sections and logs module provenance in each decision step.
 - BBS and TW2-specific input strings live in `bbs_gym.prompt_modules`, not in
   the generic terminal core.
@@ -484,8 +484,8 @@ Implemented account flow:
 1. Define agent identities in `config/agents.local.json` or another registry
    file.
 2. Keep passwords in environment variables or ignored local config.
-3. Run `python -m bbs_gym.cli accounts check` to validate the registry.
-4. Run `python -m bbs_gym.cli accounts provision` to create/update Synchronet
+3. Run `uv run bbs-gym accounts check` to validate the registry.
+4. Run `uv run bbs-gym accounts provision` to create/update Synchronet
    users through `jsexec`.
 5. Run activities with `--transport rlogin --agent-id ...` so the BBS account
    identity is attached before the model loop starts.

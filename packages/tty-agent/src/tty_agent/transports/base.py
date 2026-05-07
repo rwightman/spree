@@ -1,4 +1,4 @@
-"""Shared transport contracts for terminal-agent sessions."""
+"""Shared transport contracts for tty-agent sessions."""
 
 from __future__ import annotations
 

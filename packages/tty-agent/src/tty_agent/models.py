@@ -311,7 +311,7 @@ class CodexCliAdapter(TextChatAdapter):
 
     def chat(self, messages: list[ModelMessage]) -> str:
         prompt_text = _codex_prompt_text(messages)
-        with tempfile.TemporaryDirectory(prefix="terminal-agent-codex-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="tty-agent-codex-") as temp_dir:
             output_path = Path(temp_dir) / "last-message.txt"
             command = self._command(output_path)
             if self.cwd is not None:
@@ -481,7 +481,7 @@ def _codex_adapter_name(model: str | None, profile: str | None) -> str:
 
 def _codex_prompt_text(messages: list[ModelMessage]) -> str:
     lines = [
-        "You are being invoked non-interactively as a decision model for a terminal-agent harness.",
+        "You are being invoked non-interactively as a decision model for a tty-agent harness.",
         "Do not run shell commands, inspect files, or modify the workspace.",
         "Return only the final text requested by the harness.",
         "",

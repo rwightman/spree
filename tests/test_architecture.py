@@ -2,8 +2,8 @@ import ast
 from pathlib import Path
 
 
-def test_terminal_agent_core_does_not_import_bbs_gym():
-    root = Path("terminal_agent")
+def test_tty_agent_core_does_not_import_bbs_gym():
+    root = Path("packages/tty-agent/src/tty_agent")
     offenders = []
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

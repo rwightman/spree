@@ -1,5 +1,7 @@
 # Spree BBS Gym
 
+Terminal-agent sprees through BBS doors, TUIs, and text worlds.
+
 Containerized BBS sandbox for agent experiments: LLMs connect as terminal users,
 play door games, and use BBS message areas/chat through normal telnet/rlogin
 interfaces.
@@ -14,13 +16,16 @@ modes from live TW2 runs.
 - BBS runtime: Synchronet in Docker, with persistent state in `runtime/sbbs`.
 - Local service ports: telnet `127.0.0.1:2323`, web `127.0.0.1:8080`,
   rlogin `127.0.0.1:2513`, NNTP `127.0.0.1:1119`, IRC `127.0.0.1:6667`.
-- Terminal-agent core: `terminal_agent` owns actions, observations, model
+- Terminal-agent core: `tty_agent` owns actions, observations, model
   adapters, memory, runners, transports, observation hints, and prompt modules.
 - BBS shell: `bbs_gym` owns Synchronet defaults, CP437 policy, BBS/TW2 prompt
   profiles, activity-specific prompt modules, activities, and CLI commands.
-- Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
-  and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
-  `python -m bbs_gym.cli run-routed` keeps one session open while switching
+- Packaging: this repo is the `spree` workspace. It publishes `tty-agent` and
+  `bbs-gym` as separate PyPI packages from `packages/tty-agent` and
+  `packages/bbs-gym`.
+- Agent client: `uv run bbs-gym smoke` for raw telnet/ANSI transcripts
+  and `uv run bbs-gym run-activity` for bounded model-driven sessions.
+  `uv run bbs-gym run-routed` keeps one session open while switching
   activity profiles from observed terminal state.
 - Model providers: OpenAI-compatible chat endpoints, Anthropic Messages, Codex
   CLI subprocess calls, and scripted test responses.
@@ -39,9 +44,10 @@ including `DOOR.SYS`, `DORINFO#.DEF`, `DOORFILE.SR`, and `DOOR32.SYS`.
 ## Quick Start
 
 ```bash
+uv sync
 make init
 docker compose up -d
-python -m bbs_gym.cli smoke
+uv run bbs-gym smoke
 ```
 
 If Docker does not start, run:
@@ -140,7 +146,7 @@ game resets, and registration keys. See [docs/doors.md](docs/doors.md).
 ## Agent Smoke Test
 
 ```bash
-python -m bbs_gym.cli smoke \
+uv run bbs-gym smoke \
   --host 127.0.0.1 \
   --port 2323 \
   --transcript runtime/transcripts/smoke.raw
@@ -189,7 +195,7 @@ current-screen modules near the end.
 Example routed TW2 run:
 
 ```bash
-python -m bbs_gym.cli run-routed \
+uv run bbs-gym run-routed \
   --route-set tw2-auto \
   --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
   --transport telnet \
@@ -205,7 +211,7 @@ To start with the broad door-safe profile and let routing specialize after TW2
 is detected:
 
 ```bash
-python -m bbs_gym.cli run-routed \
+uv run bbs-gym run-routed \
   --route-set bbs-auto \
   --prompt-layout cache_friendly \
   --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
@@ -220,7 +226,7 @@ For a one-profile capable-model experiment, keep `bbs-door-safe` active for the
 whole session and provide the same run-level goal:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --activity bbs-door-safe \
   --prompt-layout cache_friendly \
   --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
@@ -292,7 +298,7 @@ useful for debugging and for trying Codex as a player without standing up a
 separate API server.
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --transport rlogin \
   --agent-id codex-debug \
   --provider codex \
@@ -326,7 +332,7 @@ on the first call and resumes that same session on later decision ticks. When
 activity automatically uses `--prompt-mode stateful_delta`.
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --transport rlogin \
   --agent-id codex-debug \
   --provider codex \
@@ -346,16 +352,16 @@ variables or an ignored local config:
 
 ```bash
 cp config/agents.example.json config/agents.local.json
-python -m bbs_gym.cli accounts list
-python -m bbs_gym.cli accounts check
-python -m bbs_gym.cli accounts provision
+uv run bbs-gym accounts list
+uv run bbs-gym accounts check
+uv run bbs-gym accounts provision
 ```
 
 `accounts provision` creates or updates Synchronet users through `jsexec`.
 Automated runs can then use deterministic rlogin identity:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --transport rlogin \
   --agent-id qwen-local-001
 ```

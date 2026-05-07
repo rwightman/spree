@@ -1,8 +1,8 @@
 import os
 import sys
 
-from terminal_agent.terminal import TurnObserver
-from terminal_agent.transports.pty import PtySession
+from tty_agent.terminal import TurnObserver
+from tty_agent.transports.pty import PtySession
 
 
 def test_pty_session_observes_local_process_turns():

@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from terminal_agent.actions import Action
-from terminal_agent.hints import InputModalityProfile, InputModeRule, ObservationHints
-from terminal_agent.terminal import Observation
+from tty_agent.actions import Action
+from tty_agent.hints import InputModalityProfile, InputModeRule, ObservationHints
+from tty_agent.terminal import Observation
 
 
 def observation(

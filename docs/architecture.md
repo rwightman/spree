@@ -8,7 +8,7 @@ same terminal UI that a human BBS user would see.
 
 ```text
 LLM agent process
-  -> terminal_agent transport
+  -> tty_agent transport
   -> bbs_gym Synchronet profile/activity glue
   -> localhost:2323 or localhost:2513
   -> Synchronet terminal server
@@ -42,7 +42,7 @@ Delete that directory only when you intentionally want a fresh BBS.
 
 ## Agent Driver
 
-The generic terminal-agent core lives in `terminal_agent`:
+The generic tty-agent core lives in `tty_agent`:
 
 - `actions.py`: structured terminal actions and validation,
 - `agent.py`: the minimal `TerminalAgent` protocol consumed by the runner and

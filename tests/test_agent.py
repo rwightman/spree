@@ -1,6 +1,6 @@
-from terminal_agent.actions import Action
-from terminal_agent.agent import ActionExecution, TerminalSessionAgent
-from terminal_agent.terminal import TurnObserver
+from tty_agent.actions import Action
+from tty_agent.agent import ActionExecution, TerminalSessionAgent
+from tty_agent.terminal import TurnObserver
 
 
 class FakeSession:

@@ -1,6 +1,6 @@
 import pytest
 
-from terminal_agent.actions import ActionError, ActionPolicy, parse_action, render_action_schema
+from tty_agent.actions import ActionError, ActionPolicy, parse_action, render_action_schema
 
 
 def test_parse_action_accepts_json_fence():

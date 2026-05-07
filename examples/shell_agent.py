@@ -1,15 +1,15 @@
-"""Drive a deterministic local bash session through the terminal-agent core."""
+"""Drive a deterministic local bash session through the tty-agent core."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from terminal_agent.actions import Action
-from terminal_agent.agent import TerminalSessionAgent
-from terminal_agent.profiles import SHELL_PROFILE
-from terminal_agent.terminal import TerminalScreen, TurnObserver
-from terminal_agent.transports.pty import PtySession
+from tty_agent.actions import Action
+from tty_agent.agent import TerminalSessionAgent
+from tty_agent.profiles import SHELL_PROFILE
+from tty_agent.terminal import TerminalScreen, TurnObserver
+from tty_agent.transports.pty import PtySession
 
 
 def main() -> None:

@@ -1,4 +1,4 @@
-from terminal_agent.profiles import EMPTY_PROFILE, SHELL_PROFILE
+from tty_agent.profiles import EMPTY_PROFILE, SHELL_PROFILE
 
 
 def test_empty_profile_never_matches():

@@ -1,4 +1,4 @@
-from terminal_agent.models import (
+from tty_agent.models import (
     AnthropicAdapter,
     CodexCliAdapter,
     CompactionPrompt,
@@ -133,7 +133,7 @@ def test_openai_compatible_adapter_merges_extra_body(monkeypatch):
         captured["payload"] = payload
         return {"choices": [{"message": {"content": '{"action":"wait","arguments":{}}'}}]}
 
-    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
     adapter = OpenAICompatibleAdapter(
         model="test-model",
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
@@ -156,7 +156,7 @@ def test_openai_compatible_adapter_infers_gemma4_response_filter(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
     adapter = OpenAICompatibleAdapter(model="google/gemma-4-31B-it")
 
     action = adapter.decide(DecisionPrompt("s", "u"))
@@ -178,7 +178,7 @@ def test_openai_compatible_adapter_captures_reasoning_field(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
     adapter = OpenAICompatibleAdapter(model="google/gemma-4-31B-it")
 
     action = adapter.decide(DecisionPrompt("s", "u"))
@@ -201,7 +201,7 @@ def test_openai_compatible_adapter_captures_reasoning_content_field(monkeypatch)
             ]
         }
 
-    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
     adapter = OpenAICompatibleAdapter(model="test-model")
 
     adapter.decide(DecisionPrompt("s", "u"))
@@ -225,7 +225,7 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
         captured["timeout"] = timeout
         return {"content": [{"type": "text", "text": '{"action":"wait","arguments":{}}'}]}
 
-    monkeypatch.setattr("terminal_agent.models._post_json", fake_post_json)
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
     adapter = AnthropicAdapter(model="test-model", api_key="key")
 
     adapter.chat([ModelMessage("system", "stable schema"), ModelMessage("user", "screen")])
@@ -260,7 +260,7 @@ def test_codex_cli_adapter_invokes_codex_exec(monkeypatch):
             output_file.write('{"action": "wait", "arguments": {}}')
         return Result()
 
-    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
     adapter = CodexCliAdapter(
         model="gpt-5.5",
         profile="bbs",
@@ -304,7 +304,7 @@ def test_codex_cli_adapter_resumes_stateful_session(monkeypatch, tmp_path):
             return Result(f'{{"type":"session_configured","session_id":"{session_id}"}}\n')
         return Result()
 
-    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
     session_file = tmp_path / "codex.session"
     adapter = CodexCliAdapter(model="gpt-5.5", stateful=True, session_file=session_file)
 
@@ -333,7 +333,7 @@ def test_codex_cli_adapter_raises_on_command_failure(monkeypatch):
     def fake_run(*_args, **_kwargs):
         return Result()
 
-    monkeypatch.setattr("terminal_agent.models.subprocess.run", fake_run)
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
     adapter = CodexCliAdapter()
 
     try:

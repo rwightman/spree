@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from terminal_agent.runner import ActivityProfile, ActivityRoute
-from terminal_agent.terminal import Observation
+from tty_agent.runner import ActivityProfile, ActivityRoute
+from tty_agent.terminal import Observation
 
 from .activities import BBS_DOOR_SAFE_PROFILE, TW2_ENTRY_PROFILE, TW2_GAME_PROFILE
 

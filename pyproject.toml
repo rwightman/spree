@@ -1,24 +1,20 @@
-[project]
-name = "bbs-gym"
-version = "0.1.0"
-description = "Local BBS sandbox tooling for LLM agents"
-requires-python = ">=3.11"
-dependencies = [
-    "pyte>=0.8.2",
+[tool.uv.workspace]
+members = [
+    "packages/tty-agent",
+    "packages/bbs-gym",
 ]
 
-[project.optional-dependencies]
+[tool.uv.sources]
+tty-agent = { workspace = true }
+
+[dependency-groups]
 dev = [
     "pytest>=9",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
-
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["bbs_gym*", "terminal_agent*"]
+pythonpath = [
+    "packages/tty-agent/src",
+    "packages/bbs-gym/src",
+]

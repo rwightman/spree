@@ -5,7 +5,7 @@
 Each agent gets one terminal connection and one transcript file:
 
 ```bash
-python -m bbs_gym.cli smoke \
+uv run bbs-gym smoke \
   --host 127.0.0.1 \
   --port 2323 \
   --transcript runtime/transcripts/agent-001.raw
@@ -38,20 +38,20 @@ discovery/allocation lands.
 For a command-line smoke test:
 
 ```bash
-python -m bbs_gym.cli observe-turn --timeout 5 --stable-ms 300
+uv run bbs-gym observe-turn --timeout 5 --stable-ms 300
 ```
 
 ## Activity Runner
 
 The next layer is `ActivityRunner`, which wraps repeated observe/decide/act
 steps in a bounded phase. It consumes any object implementing the
-`terminal_agent.agent.TerminalAgent` protocol: `agent_id`, `observe_turn()`,
+`tty_agent.agent.TerminalAgent` protocol: `agent_id`, `observe_turn()`,
 and `act_action()`:
 
 ```python
 from bbs_gym.env import BbsGym
-from terminal_agent.models import OpenAICompatibleAdapter
-from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from tty_agent.models import OpenAICompatibleAdapter
+from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
 
 model = OpenAICompatibleAdapter(
     base_url="http://localhost:11434/v1",
@@ -80,7 +80,7 @@ The same basic flow is available from the CLI for an OpenAI-compatible local
 server such as Ollama, vLLM, or llama.cpp:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --model gemma3 \
   --base-url http://localhost:11434/v1 \
   --max-decision-ticks 20
@@ -93,7 +93,7 @@ response used for action parsing.
 For Claude through Anthropic's API:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --provider anthropic \
   --model "$ANTHROPIC_MODEL" \
   --api-key "$ANTHROPIC_API_KEY" \
@@ -106,7 +106,7 @@ by default. Use `--no-anthropic-cache` to disable it for compatibility testing.
 For a dependency-free live smoke test of the runner itself:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --provider scripted \
   --scripted-response '{"action":"wait"}' \
   --scripted-response '{"action":"hangup"}' \
@@ -116,7 +116,7 @@ python -m bbs_gym.cli run-activity \
 To aim a model at the TW2 entry task:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --activity tw2-entry \
   --model gemma3 \
   --base-url http://localhost:11434/v1 \
@@ -125,7 +125,7 @@ python -m bbs_gym.cli run-activity \
 
 For a non-BBS PTY smoke test, `python -m examples.shell_agent` starts
 deterministic `bash --norc --noprofile` with a fixed prompt and drives it
-through the same core terminal-agent classes.
+through the same core tty-agent classes.
 
 ## Account Registry
 
@@ -135,9 +135,9 @@ passwords in environment variables or `config/agents.local.json`, which is
 ignored by git.
 
 ```bash
-python -m bbs_gym.cli accounts list
-python -m bbs_gym.cli accounts check
-python -m bbs_gym.cli accounts provision
+uv run bbs-gym accounts list
+uv run bbs-gym accounts check
+uv run bbs-gym accounts provision
 ```
 
 The registry key is `agent_id`; the BBS login name is `bbs_alias`. Campaign
@@ -145,7 +145,7 @@ memory and logs key off `agent_id`, while observations record `bbs_alias`,
 transport, and model config in metadata. For automated runs, prefer rlogin:
 
 ```bash
-python -m bbs_gym.cli run-activity \
+uv run bbs-gym run-activity \
   --transport rlogin \
   --agent-id qwen-local-001
 ```
@@ -178,5 +178,5 @@ Session compaction now expects structured JSON rather than prose:
 - Give each agent a unique account; many door games key state by user alias.
 - Preserve raw transcripts for debugging. Rendered plain text loses control
   codes, cursor movement, and some ANSI art context.
-- Keep generic terminal-agent code in `terminal_agent`; keep BBS policy,
+- Keep generic tty-agent code in `tty_agent`; keep BBS policy,
   Synchronet profiles, and campaign orchestration in `bbs_gym`.

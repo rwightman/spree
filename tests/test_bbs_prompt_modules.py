@@ -7,16 +7,16 @@ from bbs_gym.prompt_modules import (
     TW2_PROMPT_MODULES,
     BbsConventionModule,
 )
-from terminal_agent.hints import ObservationHints
-from terminal_agent.models import SessionSummary
-from terminal_agent.prompt_modules import (
+from tty_agent.hints import ObservationHints
+from tty_agent.models import SessionSummary
+from tty_agent.prompt_modules import (
     GENERIC_TERMINAL_MODULES,
     PromptRenderContext,
     collect_prompt_module_results,
     render_prompt_modules,
 )
-from terminal_agent.runner import ActivityBudget
-from terminal_agent.terminal import Observation
+from tty_agent.runner import ActivityBudget
+from tty_agent.terminal import Observation
 
 
 def observation(

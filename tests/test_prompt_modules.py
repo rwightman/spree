@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from terminal_agent.hints import ObservationHints
-from terminal_agent.prompt_modules import (
+from tty_agent.hints import ObservationHints
+from tty_agent.prompt_modules import (
     GENERIC_TERMINAL_MODULES,
     PromptRenderContext,
     StaticPromptModule,
@@ -9,7 +9,7 @@ from terminal_agent.prompt_modules import (
     prompt_module_trace,
     render_prompt_modules,
 )
-from terminal_agent.terminal import Observation
+from tty_agent.terminal import Observation
 
 
 def observation(text: str) -> Observation:

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from terminal_agent.agent import TerminalSessionAgent
-from terminal_agent.terminal import Observation, TerminalScreen, TurnObserver
-from terminal_agent.transports.rlogin import RLoginSession
-from terminal_agent.transports.telnet import TelnetSession
+from tty_agent.agent import TerminalSessionAgent
+from tty_agent.terminal import Observation, TerminalScreen, TurnObserver
+from tty_agent.transports.rlogin import RLoginSession
+from tty_agent.transports.telnet import TelnetSession
 
 from .accounts import AgentRegistry, AccountConfigError, load_agent_registry
 from .profiles import DEFAULT_PROFILE, PromptProfile

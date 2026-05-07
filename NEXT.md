@@ -21,7 +21,7 @@ as users do.
 Already present:
 
 - Dockerized Synchronet BBS.
-- Generic `terminal_agent` core for actions, observations, runners, memory,
+- Generic `tty_agent` core for actions, observations, runners, memory,
   model adapters, and transports.
 - Telnet, rlogin, and local PTY session handling.
 - `pyte`-backed terminal rendering with configurable encoding.
@@ -74,7 +74,7 @@ Missing:
 - Scoring/extraction.
 - Actual model-vs-model run against a configured local/API model pair.
 
-The `terminal_agent` package is intentionally separate from `bbs_gym`.
+The `tty_agent` package is intentionally separate from `bbs_gym`.
 Terminal observation, action validation, model adapters, memory, and the
 activity runner are generic enough to drive shells, TUI programs, SSH sessions,
 and terminal games. BBS-specific account policy, door profiles, campaign

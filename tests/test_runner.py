@@ -3,14 +3,14 @@ import time
 from pathlib import Path
 
 from bbs_gym.activities import TW2_ENTRY_PROFILE
-from terminal_agent.actions import Action, ActionError, ActionPolicy
-from terminal_agent.agent import ActionExecution
-from terminal_agent.memory import JsonMemoryStore
-from terminal_agent.models import ScriptedModelAdapter
-from terminal_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
-from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
-from terminal_agent.terminal import Observation
-from terminal_agent.transports.base import SessionDisconnected
+from tty_agent.actions import Action, ActionError, ActionPolicy
+from tty_agent.agent import ActionExecution
+from tty_agent.memory import JsonMemoryStore
+from tty_agent.models import ScriptedModelAdapter
+from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
+from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
+from tty_agent.terminal import Observation
+from tty_agent.transports.base import SessionDisconnected
 
 
 class FakeAgent:

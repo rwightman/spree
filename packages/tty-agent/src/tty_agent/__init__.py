@@ -1,4 +1,4 @@
-"""Generic terminal-agent core."""
+"""Generic tty-agent core."""
 
 __all__ = [
     "Action",

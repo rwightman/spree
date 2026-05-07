@@ -48,7 +48,7 @@ stage-dos-doors:
 	./scripts/stage_dos_doors.sh
 
 smoke:
-	python -m bbs_gym.cli smoke --host "$${BBS_HOST:-127.0.0.1}" --port "$${TELNET_PORT:-2323}"
+	uv run bbs-gym smoke --host "$${BBS_HOST:-127.0.0.1}" --port "$${TELNET_PORT:-2323}"
 
 test:
-	python -m pytest tests
+	uv run pytest tests

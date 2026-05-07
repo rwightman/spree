@@ -6,9 +6,9 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from terminal_agent.actions import ActionPolicy
-from terminal_agent.runner import ActivityProfile
-from terminal_agent.terminal import Observation
+from tty_agent.actions import ActionPolicy
+from tty_agent.runner import ActivityProfile
+from tty_agent.terminal import Observation
 
 from .prompt_modules import (
     BBS_INPUT_MODALITY_PROFILE,

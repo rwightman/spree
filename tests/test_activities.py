@@ -2,16 +2,16 @@ from pathlib import Path
 
 from bbs_gym.activities import TW2_ENTRY_PROFILE, activity_profile
 from bbs_gym.prompt_modules import BBS_PROMPT_MODULES, TW2_INPUT_MODALITY_PROFILE, TW2_PROMPT_MODULES
-from terminal_agent.actions import Action
-from terminal_agent.hints import ObservationHints
-from terminal_agent.prompt_modules import (
+from tty_agent.actions import Action
+from tty_agent.hints import ObservationHints
+from tty_agent.prompt_modules import (
     GENERIC_TERMINAL_MODULES,
     PromptRenderContext,
     collect_prompt_module_results,
     render_prompt_modules,
 )
-from terminal_agent.runner import ActivityBudget
-from terminal_agent.terminal import Observation
+from tty_agent.runner import ActivityBudget
+from tty_agent.terminal import Observation
 
 
 def observation(text):

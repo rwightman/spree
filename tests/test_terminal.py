@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from bbs_gym.profiles import BBS_PROFILE
-from terminal_agent.profiles import PromptProfile
-from terminal_agent.terminal import TerminalScreen, TurnObserver
+from tty_agent.profiles import PromptProfile
+from tty_agent.terminal import TerminalScreen, TurnObserver
 
 
 class FakeSession:
