@@ -25,7 +25,7 @@ SB = 250
 SE = 240
 
 TELNET_KEY_BYTES = {
-    "enter": b"\r\n",
+    "enter": b"\r",
     "escape": b"\x1b",
     "tab": b"\t",
     "backspace": b"\x7f",
@@ -46,6 +46,7 @@ class TelnetSession:
     encoding: str = "utf-8"
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
     _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
     _closed_by_peer: bool = field(default=False, init=False, repr=False)
 
     def connect(self) -> None:
@@ -89,6 +90,12 @@ class TelnetSession:
         if self._sock is None:
             raise RuntimeError("session is not connected")
         self._sock.sendall(payload)
+        self._sent_bytes.append(bytes(payload))
+
+    def drain_sent_bytes(self) -> tuple[bytes, ...]:
+        chunks = tuple(self._sent_bytes)
+        self._sent_bytes.clear()
+        return chunks
 
     def read(self, seconds: float = 1.0) -> bytes:
         """Read for up to ``seconds`` and return application bytes."""

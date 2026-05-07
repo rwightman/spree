@@ -67,3 +67,20 @@ def test_pty_key_accepts_printable_character():
     session.send_key("q")
 
     assert sent[-1] == b"q"
+
+
+def test_pty_drains_sent_byte_chunks():
+    session = PtySession([sys.executable, "-c", ""])
+    sent: list[bytes] = []
+
+    def send_bytes(payload: bytes) -> None:
+        sent.append(payload)
+        session._sent_bytes.append(payload)
+
+    session.send_bytes = send_bytes  # type: ignore[method-assign]
+
+    session.send_line("20")
+
+    assert sent == [b"20", b"\n"]
+    assert session.drain_sent_bytes() == (b"20", b"\n")
+    assert session.drain_sent_bytes() == ()

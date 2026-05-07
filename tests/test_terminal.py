@@ -11,11 +11,15 @@ class FakeSession:
 
     def __init__(self, chunks):
         self.chunks = list(chunks)
+        self.sent: list[bytes] = []
 
     def read(self, _seconds):
         if self.chunks:
             return self.chunks.pop(0)
         return b""
+
+    def send_bytes(self, payload: bytes) -> None:
+        self.sent.append(payload)
 
 
 def test_terminal_screen_renders_cp437_and_ansi():
@@ -26,6 +30,15 @@ def test_terminal_screen_renders_cp437_and_ansi():
     assert changed is True
     assert "Hi \u2592" in terminal.model_text()
     assert "Command:" in terminal.model_text()
+
+
+def test_terminal_screen_captures_ansi_process_replies():
+    terminal = TerminalScreen(columns=80, lines=24, encoding="cp437")
+
+    terminal.feed(b"\x1b[0c\x1b[6n")
+
+    assert terminal.drain_process_input() == (b"\x1b[?6c", b"\x1b[1;1R")
+    assert terminal.drain_process_input() == ()
 
 
 def test_prompt_profile_matches_screen_text():
@@ -45,6 +58,15 @@ def test_observe_turn_records_prompt_but_returns_on_stability_by_default():
     assert observation.timed_out is False
     assert observation.bytes_read == len(b"Welcome\r\nCommand:")
     assert "Welcome" in observation.model_text
+
+
+def test_observe_turn_sends_ansi_process_replies():
+    session = FakeSession([b"\x1b[0c\x1b[6nStatic screen"])
+    observer = TurnObserver("agent-001", session, profile=PromptProfile("empty"))
+
+    observer.observe_turn(timeout=1.0, stable_ms=0)
+
+    assert session.sent == [b"\x1b[?6c", b"\x1b[1;1R"]
 
 
 def test_observe_turn_can_use_prompt_fast_path_when_enabled():

@@ -64,7 +64,7 @@ class TerminalScreen:
         self.columns = columns
         self.lines = lines
         self.encoding = encoding
-        self.screen = pyte.Screen(columns, lines)
+        self.screen = _ProcessInputScreen(columns, lines)
         self.stream = pyte.Stream(self.screen)
 
     @property
@@ -76,6 +76,9 @@ class TerminalScreen:
         text = data.decode(self.encoding, errors="replace").replace("\ufeff", "")
         self.stream.feed(text)
         return self.signature() != before
+
+    def drain_process_input(self) -> tuple[bytes, ...]:
+        return self.screen.drain_process_input(self.encoding)
 
     def pretty_screen(self) -> str:
         return "\n".join(self.screen.display)
@@ -92,6 +95,22 @@ class TerminalScreen:
 
     def signature(self) -> tuple[tuple[str, ...], tuple[int, int]]:
         return (tuple(self.screen.display), self.cursor)
+
+
+class _ProcessInputScreen(pyte.Screen):
+    """pyte screen that captures terminal replies for the remote process."""
+
+    def __init__(self, columns: int, lines: int) -> None:
+        super().__init__(columns, lines)
+        self._process_input: list[str] = []
+
+    def write_process_input(self, data: str) -> None:
+        self._process_input.append(data)
+
+    def drain_process_input(self, encoding: str) -> tuple[bytes, ...]:
+        chunks = tuple(item.encode(encoding, errors="replace") for item in self._process_input)
+        self._process_input.clear()
+        return chunks
 
 
 class TurnObserver:
@@ -112,7 +131,10 @@ class TurnObserver:
         self.metadata = metadata or {}
 
     def feed(self, data: bytes) -> bool:
-        return self.terminal.feed(data)
+        changed = self.terminal.feed(data)
+        for response in self.terminal.drain_process_input():
+            self.session.send_bytes(response)
+        return changed
 
     def observe_turn(
             self,
