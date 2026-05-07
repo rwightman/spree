@@ -97,6 +97,9 @@ class TelnetSession:
         self._sent_bytes.clear()
         return chunks
 
+    def transcript_position(self) -> int:
+        return len(self._transcript)
+
     def read(self, seconds: float = 1.0) -> bytes:
         """Read for up to ``seconds`` and return application bytes."""
 

@@ -73,11 +73,17 @@ def main() -> int:
     parser.add_argument("--columns", type=int, default=80)
     parser.add_argument("--lines", type=int, default=24)
     parser.add_argument("--encoding", help="override transcript encoding")
+    parser.add_argument(
+        "--base-byte-offset",
+        type=int,
+        default=0,
+        help="fallback byte offset for old traces without transcript_byte_end",
+    )
     parser.add_argument("--font", type=Path, help="TrueType monospace font for GIF output")
     parser.add_argument("--font-size", type=int, default=16)
     args = parser.parse_args()
 
-    trace_slice = load_trace_slice(args.trace, args.step, args.encoding)
+    trace_slice = load_trace_slice(args.trace, args.step, args.encoding, args.base_byte_offset)
     transcript = trace_slice.transcript_path.read_bytes()[:trace_slice.byte_count]
     screen = render_screen(transcript, args.columns, args.lines, trace_slice.encoding)
 
@@ -98,6 +104,7 @@ def main() -> int:
             columns=args.columns,
             lines=args.lines,
             encoding_override=args.encoding,
+            base_byte_offset=args.base_byte_offset,
             duration_ms=args.duration_ms,
             font_path=args.font,
             font_size=args.font_size,
@@ -110,7 +117,12 @@ def main() -> int:
     return 0
 
 
-def load_trace_slice(trace_path: Path, step: int | None, encoding_override: str | None) -> TraceSlice:
+def load_trace_slice(
+        trace_path: Path,
+        step: int | None,
+        encoding_override: str | None,
+        base_byte_offset: int,
+) -> TraceSlice:
     records = read_records(trace_path)
     if not records:
         raise SystemExit(f"trace is empty: {trace_path}")
@@ -128,7 +140,11 @@ def load_trace_slice(trace_path: Path, step: int | None, encoding_override: str 
     if not transcript:
         raise SystemExit("trace observation does not include a transcript_path")
 
-    byte_count = sum(int((record.get("observation") or {}).get("bytes_read") or 0) for record in selected)
+    fallback_byte_count = base_byte_offset + sum(
+        int((record.get("observation") or {}).get("bytes_read") or 0)
+        for record in selected
+    )
+    byte_count = trace_byte_end(observation, fallback_byte_count)
     metadata = observation.get("metadata") if isinstance(observation.get("metadata"), dict) else {}
     encoding = encoding_override or metadata.get("encoding") or "utf-8"
     title = f"{trace_path.name} step {last.get('step')}"
@@ -151,6 +167,13 @@ def render_screen(data: bytes, columns: int, lines: int, encoding: str) -> pyte.
 
 def read_records(trace_path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def trace_byte_end(observation: dict[str, Any], fallback_byte_count: int) -> int:
+    value = observation.get("transcript_byte_end")
+    if isinstance(value, int):
+        return value
+    return fallback_byte_count
 
 
 def resolve_transcript_path(trace_path: Path, transcript_path: Path) -> Path:
@@ -223,6 +246,7 @@ def write_gif(
         columns: int,
         lines: int,
         encoding_override: str | None,
+        base_byte_offset: int,
         duration_ms: int,
         font_path: Path | None,
         font_size: int,
@@ -233,7 +257,9 @@ def write_gif(
         raise SystemExit("animated GIF output requires Pillow: python -m pip install pillow") from exc
 
     records = read_records(trace_path)
-    frame_slices = list(iter_frame_slices(trace_path, records, start_step, end_step, encoding_override))
+    frame_slices = list(
+        iter_frame_slices(trace_path, records, start_step, end_step, encoding_override, base_byte_offset)
+    )
     if not frame_slices:
         raise SystemExit("no trace steps matched the requested GIF range")
 
@@ -260,6 +286,7 @@ def iter_frame_slices(
         start_step: int | None,
         end_step: int | None,
         encoding_override: str | None,
+        base_byte_offset: int,
 ) -> Iterable[TraceSlice]:
     byte_count = 0
     transcript_path: Path | None = None
@@ -279,11 +306,12 @@ def iter_frame_slices(
             break
         if transcript_path is None:
             continue
+        frame_byte_count = trace_byte_end(observation, base_byte_offset + byte_count)
         yield TraceSlice(
             trace_path=trace_path,
             step=step,
             transcript_path=transcript_path,
-            byte_count=byte_count,
+            byte_count=frame_byte_count,
             encoding=encoding,
             title=f"{trace_path.name} step {step}",
         )

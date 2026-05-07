@@ -77,6 +77,7 @@ class ActivityProfile:
     system_guidance: str = ""
     observe_timeout: float = 10.0
     stable_ms: int = 300
+    byte_quiet_ms: int = 0
     poll_interval: float = 0.05
     recent_steps_to_keep: int = 8
     screen_tail_chars: int = 800
@@ -162,6 +163,7 @@ class ActivityRunner:
                 observation = agent.observe_turn(
                     timeout=self.profile.observe_timeout,
                     stable_ms=self.profile.stable_ms,
+                    byte_quiet_ms=self.profile.byte_quiet_ms,
                     poll_interval=self.profile.poll_interval,
                 )
             except SessionDisconnected:

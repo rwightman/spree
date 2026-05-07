@@ -57,8 +57,15 @@ def render_step(
             "ready: "
             f"{observation.get('ready_reason')} "
             f"stable_ms={observation.get('stable_ms')} "
+            f"byte_quiet_ms={observation.get('byte_quiet_ms')} "
             f"matched_prompt={observation.get('matched_prompt')}"
         )
+        if observation.get("transcript_byte_start") is not None or observation.get("transcript_byte_end") is not None:
+            lines.append(
+                "transcript: "
+                f"{observation.get('transcript_path')} "
+                f"bytes={observation.get('transcript_byte_start')}..{observation.get('transcript_byte_end')}"
+            )
         lines.append(f"cursor: {observation.get('cursor')}")
 
     validation = step.get("validation")

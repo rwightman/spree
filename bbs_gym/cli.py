@@ -62,6 +62,7 @@ def observe_turn(args: argparse.Namespace) -> int:
             observation = observer.observe_turn(
                 timeout=args.timeout,
                 stable_ms=args.stable_ms,
+                byte_quiet_ms=args.byte_quiet_ms,
                 poll_interval=args.poll_interval,
                 prompt_fast_path=args.prompt_fast_path,
             )
@@ -71,9 +72,15 @@ def observe_turn(args: argparse.Namespace) -> int:
 
     print(observation.model_text[-args.tail:])
     if observation.matched_prompt:
-        print(f"\n[matched_prompt={observation.matched_prompt} stable_ms={observation.stable_ms}]")
+        print(
+            f"\n[matched_prompt={observation.matched_prompt} "
+            f"stable_ms={observation.stable_ms} byte_quiet_ms={observation.byte_quiet_ms}]"
+        )
     if observation.timed_out:
-        print(f"\n[timed_out stable_ms={observation.stable_ms}]", file=sys.stderr)
+        print(
+            f"\n[timed_out stable_ms={observation.stable_ms} byte_quiet_ms={observation.byte_quiet_ms}]",
+            file=sys.stderr,
+        )
         return 2
     return 0
 
@@ -126,6 +133,8 @@ def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | N
         overrides["observe_timeout"] = args.observe_timeout
     if args.stable_ms is not None:
         overrides["stable_ms"] = args.stable_ms
+    if getattr(args, "byte_quiet_ms", None) is not None:
+        overrides["byte_quiet_ms"] = args.byte_quiet_ms
     if getattr(args, "prompt_mode", None) is not None:
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
@@ -398,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     turn_parser.add_argument("--port", type=int, default=2323)
     turn_parser.add_argument("--timeout", type=float, default=10.0)
     turn_parser.add_argument("--stable-ms", type=int, default=300)
+    turn_parser.add_argument("--byte-quiet-ms", type=int, default=0)
     turn_parser.add_argument("--poll-interval", type=float, default=0.05)
     turn_parser.add_argument("--prompt-fast-path", action="store_true")
     turn_parser.add_argument("--tail", type=int, default=4000)
@@ -439,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--max-wall-seconds", type=float, default=300.0)
     run_parser.add_argument("--observe-timeout", type=float)
     run_parser.add_argument("--stable-ms", type=int)
+    run_parser.add_argument("--byte-quiet-ms", type=int)
     run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)

@@ -63,3 +63,10 @@ def test_rlogin_drains_sent_byte_chunks():
 
     assert session.drain_sent_bytes() == (b"20", b"\r")
     assert session.drain_sent_bytes() == ()
+
+
+def test_rlogin_reports_transcript_position():
+    session = RLoginSession()
+    session._transcript.extend(b"abc")
+
+    assert session.transcript_position() == 3

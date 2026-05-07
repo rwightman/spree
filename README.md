@@ -158,7 +158,9 @@ python -m examples.shell_agent
 `run-activity` writes one JSONL record per decision tick. Each record includes
 the observation shown to the model, prompt-module provenance, raw and parsed
 model responses, validation notes, the parsed action, budget state, and the raw
-transcript path.
+transcript path. New traces also include absolute `transcript_byte_start` and
+`transcript_byte_end` offsets so replay tools can render activity traces that
+share one long telnet/rlogin transcript.
 
 Pretty-print a trace:
 
@@ -185,7 +187,10 @@ python scripts/ansi_screencap.py runtime/logs/activity.jsonl \
 
 The GIF path requires Pillow. The replay is only as colorful as the raw
 transcript: if Synchronet sends monochrome output for a given rlogin/telnet
-session, the GIF will be monochrome too.
+session, the GIF will be monochrome too. For current traces, transcript byte
+offsets are read automatically. For older traces that do not include absolute
+offsets, pass `--base-byte-offset N` when rendering an activity that starts
+mid-session.
 
 ## Local vLLM OpenAI-Compatible Server
 

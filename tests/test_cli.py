@@ -159,6 +159,7 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
         objective=None,
         observe_timeout=None,
         stable_ms=None,
+        byte_quiet_ms=None,
         prompt_mode=None,
         codex_stateful=False,
     )
@@ -174,6 +175,7 @@ def test_build_activity_profile_applies_named_profile_overrides():
         objective="custom game objective",
         observe_timeout=12.5,
         stable_ms=750,
+        byte_quiet_ms=900,
         prompt_mode="stateful_delta",
     )
 
@@ -183,4 +185,5 @@ def test_build_activity_profile_applies_named_profile_overrides():
     assert profile.objective == "custom game objective"
     assert profile.observe_timeout == 12.5
     assert profile.stable_ms == 750
+    assert profile.byte_quiet_ms == 900
     assert profile.prompt_mode == "stateful_delta"

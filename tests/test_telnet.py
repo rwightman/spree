@@ -53,3 +53,10 @@ def test_telnet_drains_sent_byte_chunks():
 
     assert session.drain_sent_bytes() == (b"20", b"\r")
     assert session.drain_sent_bytes() == ()
+
+
+def test_telnet_reports_transcript_position():
+    session = TelnetSession()
+    session._transcript.extend(b"abc")
+
+    assert session.transcript_position() == 3
