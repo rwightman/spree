@@ -35,6 +35,7 @@ class PromptRenderContext:
     campaign_memory: dict[str, Any]
     session_summary: "SessionSummary"
     budget: "ActivityBudget"
+    run_objective: str = ""
 
 
 @dataclass(frozen=True)

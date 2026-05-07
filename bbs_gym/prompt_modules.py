@@ -25,6 +25,13 @@ BBS_HOTKEY_CONVENTIONS = (
     "the UI appears to behave like a selector."
 )
 
+BBS_DOOR_SAFE_INPUT = (
+    "BBS door games often read input one key at a time and may auto-accept complete numeric values before Enter. "
+    "Prefer press_key for one-character menu choices and hotkeys. Prefer type_text for numeric quantities, "
+    "destinations, offers, and short typed answers, then observe the next screen before deciding whether Enter is "
+    "needed. If typed text remains at the prompt and has not been accepted, use press_key enter to submit it."
+)
+
 TW2_COMMAND_VOCABULARY = (
     "Trade Wars 2 command vocabulary is discoverable in-game with ?. Common command prompts use one-key commands "
     "such as P for port/dock, M for move, C for computer, I for information, and Q for quit/back out. TW2 gameplay "
@@ -107,6 +114,15 @@ BBS_PROMPT_MODULES: tuple[PromptModule, ...] = (
         name="bbs.hotkey_conventions",
         level="bbs_conventions",
         text=BBS_HOTKEY_CONVENTIONS,
+    ),
+)
+
+BBS_DOOR_PROMPT_MODULES: tuple[PromptModule, ...] = (
+    *BBS_PROMPT_MODULES,
+    StaticPromptModule(
+        name="bbs.door_safe_input",
+        level="bbs_conventions",
+        text=BBS_DOOR_SAFE_INPUT,
     ),
 )
 

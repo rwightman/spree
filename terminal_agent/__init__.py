@@ -5,6 +5,7 @@ __all__ = [
     "ActionPolicy",
     "ActivityBudget",
     "ActivityProfile",
+    "ActivityRoute",
     "ActivityRunner",
     "AnthropicAdapter",
     "CodexCliAdapter",
@@ -22,6 +23,7 @@ __all__ = [
     "PromptRenderContext",
     "PtySession",
     "RLoginSession",
+    "RoutedActivityRunner",
     "ScriptedModelAdapter",
     "SessionDisconnected",
     "SHELL_PROFILE",
@@ -42,7 +44,7 @@ from .memory import JsonMemoryStore
 from .models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, PromptProfile
-from .runner import ActivityBudget, ActivityProfile, ActivityRunner
+from .runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from .terminal import Observation, TerminalScreen, TurnObserver
 from .transports.base import SessionDisconnected
 from .transports.pty import PtySession

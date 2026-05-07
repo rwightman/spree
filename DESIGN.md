@@ -396,9 +396,37 @@ The model loop has three timing layers:
 - Campaign turn: a higher-level schedule such as one social phase, one door-game
   session, one BBS day, or one match round.
 
-`ActivityRunner` currently implements bounded single-agent activity sessions on
-top of the first two clocks. A future campaign runner should compose activities
-into fair model-vs-model schedules instead of replacing `ActivityRunner`.
+`ActivityRunner` implements bounded single-agent activity sessions on top of the
+first two clocks. `RoutedActivityRunner` keeps the same session, budget, memory,
+and trace format, but selects the active `ActivityProfile` from each fresh
+observation before building the next decision prompt. This removes brittle
+external script handoffs for cases like "navigate the BBS into TW2, then switch
+to the TW2 game profile."
+
+Each run may also carry a run-level objective. Profile objectives describe how
+the current activity should behave; the run objective describes the larger
+session goal and is rendered above the active profile objective. This matters
+most for routed runs, where the active profile can switch from BBS navigation to
+door-game play while the user's goal remains "explore TW2 and maximize profit."
+
+Routed traces record `active_profile` on every step and attach `profile_switch`
+events when the selected route changes. Built-in BBS route sets currently
+include:
+
+- `tw2-auto`: default `tw2-entry`, route to `tw2-game` when a TW2 screen is
+  detected.
+- `bbs-auto`: default `bbs-door-safe`, route to `tw2-game` when a TW2 screen is
+  detected.
+
+The broad `bbs-door-safe` profile is intended for capable-model experiments and
+unknown doors. It removes `submit_line` so capable models have to use explicit
+keystroke-level input: `press_key` for one-character hotkeys and `type_text` for
+numeric values/offers/destinations, followed by a fresh observation before
+deciding whether Enter is needed. Specialized profiles such as `tw2-game` can
+still add more game-specific modules and modality hints.
+
+A future campaign runner should compose activities into fair model-vs-model
+schedules instead of replacing these activity runners.
 
 Memory is harness-owned:
 

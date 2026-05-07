@@ -1,7 +1,7 @@
 import argparse
 
 from bbs_gym.accounts import AgentRecord, AgentRegistry
-from bbs_gym.cli import build_activity_profile, build_model, build_model_metadata
+from bbs_gym.cli import build_activity_profile, build_activity_route_set, build_model, build_model_metadata
 from terminal_agent.models import CodexCliAdapter, OpenAICompatibleAdapter
 
 
@@ -156,7 +156,7 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
         agent_id="codex-001",
         provider=None,
         activity="tw2-game",
-        objective=None,
+        profile_objective=None,
         observe_timeout=None,
         stable_ms=None,
         byte_quiet_ms=None,
@@ -172,7 +172,7 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
 def test_build_activity_profile_applies_named_profile_overrides():
     args = argparse.Namespace(
         activity="tw2-game",
-        objective="custom game objective",
+        profile_objective="custom game objective",
         observe_timeout=12.5,
         stable_ms=750,
         byte_quiet_ms=900,
@@ -187,3 +187,29 @@ def test_build_activity_profile_applies_named_profile_overrides():
     assert profile.stable_ms == 750
     assert profile.byte_quiet_ms == 900
     assert profile.prompt_mode == "stateful_delta"
+
+
+def test_build_activity_route_set_applies_profile_overrides():
+    args = argparse.Namespace(
+        agent_id="agent-001",
+        provider=None,
+        route_set="tw2-auto",
+        profile_objective="custom routed objective",
+        observe_timeout=12.5,
+        stable_ms=750,
+        byte_quiet_ms=900,
+        prompt_mode="stateful_delta",
+        codex_stateful=False,
+    )
+
+    route_set = build_activity_route_set(args)
+
+    assert route_set.name == "tw2-auto"
+    assert route_set.default_profile.name == "tw2-entry"
+    assert route_set.default_profile.objective == "custom routed objective"
+    assert route_set.default_profile.observe_timeout == 12.5
+    assert route_set.default_profile.stable_ms == 750
+    assert route_set.default_profile.byte_quiet_ms == 900
+    assert route_set.default_profile.prompt_mode == "stateful_delta"
+    assert route_set.routes[0].profile.name == "tw2-game"
+    assert route_set.routes[0].profile.prompt_mode == "stateful_delta"

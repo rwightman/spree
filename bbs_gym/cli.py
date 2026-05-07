@@ -14,7 +14,7 @@ from typing import Any
 from terminal_agent.ansi import strip_ansi
 from terminal_agent.models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from terminal_agent.models import output_filters_for_model
-from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
 from terminal_agent.terminal import TerminalScreen, TurnObserver
 from terminal_agent.transports.telnet import TelnetSession
 
@@ -22,6 +22,7 @@ from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile
 from .env import BbsGym
 from .profiles import BBS_PROFILE, TW2_PROFILE
+from .routing import ActivityRouteSet, activity_route_set, activity_route_set_names
 
 
 DEFAULT_AGENTS_CONFIG = Path("config/agents.local.json")
@@ -95,7 +96,7 @@ def run_activity(args: argparse.Namespace) -> int:
         return 2
 
     profile = build_activity_profile(args, registry)
-    runner = ActivityRunner(profile, log_path=args.log_path)
+    runner = ActivityRunner(profile, log_path=args.log_path, run_objective=args.run_objective or "")
 
     try:
         with BbsGym(
@@ -123,8 +124,76 @@ def run_activity(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_routed(args: argparse.Namespace) -> int:
+    try:
+        registry = load_agent_registry(args.agents_config, required=False)
+        model = build_model(args, registry)
+        model_metadata = build_model_metadata(args, registry)
+        route_set = build_activity_route_set(args, registry)
+    except (AccountConfigError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    runner = RoutedActivityRunner(
+        route_set.name,
+        route_set.default_profile,
+        route_set.routes,
+        log_path=args.log_path,
+        run_objective=args.run_objective or "",
+    )
+
+    try:
+        with BbsGym(
+            host=args.host,
+            port=args.port,
+            rlogin_port=args.rlogin_port,
+            rlogin_terminal=args.rlogin_terminal,
+            transport=args.transport,
+            agent_registry=registry,
+        ) as gym:
+            agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
+            result = runner.run(
+                agent,
+                model,
+                ActivityBudget(
+                    max_decision_ticks=args.max_decision_ticks,
+                    max_wall_seconds=args.max_wall_seconds,
+                ),
+            )
+    except (OSError, AccountConfigError, ValueError) as exc:
+        print(f"connection failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"route_set={route_set.name} agent={result.agent_id} steps={len(result.steps)} "
+        f"stop={result.stop_reason} final_profile={runner.profile.name}"
+    )
+    return 0
+
+
 def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityProfile:
-    profile = activity_profile(args.activity, args.objective)
+    profile = activity_profile(args.activity, args.profile_objective)
+    overrides = build_profile_overrides(args, registry)
+    return replace(profile, **overrides) if overrides else profile
+
+
+def build_activity_route_set(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityRouteSet:
+    route_set = activity_route_set(args.route_set)
+    overrides = build_profile_overrides(args, registry)
+    default_overrides = dict(overrides)
+    if getattr(args, "profile_objective", None):
+        default_overrides["objective"] = args.profile_objective
+    default_profile = (
+        replace(route_set.default_profile, **default_overrides) if default_overrides else route_set.default_profile
+    )
+    routes = tuple(
+        replace(route, profile=replace(route.profile, **overrides) if overrides else route.profile)
+        for route in route_set.routes
+    )
+    return replace(route_set, default_profile=default_profile, routes=routes)
+
+
+def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | None = None) -> dict[str, object]:
     record = registry.maybe_get(args.agent_id) if registry is not None else None
     model_config = record.model if record is not None else {}
     provider = getattr(args, "provider", None) or _config_str(model_config, "provider") or "openai-compatible"
@@ -139,7 +208,7 @@ def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | N
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
         overrides["prompt_mode"] = "stateful_delta"
-    return replace(profile, **overrides) if overrides else profile
+    return overrides
 
 
 def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
@@ -444,7 +513,14 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--codex-session-id")
     run_parser.add_argument("--codex-session-file")
     run_parser.add_argument("--activity", default="bbs-main-menu")
-    run_parser.add_argument("--objective")
+    run_parser.add_argument(
+        "--profile-objective",
+        help="override the selected profile's built-in objective",
+    )
+    run_parser.add_argument(
+        "--run-objective",
+        help="stable session goal included in prompts without replacing profile-specific guidance",
+    )
     run_parser.add_argument("--max-decision-ticks", type=int, default=20)
     run_parser.add_argument("--max-wall-seconds", type=float, default=300.0)
     run_parser.add_argument("--observe-timeout", type=float)
@@ -453,6 +529,51 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)
+
+    routed_parser = subparsers.add_parser("run-routed", help="run a model-driven BBS activity with profile routing")
+    routed_parser.add_argument("--host", default="127.0.0.1")
+    routed_parser.add_argument("--port", type=int, default=2323)
+    routed_parser.add_argument("--rlogin-port", type=int, default=2513)
+    routed_parser.add_argument("--rlogin-terminal", default="ansi")
+    routed_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
+    routed_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    routed_parser.add_argument("--agent-id", default="agent-001")
+    routed_parser.add_argument("--node", type=int)
+    routed_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "codex", "scripted"])
+    routed_parser.add_argument("--base-url")
+    routed_parser.add_argument("--api-key")
+    routed_parser.add_argument("--no-anthropic-cache", action="store_true")
+    routed_parser.add_argument("--model")
+    routed_parser.add_argument("--scripted-response", action="append", default=[])
+    routed_parser.add_argument("--temperature", type=float)
+    routed_parser.add_argument("--max-tokens", type=int)
+    routed_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
+    routed_parser.add_argument("--codex-profile")
+    routed_parser.add_argument("--codex-executable")
+    routed_parser.add_argument("--codex-timeout", type=float)
+    routed_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
+    routed_parser.add_argument("--codex-cwd")
+    routed_parser.add_argument("--codex-arg", action="append", default=[])
+    routed_parser.add_argument("--codex-stateful", action="store_true")
+    routed_parser.add_argument("--codex-session-id")
+    routed_parser.add_argument("--codex-session-file")
+    routed_parser.add_argument("--route-set", choices=activity_route_set_names(), default="tw2-auto")
+    routed_parser.add_argument(
+        "--profile-objective",
+        help="override the default profile's built-in objective",
+    )
+    routed_parser.add_argument(
+        "--run-objective",
+        help="stable session goal included across routed profile switches",
+    )
+    routed_parser.add_argument("--max-decision-ticks", type=int, default=50)
+    routed_parser.add_argument("--max-wall-seconds", type=float, default=600.0)
+    routed_parser.add_argument("--observe-timeout", type=float)
+    routed_parser.add_argument("--stable-ms", type=int)
+    routed_parser.add_argument("--byte-quiet-ms", type=int)
+    routed_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
+    routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
+    routed_parser.set_defaults(func=run_routed)
 
     accounts_parser = subparsers.add_parser("accounts", help="manage BBS agent account registry")
     accounts_subparsers = accounts_parser.add_subparsers(dest="accounts_command", required=True)

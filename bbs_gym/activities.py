@@ -12,6 +12,7 @@ from terminal_agent.terminal import Observation
 
 from .prompt_modules import (
     BBS_INPUT_MODALITY_PROFILE,
+    BBS_DOOR_PROMPT_MODULES,
     BBS_PROMPT_MODULES,
     TW2_INPUT_MODALITY_PROFILE,
     TW2_PROMPT_MODULES,
@@ -37,6 +38,27 @@ BBS_MAIN_MENU_PROFILE = ActivityProfile(
     action_policy=bbs_action_policy(),
     input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
     prompt_modules=BBS_PROMPT_MODULES,
+)
+
+BBS_DOOR_SAFE_PROFILE = ActivityProfile(
+    name="bbs-door-safe",
+    objective=(
+        "Explore the current BBS or door-game activity through normal terminal commands. Prefer careful "
+        "keystroke-level input when prompts may auto-accept values, recover from mistakes, and avoid sysop/admin "
+        "areas."
+    ),
+    action_policy=bbs_action_policy(
+        allowed_actions=frozenset({"type_text", "press_key", "wait", "hangup"}),
+        max_text_chars=240,
+        max_line_chars=240,
+        max_lines=5,
+    ),
+    input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
+    prompt_modules=BBS_DOOR_PROMPT_MODULES,
+    recent_steps_to_keep=8,
+    screen_tail_chars=1_600,
+    compact_every_steps=20,
+    compact_recent_chars=12_000,
 )
 
 TW2_ENTRY_PROFILE = ActivityProfile(
@@ -89,6 +111,8 @@ def activity_profile(name: str, objective: str | None = None) -> ActivityProfile
         profile = TW2_GAME_PROFILE
     elif name == "bbs-main-menu":
         profile = BBS_MAIN_MENU_PROFILE
+    elif name == "bbs-door-safe":
+        profile = BBS_DOOR_SAFE_PROFILE
     else:
         return ActivityProfile(
             name=name,

@@ -20,6 +20,8 @@ modes from live TW2 runs.
   profiles, activity-specific prompt modules, activities, and CLI commands.
 - Agent client: `python -m bbs_gym.cli smoke` for raw telnet/ANSI transcripts
   and `python -m bbs_gym.cli run-activity` for bounded model-driven sessions.
+  `python -m bbs_gym.cli run-routed` keeps one session open while switching
+  activity profiles from observed terminal state.
 - Model providers: OpenAI-compatible chat endpoints, Anthropic Messages, Codex
   CLI subprocess calls, and scripted test responses.
 - Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
@@ -161,6 +163,63 @@ model responses, validation notes, the parsed action, budget state, and the raw
 transcript path. New traces also include absolute `transcript_byte_start` and
 `transcript_byte_end` offsets so replay tools can render activity traces that
 share one long telnet/rlogin transcript.
+
+`run-routed` uses the same trace format and adds `active_profile` plus
+`profile_switch` events. Use `--run-objective` for a stable session goal that
+stays in the prompt across profile switches, and `--profile-objective` only when
+you want to replace the selected/default profile's own objective text. The
+built-in route sets are:
+
+- `tw2-auto`: start with the TW2 entry profile, then switch to the restricted
+  TW2 game profile when a TW2 screen is detected.
+- `bbs-auto`: start with a broader BBS door-safe profile, then specialize to
+  TW2 when detected.
+
+The `bbs-door-safe` profile is available directly through `run-activity` for
+experiments with stronger models. It removes `submit_line` and biases door-game
+input toward `press_key` for hotkeys and `type_text` for numeric values,
+observing before pressing Enter.
+
+Example routed TW2 run:
+
+```bash
+python -m bbs_gym.cli run-routed \
+  --route-set tw2-auto \
+  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --transport telnet \
+  --agents-config config/agents.local.json \
+  --agent-id rlogin-smoke \
+  --provider codex \
+  --model gpt-5.5 \
+  --max-decision-ticks 80 \
+  --log-path runtime/logs/tw2-routed.jsonl
+```
+
+To start with the broad door-safe profile and let routing specialize after TW2
+is detected:
+
+```bash
+python -m bbs_gym.cli run-routed \
+  --route-set bbs-auto \
+  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --transport telnet \
+  --provider openai-compatible \
+  --model gemma4 \
+  --max-decision-ticks 80 \
+  --log-path runtime/logs/tw2-bbs-auto.jsonl
+```
+
+For a one-profile capable-model experiment, keep `bbs-door-safe` active for the
+whole session and provide the same run-level goal:
+
+```bash
+python -m bbs_gym.cli run-activity \
+  --activity bbs-door-safe \
+  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --transport telnet \
+  --provider openai-compatible \
+  --model gemma4
+```
 
 Pretty-print a trace:
 

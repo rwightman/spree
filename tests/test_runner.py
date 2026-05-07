@@ -8,7 +8,7 @@ from terminal_agent.agent import ActionExecution
 from terminal_agent.memory import JsonMemoryStore
 from terminal_agent.models import ScriptedModelAdapter
 from terminal_agent.prompt_modules import GENERIC_TERMINAL_MODULES
-from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
+from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from terminal_agent.terminal import Observation
 from terminal_agent.transports.base import SessionDisconnected
 
@@ -235,6 +235,67 @@ def test_activity_runner_renders_schema_from_action_policy(tmp_path):
     assert '"send_raw"' not in system_prompt
 
 
+def test_routed_activity_runner_switches_profiles_from_observation(tmp_path):
+    agent = SequencedScreenAgent(["BBS main menu", "TradeWars2/JavaScript\nCommand (?=Help)?"])
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "hangup", "arguments": {}}',
+            "{}",
+        ]
+    )
+    default_profile = ActivityProfile(
+        name="bbs-safe",
+        objective="default",
+        action_policy=ActionPolicy(allowed_actions=frozenset({"wait", "hangup"})),
+    )
+    tw2_profile = ActivityProfile(
+        name="tw2-game",
+        objective="tw2",
+        action_policy=ActionPolicy(allowed_actions=frozenset({"press_key", "wait", "hangup"})),
+    )
+    runner = RoutedActivityRunner(
+        "auto",
+        default_profile,
+        (
+            ActivityRoute(
+                name="tw2",
+                profile=tw2_profile,
+                matches=lambda observation: "TradeWars2" in observation.model_text,
+                priority=10,
+                reason="test route matched",
+            ),
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+        log_path=tmp_path / "steps.jsonl",
+        run_objective="win the routed run",
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.activity == "auto"
+    assert result.run_objective == "win the routed run"
+    assert result.stop_reason == "hangup"
+    assert [step.active_profile for step in result.steps] == ["bbs-safe", "tw2-game"]
+    assert result.steps[1].events == [
+        {
+            "type": "profile_switch",
+            "from": "bbs-safe",
+            "to": "tw2-game",
+            "route": "tw2",
+            "reason": "test route matched",
+        }
+    ]
+    assert '"press_key"' in result.steps[1].prompt["system"]
+    assert '"submit_line"' not in result.steps[1].prompt["system"]
+    assert "Run objective: win the routed run" in result.steps[1].prompt["user"]
+    assert "Profile objective: tw2" in result.steps[1].prompt["user"]
+    logged_steps = [json.loads(line) for line in (tmp_path / "steps.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert logged_steps[1]["active_profile"] == "tw2-game"
+    assert logged_steps[1]["run_objective"] == "win the routed run"
+    assert logged_steps[1]["events"][0]["type"] == "profile_switch"
+
+
 def test_activity_runner_renders_and_traces_prompt_modules(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
@@ -306,6 +367,23 @@ def test_activity_runner_keeps_stateless_full_prompt_as_default(tmp_path):
     assert "Allowed terminal actions:" in prompt["system"]
     assert "Campaign memory:" in prompt["user"]
     assert "Recent steps:" in prompt["user"]
+
+
+def test_activity_runner_includes_run_objective_without_replacing_profile_objective(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="handle the active profile"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+        run_objective="play TW2 and maximize profit",
+    ).run(agent, model, ActivityBudget(max_decision_ticks=1))
+
+    user_prompt = result.steps[0].prompt["user"]
+    assert result.run_objective == "play TW2 and maximize profit"
+    assert result.steps[0].run_objective == "play TW2 and maximize profit"
+    assert "Run objective: play TW2 and maximize profit" in user_prompt
+    assert "Profile objective: handle the active profile" in user_prompt
 
 
 def test_activity_runner_stateful_delta_bootstraps_then_sends_delta_prompts(tmp_path):

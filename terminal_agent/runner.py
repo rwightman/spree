@@ -108,6 +108,9 @@ class StepRecord:
     budget: dict[str, Any]
     prompt_modules_schema_version: int = PROMPT_MODULES_SCHEMA_VERSION
     prompt_modules: list[dict[str, str]] = field(default_factory=list)
+    active_profile: str = ""
+    run_objective: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,6 +124,9 @@ class StepRecord:
             "budget": self.budget,
             "prompt_modules_schema_version": self.prompt_modules_schema_version,
             "prompt_modules": self.prompt_modules,
+            "active_profile": self.active_profile,
+            "run_objective": self.run_objective,
+            "events": self.events,
             "timestamp": self.timestamp,
         }
 
@@ -132,6 +138,16 @@ class ActivityResult:
     steps: list[StepRecord]
     session_summary: SessionSummary
     stop_reason: str
+    run_objective: str = ""
+
+
+@dataclass(frozen=True)
+class ActivityRoute:
+    name: str
+    profile: ActivityProfile
+    matches: Callable[[Observation], bool] = field(repr=False, compare=False)
+    priority: int = 0
+    reason: str = ""
 
 
 class ActivityRunner:
@@ -140,12 +156,25 @@ class ActivityRunner:
             profile: ActivityProfile,
             memory_store: JsonMemoryStore | None = None,
             log_path: Path | str | None = None,
+            run_objective: str = "",
     ) -> None:
         self.profile = profile
         self.memory_store = memory_store or JsonMemoryStore()
         self.log_path = Path(log_path) if log_path else None
+        self.run_objective = run_objective.strip()
 
     def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
+        return self._run(agent, model, budget, stop_on_completion=True)
+
+    def _run(
+            self,
+            agent: TerminalAgent,
+            model: ModelAdapter,
+            budget: ActivityBudget | None = None,
+            profile_selector: Callable[[Observation, ActivityProfile], tuple[ActivityProfile, list[dict[str, Any]]]]
+            | None = None,
+            stop_on_completion: bool = True,
+    ) -> ActivityResult:
         budget = budget or ActivityBudget()
         agent_id = getattr(agent, "agent_id", "agent")
         campaign_memory = self.memory_store.load(agent_id)
@@ -156,28 +185,37 @@ class ActivityRunner:
         last_observation: Observation | None = None
         previous_observation: Observation | None = None
         last_action_for_hints: Action | None = None
-        decision_prompts_sent = 0
+        active_profile = self.profile
+        decision_prompts_sent: dict[str, int] = {}
 
         while budget.remaining():
             try:
                 observation = agent.observe_turn(
-                    timeout=self.profile.observe_timeout,
-                    stable_ms=self.profile.stable_ms,
-                    byte_quiet_ms=self.profile.byte_quiet_ms,
-                    poll_interval=self.profile.poll_interval,
+                    timeout=active_profile.observe_timeout,
+                    stable_ms=active_profile.stable_ms,
+                    byte_quiet_ms=active_profile.byte_quiet_ms,
+                    poll_interval=active_profile.poll_interval,
                 )
             except SessionDisconnected:
                 stop_reason = "disconnected"
                 break
+
+            route_events: list[dict[str, Any]] = []
+            if profile_selector is not None:
+                selected_profile, route_events = profile_selector(observation, active_profile)
+                active_profile = selected_profile
+                self.profile = active_profile
             last_observation = observation
 
-            if self.profile.should_exit(observation, None, budget):
+            if stop_on_completion and active_profile.should_exit(observation, None, budget):
                 stop_reason = "profile_complete"
                 step = self._terminal_step_record(
                     step_number=len(all_steps) + 1,
                     observation=observation,
                     budget=budget,
                     stop_reason=stop_reason,
+                    active_profile=active_profile,
+                    events=route_events,
                 )
                 all_steps.append(step)
                 recent_steps.append(step)
@@ -191,6 +229,8 @@ class ActivityRunner:
                     observation=observation,
                     budget=budget,
                     stop_reason=stop_reason,
+                    active_profile=active_profile,
+                    events=route_events,
                 )
                 all_steps.append(step)
                 recent_steps.append(step)
@@ -216,7 +256,8 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
             )
-            prompt_stage = self._prompt_stage(decision_prompts_sent)
+            profile_prompt_count = decision_prompts_sent.get(active_profile.name, 0)
+            prompt_stage = self._prompt_stage(profile_prompt_count)
             prompt = self._build_decision_prompt(
                 agent_id=agent_id,
                 campaign_memory=campaign_memory,
@@ -228,7 +269,7 @@ class ActivityRunner:
             )
 
             action, validation = self._decide_with_retry(model, prompt)
-            decision_prompts_sent += 1
+            decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
             executed_action = action
             execution: dict[str, Any] = {}
             if action is None:
@@ -258,6 +299,9 @@ class ActivityRunner:
                 execution=execution,
                 budget=budget.to_dict(),
                 prompt_modules=prompt_module_trace(prompt_module_results),
+                active_profile=active_profile.name,
+                run_objective=self.run_objective,
+                events=route_events,
             )
             all_steps.append(step)
             recent_steps.append(step)
@@ -272,7 +316,7 @@ class ActivityRunner:
             if executed_action and executed_action.action == "hangup":
                 stop_reason = "hangup"
                 break
-            if self.profile.should_exit(observation, None, budget):
+            if stop_on_completion and active_profile.should_exit(observation, None, budget):
                 stop_reason = "profile_complete"
                 break
             if not budget.remaining():
@@ -289,6 +333,7 @@ class ActivityRunner:
             steps=all_steps,
             session_summary=session_summary,
             stop_reason=stop_reason,
+            run_objective=self.run_objective,
         )
 
     def _build_decision_prompt(
@@ -345,10 +390,10 @@ class ActivityRunner:
         system = "\n".join(system_parts)
         module_text = render_prompt_modules(prompt_module_results)
         user = "\n\n".join(
-            [
+            self._objective_prompt_lines()
+            + [
                 f"Agent: {agent_id}",
                 f"Activity: {self.profile.name}",
-                f"Objective: {self.profile.objective}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                 f"Session summary: {self._summary_text(session_summary)}",
@@ -372,16 +417,17 @@ class ActivityRunner:
         system = "\n".join(
             [
                 "Continue the existing terminal-control session from the bootstrap prompt.",
-                "Use the action schema, activity objective, stable guidance, and campaign memory already given.",
+                "Use the action schema, run objective, active profile objective, stable guidance, and campaign "
+                "memory already given.",
                 "Return only one JSON action object.",
             ]
         )
         module_text = render_prompt_modules(prompt_module_results)
         user = "\n\n".join(
-            [
+            self._objective_prompt_lines(reminder=True)
+            + [
                 f"Agent: {agent_id}",
                 f"Activity: {self.profile.name}",
-                f"Objective reminder: {self.profile.objective}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Session summary update: {self._summary_text(session_summary)}",
                 f"Previous step: {self._previous_step_delta_text(recent_steps)}",
@@ -393,6 +439,14 @@ class ActivityRunner:
             ]
         )
         return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage="delta")
+
+    def _objective_prompt_lines(self, *, reminder: bool = False) -> list[str]:
+        suffix = " reminder" if reminder else ""
+        lines: list[str] = []
+        if self.run_objective:
+            lines.append(f"Run objective{suffix}: {self.run_objective}")
+        lines.append(f"Profile objective{suffix}: {self.profile.objective}")
+        return lines
 
     def _prompt_stage(self, decision_prompts_sent: int) -> PromptStage:
         if self.profile.prompt_mode == "stateful_delta":
@@ -419,6 +473,7 @@ class ActivityRunner:
             campaign_memory=campaign_memory,
             session_summary=session_summary,
             budget=budget,
+            run_objective=self.run_objective,
         )
         return collect_prompt_module_results(self.profile.prompt_modules, context)
 
@@ -462,6 +517,8 @@ class ActivityRunner:
             observation: Observation,
             budget: ActivityBudget,
             stop_reason: str,
+            active_profile: ActivityProfile | None = None,
+            events: list[dict[str, Any]] | None = None,
     ) -> StepRecord:
         return StepRecord(
             step=step_number,
@@ -476,6 +533,9 @@ class ActivityRunner:
             },
             execution={},
             budget=budget.to_dict(),
+            active_profile=(active_profile or self.profile).name,
+            run_objective=self.run_objective,
+            events=list(events or []),
         )
 
     def _execution_record(self, result: ActionExecution) -> dict[str, Any]:
@@ -515,7 +575,8 @@ class ActivityRunner:
                 "be a list of strings."
             ),
             user="\n\n".join(
-                [
+                self._objective_prompt_lines()
+                + [
                     f"Previous summary:\n{self._summary_text(session_summary)}",
                     f"Steps to summarize:\n{self._recent_steps_text(recent_steps)}",
                     f"Current screen:\n{observation.model_text}",
@@ -536,7 +597,8 @@ class ActivityRunner:
         prompt = MemoryCommitPrompt(
             system="Return a JSON memory patch for durable campaign memory.",
             user="\n\n".join(
-                [
+                self._objective_prompt_lines()
+                + [
                     f"Existing campaign memory:\n{json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                     f"Session summary:\n{self._summary_text(session_summary)}",
                     f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
@@ -662,3 +724,68 @@ class ActivityRunner:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(step.to_dict(), sort_keys=True) + "\n")
+
+
+class RoutedActivityRunner(ActivityRunner):
+    def __init__(
+            self,
+            name: str,
+            default_profile: ActivityProfile,
+            routes: tuple[ActivityRoute, ...],
+            memory_store: JsonMemoryStore | None = None,
+            log_path: Path | str | None = None,
+            run_objective: str = "",
+    ) -> None:
+        super().__init__(
+            default_profile,
+            memory_store=memory_store,
+            log_path=log_path,
+            run_objective=run_objective,
+        )
+        self.name = name
+        self.default_profile = default_profile
+        self.routes = tuple(sorted(enumerate(routes), key=lambda item: (-item[1].priority, item[0])))
+        self._active_route_name = "default"
+
+    def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
+        self.profile = self.default_profile
+        self._active_route_name = "default"
+        result = self._run(
+            agent,
+            model,
+            budget,
+            profile_selector=self._select_profile,
+            stop_on_completion=False,
+        )
+        result.activity = self.name
+        return result
+
+    def _select_profile(
+            self,
+            observation: Observation,
+            current_profile: ActivityProfile,
+    ) -> tuple[ActivityProfile, list[dict[str, Any]]]:
+        route = self._matched_route(observation)
+        route_name = route.name if route is not None else "default"
+        selected_profile = route.profile if route is not None else self.default_profile
+        if route_name == self._active_route_name and selected_profile.name == current_profile.name:
+            return selected_profile, []
+
+        event = {
+            "type": "profile_switch",
+            "from": current_profile.name,
+            "to": selected_profile.name,
+            "route": route_name,
+        }
+        if route is not None and route.reason:
+            event["reason"] = route.reason
+        elif route is None:
+            event["reason"] = "no route matched; using default profile"
+        self._active_route_name = route_name
+        return selected_profile, [event]
+
+    def _matched_route(self, observation: Observation) -> ActivityRoute | None:
+        for _, route in self.routes:
+            if route.matches(observation):
+                return route
+        return None

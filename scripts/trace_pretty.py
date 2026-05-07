@@ -48,8 +48,14 @@ def render_step(
 ) -> str:
     lines = [
         f"=== Step {step.get('step', '?')} ===",
+        f"active_profile: {step.get('active_profile', '')}",
+        f"run_objective: {step.get('run_objective', '')}",
         f"action: {json.dumps(step.get('action'), sort_keys=True)}",
     ]
+
+    events = step.get("events")
+    if isinstance(events, list) and events:
+        lines.append(f"events: {json.dumps(events, sort_keys=True)}")
 
     observation = step.get("observation")
     if isinstance(observation, dict):
