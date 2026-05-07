@@ -5,7 +5,7 @@ from bbs_gym.prompt_modules import (
     BBS_PROMPT_MODULES,
     TW2_INPUT_MODALITY_PROFILE,
     TW2_PROMPT_MODULES,
-    AuthenticatedSessionModule,
+    BbsConventionModule,
 )
 from terminal_agent.hints import ObservationHints
 from terminal_agent.models import SessionSummary
@@ -140,18 +140,23 @@ def test_tw2_modality_profile_classifies_cr_redraw_command_prompt():
     assert "press_key" in hints.input_mode_hint
 
 
-def test_authenticated_session_module_only_renders_for_authenticated_sessions():
-    module = AuthenticatedSessionModule()
+def test_bbs_convention_module_folds_authenticated_session_context_under_conventions():
+    module = BbsConventionModule()
 
-    assert module.render(context("Welcome", {"transport": "telnet"})) is None
-    assert "already authenticated" in module.render(context("Welcome", {"transport": "rlogin", "authenticated": True}))
-    assert "already authenticated" in module.render(context("Welcome", {"transport": "telnet", "authenticated": True}))
+    unauthenticated = module.render(context("Welcome", {"transport": "telnet"}))
+    authenticated = module.render(context("Welcome", {"transport": "telnet", "authenticated": True}))
+
+    assert unauthenticated.startswith("BBS convention:")
+    assert "already authenticated" not in unauthenticated
+    assert authenticated.startswith("BBS convention:")
+    assert "already authenticated" in authenticated
+    assert "Menu letters and numbers" in authenticated
 
 
 def test_bbs_and_tw2_module_sets_have_expected_sizes():
     assert len(GENERIC_TERMINAL_MODULES) == 5
-    assert len(BBS_PROMPT_MODULES) == 7
-    assert len(TW2_PROMPT_MODULES) == 9
+    assert len(BBS_PROMPT_MODULES) == 6
+    assert len(TW2_PROMPT_MODULES) == 8
 
 
 def test_prompt_module_assistance_levels_are_ablatable():
@@ -162,9 +167,9 @@ def test_prompt_module_assistance_levels_are_ablatable():
     tw2_prompt = render_prompt_modules(collect_prompt_module_results(TW2_PROMPT_MODULES, render_context))
 
     assert len(generic_prompt) < len(bbs_prompt) < len(tw2_prompt)
-    assert "[generic_terminal]" in generic_prompt
-    assert "[bbs_conventions]" not in generic_prompt
-    assert "[game_interface]" not in generic_prompt
-    assert "[bbs_conventions]" in bbs_prompt
-    assert "[game_interface]" not in bbs_prompt
-    assert "[game_interface]" in tw2_prompt
+    assert "Most recent terminal output:" in generic_prompt
+    assert "BBS convention:" not in generic_prompt
+    assert "Trade Wars 2 command vocabulary" not in generic_prompt
+    assert "BBS convention:" in bbs_prompt
+    assert "Trade Wars 2 command vocabulary" not in bbs_prompt
+    assert "Trade Wars 2 command vocabulary" in tw2_prompt

@@ -204,10 +204,14 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
         overrides["stable_ms"] = args.stable_ms
     if getattr(args, "byte_quiet_ms", None) is not None:
         overrides["byte_quiet_ms"] = args.byte_quiet_ms
+    if getattr(args, "recent_steps_to_keep", None) is not None:
+        overrides["recent_steps_to_keep"] = args.recent_steps_to_keep
     if getattr(args, "prompt_mode", None) is not None:
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
         overrides["prompt_mode"] = "stateful_delta"
+    if getattr(args, "prompt_layout", None) is not None:
+        overrides["prompt_layout"] = args.prompt_layout
     return overrides
 
 
@@ -526,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--observe-timeout", type=float)
     run_parser.add_argument("--stable-ms", type=int)
     run_parser.add_argument("--byte-quiet-ms", type=int)
+    run_parser.add_argument("--recent-steps-to-keep", type=int)
     run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
+    run_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)
 
@@ -571,7 +577,9 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--observe-timeout", type=float)
     routed_parser.add_argument("--stable-ms", type=int)
     routed_parser.add_argument("--byte-quiet-ms", type=int)
+    routed_parser.add_argument("--recent-steps-to-keep", type=int)
     routed_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
+    routed_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
     routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
     routed_parser.set_defaults(func=run_routed)
 

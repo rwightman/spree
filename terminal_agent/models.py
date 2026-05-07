@@ -134,11 +134,8 @@ class TextChatAdapter:
         self.last_reasoning = ""
         self.last_response = self.chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
-        try:
-            data = json.loads(self.last_parsed_response)
-        except json.JSONDecodeError:
-            data = {"current_state": self._fallback_output_text()}
-        if not isinstance(data, dict):
+        data = _json_mapping_from_text(self.last_parsed_response)
+        if data is None:
             data = {"current_state": self._fallback_output_text()}
         return SessionSummary.from_mapping(data)
 
@@ -146,11 +143,8 @@ class TextChatAdapter:
         self.last_reasoning = ""
         self.last_response = self.chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
-        try:
-            data = json.loads(self.last_parsed_response)
-        except json.JSONDecodeError:
-            data = {"summary": self._fallback_output_text()}
-        if not isinstance(data, dict):
+        data = _json_mapping_from_text(self.last_parsed_response)
+        if data is None:
             data = {"summary": self._fallback_output_text()}
         return MemoryPatch(data)
 
@@ -577,6 +571,38 @@ def _normalize_filter_family(filter_family: str) -> str:
     if normalized in {"gemma4", "gemma-4"}:
         return "gemma4"
     return "default"
+
+
+FENCED_JSON_RE = re.compile(r"```(?:\s*json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _json_mapping_from_text(text: str) -> dict[str, object] | None:
+    """Parse a JSON object even when a text model wraps it in prose or fences."""
+
+    decoder = json.JSONDecoder()
+    candidates = [text.strip()]
+    candidates.extend(match.group(1).strip() for match in FENCED_JSON_RE.finditer(text))
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            data, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _post_json(

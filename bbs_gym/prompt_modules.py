@@ -13,11 +13,11 @@ from terminal_agent.prompt_modules import (
     StaticPromptModule,
 )
 
-BBS_HOTKEY_CONVENTIONS = (
-    "BBS convention: menu letters and numbers are often single-key hotkeys. Use press_key for those one-character "
-    "choices so you do not send an extra Enter. Use submit_line when it is available and the BBS is asking for an "
-    "ordinary typed line of text. If submit_line is not available, use type_text and only press Enter when the "
-    "prompt still appears to be waiting for typed text. "
+BBS_CORE_CONVENTIONS = (
+    "Menu letters and numbers are often single-key hotkeys. Use press_key for those one-character choices so you "
+    "do not send an extra Enter. Use submit_line when it is available and the BBS is asking for an ordinary typed "
+    "line of text. If submit_line is not available, use type_text and only press Enter when the prompt still "
+    "appears to be waiting for typed text. "
     'In prompts like "Yes [No]" or "[Yes] No", brackets usually mark the currently selected/default choice. '
     "Bracketed shortcuts such as [(Q)uit] mark a single-key shortcut for that choice, while the same prompt may "
     "also accept typed values for other choices. "
@@ -26,10 +26,11 @@ BBS_HOTKEY_CONVENTIONS = (
 )
 
 BBS_DOOR_SAFE_INPUT = (
-    "BBS door games often read input one key at a time and may auto-accept complete numeric values before Enter. "
-    "Prefer press_key for one-character menu choices and hotkeys. Prefer type_text for numeric quantities, "
-    "destinations, offers, and short typed answers, then observe the next screen before deciding whether Enter is "
-    "needed. If typed text remains at the prompt and has not been accepted, use press_key enter to submit it."
+    "Door-game input: BBS door games often read input one key at a time and may auto-accept complete numeric "
+    "values before Enter. Prefer press_key for one-character menu choices and hotkeys. Prefer type_text for "
+    "numeric quantities, destinations, offers, and short typed answers, then observe the next screen before "
+    "deciding whether Enter is needed. If typed text remains at the prompt and has not been accepted, use "
+    "press_key enter to submit it."
 )
 
 TW2_COMMAND_VOCABULARY = (
@@ -84,17 +85,19 @@ TW2_INPUT_MODALITY_PROFILE = InputModalityProfile(
 
 
 @dataclass(frozen=True)
-class AuthenticatedSessionModule:
-    name: str = "bbs.authenticated_session"
+class BbsConventionModule:
+    name: str = "bbs.conventions"
     level: AssistanceLevel = "bbs_conventions"
 
-    def render(self, context: PromptRenderContext) -> str | None:
-        if not context.observation.metadata.get("authenticated"):
-            return None
-        return (
-            "This BBS session is already authenticated. The first screens may be welcome banners or bulletins, "
-            "not a login prompt."
-        )
+    def render(self, context: PromptRenderContext) -> str:
+        parts = ["BBS convention:"]
+        if context.observation.metadata.get("authenticated"):
+            parts.append(
+                "This session is already authenticated. The first screens may be welcome banners or bulletins, "
+                "not a login prompt."
+            )
+        parts.append(BBS_CORE_CONVENTIONS)
+        return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -109,12 +112,7 @@ class TraceOnlyModule:
 
 BBS_PROMPT_MODULES: tuple[PromptModule, ...] = (
     *GENERIC_TERMINAL_MODULES,
-    AuthenticatedSessionModule(),
-    StaticPromptModule(
-        name="bbs.hotkey_conventions",
-        level="bbs_conventions",
-        text=BBS_HOTKEY_CONVENTIONS,
-    ),
+    BbsConventionModule(),
 )
 
 BBS_DOOR_PROMPT_MODULES: tuple[PromptModule, ...] = (

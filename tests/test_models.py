@@ -3,6 +3,7 @@ from terminal_agent.models import (
     CodexCliAdapter,
     CompactionPrompt,
     DecisionPrompt,
+    MemoryCommitPrompt,
     ModelMessage,
     OpenAICompatibleAdapter,
     SessionSummary,
@@ -41,6 +42,36 @@ def test_compact_returns_structured_session_summary():
 
     assert summary.current_state == "inside TW2"
     assert summary.open_subgoals == ("trade",)
+
+
+def test_compact_parses_json_inside_markdown_fence():
+    class FencedCompactModel(TextChatAdapter):
+        def chat(self, _messages):
+            return """```json
+{"current_state": "inside TW2", "open_subgoals": ["trade"], "discovered_facts": ["sector 1"], "failed_actions": [], "strategy_notes": [], "last_error": ""}
+```"""
+
+    summary = FencedCompactModel().compact(CompactionPrompt("s", "u"))
+
+    assert summary.current_state == "inside TW2"
+    assert summary.discovered_facts == ("sector 1",)
+
+
+def test_commit_memory_parses_json_inside_markdown_fence():
+    class FencedCommitModel(TextChatAdapter):
+        def chat(self, _messages):
+            return """I will return the memory patch:
+```json
+{"durable_facts": ["sector 57 sells ore"], "open_tasks": ["sell ore"]}
+```
+"""
+
+    patch = FencedCommitModel().commit_memory(MemoryCommitPrompt("s", "u"))
+
+    assert patch.data == {
+        "durable_facts": ["sector 57 sells ore"],
+        "open_tasks": ["sell ore"],
+    }
 
 
 def test_decide_filters_reasoning_blocks_but_keeps_raw_response():

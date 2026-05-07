@@ -27,7 +27,10 @@ from .transports.base import SessionDisconnected
 from .terminal import Observation
 
 PromptMode = Literal["stateless_full", "stateful_delta"]
+PromptLayout = Literal["timeline_first", "cache_friendly"]
 PromptStage = Literal["full", "bootstrap", "delta"]
+STATIC_PROMPT_MODULE_LEVELS = ("bbs_conventions", "game_interface", "strategic")
+TACTICAL_PROMPT_MODULE_LEVELS = ("generic_terminal",)
 
 
 @dataclass
@@ -79,13 +82,14 @@ class ActivityProfile:
     stable_ms: int = 300
     byte_quiet_ms: int = 0
     poll_interval: float = 0.05
-    recent_steps_to_keep: int = 8
+    recent_steps_to_keep: int = 4
     screen_tail_chars: int = 800
     compact_every_steps: int = 20
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
     include_model_responses_in_context: bool = False
     prompt_mode: PromptMode = "stateless_full"
+    prompt_layout: PromptLayout = "timeline_first"
     input_modality_profile: InputModalityProfile = field(default_factory=InputModalityProfile)
     prompt_modules: tuple[PromptModule, ...] = field(default=GENERIC_TERMINAL_MODULES, repr=False, compare=False)
     completion_check: Callable[[Observation], bool] | None = field(default=None, repr=False, compare=False)
@@ -293,6 +297,7 @@ class ActivityRunner:
                     "user": prompt.user,
                     "mode": prompt.mode,
                     "stage": prompt.stage,
+                    "layout": active_profile.prompt_layout,
                 },
                 action=action.to_dict() if action else None,
                 validation=validation,
@@ -374,6 +379,28 @@ class ActivityRunner:
             prompt_module_results: list[PromptModuleResult],
             prompt_stage: PromptStage,
     ) -> DecisionPrompt:
+        system = self._build_full_system_prompt(prompt_stage)
+        if self.profile.prompt_layout == "cache_friendly":
+            user = self._build_cache_friendly_user_prompt(
+                agent_id=agent_id,
+                campaign_memory=campaign_memory,
+                session_summary=session_summary,
+                recent_steps=recent_steps,
+                budget=budget,
+                prompt_module_results=prompt_module_results,
+            )
+        else:
+            user = self._build_timeline_first_user_prompt(
+                agent_id=agent_id,
+                campaign_memory=campaign_memory,
+                session_summary=session_summary,
+                recent_steps=recent_steps,
+                budget=budget,
+                prompt_module_results=prompt_module_results,
+            )
+        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage=prompt_stage)
+
+    def _build_full_system_prompt(self, prompt_stage: PromptStage) -> str:
         system_parts = [
             "You are controlling an interactive terminal session.",
             "You may make mistakes and recover from them.",
@@ -387,9 +414,19 @@ class ActivityRunner:
             )
         if self.profile.system_guidance:
             system_parts.append(f"Activity-specific guidance:\n{self.profile.system_guidance}")
-        system = "\n".join(system_parts)
+        return "\n".join(system_parts)
+
+    def _build_timeline_first_user_prompt(
+            self,
+            agent_id: str,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
+            prompt_module_results: list[PromptModuleResult],
+    ) -> str:
         module_text = render_prompt_modules(prompt_module_results)
-        user = "\n\n".join(
+        return "\n\n".join(
             self._objective_prompt_lines()
             + [
                 f"Agent: {agent_id}",
@@ -397,14 +434,39 @@ class ActivityRunner:
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                 f"Session summary: {self._summary_text(session_summary)}",
-                f"Recent steps: {self._recent_steps_text(recent_steps)}",
+                f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
                 module_text,
                 "---",
             ]
         )
-        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage=prompt_stage)
+
+    def _build_cache_friendly_user_prompt(
+            self,
+            agent_id: str,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            budget: ActivityBudget,
+            prompt_module_results: list[PromptModuleResult],
+    ) -> str:
+        stable_module_text = render_prompt_modules(prompt_module_results, levels=STATIC_PROMPT_MODULE_LEVELS)
+        tactical_module_text = render_prompt_modules(prompt_module_results, levels=TACTICAL_PROMPT_MODULE_LEVELS)
+        sections = self._objective_prompt_lines() + [
+            f"Agent: {agent_id}",
+            f"Activity: {self.profile.name}",
+            stable_module_text,
+            f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
+            f"Session summary: {self._summary_text(session_summary)}",
+            f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
+            "---",
+            f"Current step: {budget.decision_ticks + 1}",
+            f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
+            tactical_module_text,
+            "---",
+        ]
+        return "\n\n".join(section for section in sections if section)
 
     def _build_stateful_delta_prompt(
             self,
@@ -430,7 +492,7 @@ class ActivityRunner:
                 f"Activity: {self.profile.name}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Session summary update: {self._summary_text(session_summary)}",
-                f"Previous step: {self._previous_step_delta_text(recent_steps)}",
+                f"Previous step:\n{self._previous_step_delta_text(recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
                 module_text,

@@ -180,12 +180,18 @@ experiments with stronger models. It removes `submit_line` and biases door-game
 input toward `press_key` for hotkeys and `type_text` for numeric values,
 observing before pressing Enter.
 
+Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
+servers with prefix caching. The default `timeline_first` layout preserves the
+existing trace-oriented prompt order; `cache_friendly` moves stable objectives,
+static guidance, and campaign memory earlier while leaving volatile budget and
+current-screen modules near the end.
+
 Example routed TW2 run:
 
 ```bash
 python -m bbs_gym.cli run-routed \
   --route-set tw2-auto \
-  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
   --transport telnet \
   --agents-config config/agents.local.json \
   --agent-id rlogin-smoke \
@@ -201,7 +207,8 @@ is detected:
 ```bash
 python -m bbs_gym.cli run-routed \
   --route-set bbs-auto \
-  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --prompt-layout cache_friendly \
+  --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
   --transport telnet \
   --provider openai-compatible \
   --model gemma4 \
@@ -215,7 +222,8 @@ whole session and provide the same run-level goal:
 ```bash
 python -m bbs_gym.cli run-activity \
   --activity bbs-door-safe \
-  --run-objective "Play the TW2 door game, explore, find profitable trade routes, and maximize credits." \
+  --prompt-layout cache_friendly \
+  --run-objective "Play the TW2 door game. Explore the universe, find profitable trade routes, earn credits, preserve turns, recover from mistakes, and quit cleanly when useful progress is done." \
   --transport telnet \
   --provider openai-compatible \
   --model gemma4
@@ -306,6 +314,11 @@ full bootstrap prompt once and then shorter delta prompts with the current
 observation and previous-step summary. That mode is intended for future resumed
 provider sessions such as Codex CLI resume; use it only when the provider
 actually preserves prior context.
+
+Prompt layout is separate from prompt mode. `--prompt-layout timeline_first` is
+the default control layout. `--prompt-layout cache_friendly` keeps the same
+information but orders stable sections before fast-changing tactical state so
+vLLM-style prefix caching has a longer exact prefix to reuse.
 
 For Codex CLI, `--codex-stateful` captures the Codex session id from `--json`
 on the first call and resumes that same session on later decision ticks. When

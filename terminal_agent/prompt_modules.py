@@ -144,14 +144,22 @@ def collect_prompt_module_results(
     return results
 
 
-def render_prompt_modules(results: list[PromptModuleResult]) -> str:
+def render_prompt_modules(
+        results: list[PromptModuleResult],
+        levels: tuple[AssistanceLevel, ...] | None = None,
+        include_level_headers: bool = False,
+) -> str:
     """Render module results grouped by declared assistance level."""
 
+    selected_levels = set(levels) if levels is not None else set(ASSISTANCE_LEVEL_ORDER)
     rendered_groups: list[str] = []
     for level in ASSISTANCE_LEVEL_ORDER:
+        if level not in selected_levels:
+            continue
         group = [result.text for result in results if result.level == level and result.text]
         if group:
-            rendered_groups.append(f"[{level}]\n" + "\n\n".join(group))
+            group_text = "\n\n".join(group)
+            rendered_groups.append(f"[{level}]\n{group_text}" if include_level_headers else group_text)
     return "\n\n".join(rendered_groups)
 
 

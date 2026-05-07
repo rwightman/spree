@@ -378,6 +378,14 @@ session-summary update, and previous-step summary. Stateful delta prompts are
 only appropriate when the provider session preserves earlier context; harness
 memory and traces remain authoritative.
 
+Prompt layout is a separate axis from prompt mode. `timeline_first` is the
+default control layout and keeps the trace/history block before the current
+tactical modules. `cache_friendly` renders the same information with stable
+objectives, campaign memory, and static prompt modules before session summary
+and recent history, while volatile budget and current-screen modules stay near
+the end. This is intended for A/B tests with vLLM-style prefix caching without
+changing the model-visible action contract.
+
 The Codex CLI provider can run with `stateful=True`. In that mode, the first
 call uses `codex exec --json` so the adapter can capture the Codex session id.
 Later calls use `codex exec resume <session_id>` and should use

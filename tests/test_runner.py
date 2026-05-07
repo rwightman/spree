@@ -7,7 +7,7 @@ from terminal_agent.actions import Action, ActionError, ActionPolicy
 from terminal_agent.agent import ActionExecution
 from terminal_agent.memory import JsonMemoryStore
 from terminal_agent.models import ScriptedModelAdapter
-from terminal_agent.prompt_modules import GENERIC_TERMINAL_MODULES
+from terminal_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from terminal_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from terminal_agent.terminal import Observation
 from terminal_agent.transports.base import SessionDisconnected
@@ -312,9 +312,10 @@ def test_activity_runner_renders_and_traces_prompt_modules(tmp_path):
     )
 
     user_prompt = result.steps[0].prompt["user"]
-    assert user_prompt.index("Recent steps:") < user_prompt.index("[generic_terminal]")
-    assert user_prompt.index("Current step: 1") < user_prompt.index("[generic_terminal]")
-    assert user_prompt.index("[generic_terminal]") < user_prompt.index("Full current screen:")
+    assert "[generic_terminal]" not in user_prompt
+    assert user_prompt.index("Recent steps:") < user_prompt.index("Current step: 1")
+    assert user_prompt.index("Current step: 1") < user_prompt.index("Most recent terminal output:")
+    assert user_prompt.index("Most recent terminal output:") < user_prompt.index("Full current screen:")
     assert "Most recent terminal output:\nCommand:" in user_prompt
     assert result.steps[0].prompt_modules_schema_version == 1
     assert [module["name"] for module in result.steps[0].prompt_modules] == [
@@ -364,9 +365,56 @@ def test_activity_runner_keeps_stateless_full_prompt_as_default(tmp_path):
 
     assert prompt["mode"] == "stateless_full"
     assert prompt["stage"] == "full"
+    assert prompt["layout"] == "timeline_first"
     assert "Allowed terminal actions:" in prompt["system"]
     assert "Campaign memory:" in prompt["user"]
     assert "Recent steps:" in prompt["user"]
+
+
+def test_activity_runner_can_render_cache_friendly_prompt_layout(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
+    profile = ActivityProfile(
+        name="bbs-menu",
+        objective="test cache-friendly prompt layout",
+        prompt_layout="cache_friendly",
+        prompt_modules=(
+            *GENERIC_TERMINAL_MODULES,
+            StaticPromptModule(
+                name="bbs.static",
+                level="bbs_conventions",
+                text="Stable BBS convention guidance.",
+            ),
+            StaticPromptModule(
+                name="tw2.static",
+                level="game_interface",
+                text="Stable game-interface guidance.",
+            ),
+        ),
+    )
+
+    result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        agent,
+        model,
+        ActivityBudget(max_decision_ticks=1),
+    )
+
+    prompt = result.steps[0].prompt
+    user_prompt = prompt["user"]
+
+    assert prompt["layout"] == "cache_friendly"
+    assert "[generic_terminal]" not in user_prompt
+    assert "[bbs_conventions]" not in user_prompt
+    assert "[game_interface]" not in user_prompt
+    assert user_prompt.index("Stable BBS convention guidance.") < user_prompt.index("Stable game-interface guidance.")
+    assert user_prompt.index("Stable game-interface guidance.") < user_prompt.index("Campaign memory:")
+    assert user_prompt.index("Campaign memory:") < user_prompt.index("Session summary:")
+    assert user_prompt.index("Session summary:") < user_prompt.index("Recent steps:")
+    assert user_prompt.index("Recent steps:") < user_prompt.index("Current step: 1")
+    assert user_prompt.index("Current step: 1") < user_prompt.index("Budget:")
+    assert user_prompt.index("Budget:") < user_prompt.index("Most recent terminal output:")
+    assert "Full current screen:\nCommand:" in user_prompt
+    assert "Return exactly one JSON action." not in user_prompt
 
 
 def test_activity_runner_includes_run_objective_without_replacing_profile_objective(tmp_path):
@@ -424,7 +472,8 @@ def test_activity_runner_stateful_delta_bootstraps_then_sends_delta_prompts(tmp_
     assert "Previous step:" in second_prompt["user"]
     assert "Current step: 2" in second_prompt["user"]
     assert 'Action chosen:\n{"action": "wait", "arguments": {}}' in second_prompt["user"]
-    assert "[generic_terminal]" in second_prompt["user"]
+    assert "[generic_terminal]" not in second_prompt["user"]
+    assert "Most recent terminal output:" in second_prompt["user"]
 
 
 def test_activity_runner_logs_action_execution_errors_without_crashing(tmp_path):

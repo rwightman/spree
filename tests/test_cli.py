@@ -160,7 +160,9 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
         observe_timeout=None,
         stable_ms=None,
         byte_quiet_ms=None,
+        recent_steps_to_keep=None,
         prompt_mode=None,
+        prompt_layout=None,
         codex_stateful=False,
     )
 
@@ -176,7 +178,9 @@ def test_build_activity_profile_applies_named_profile_overrides():
         observe_timeout=12.5,
         stable_ms=750,
         byte_quiet_ms=900,
+        recent_steps_to_keep=5,
         prompt_mode="stateful_delta",
+        prompt_layout="cache_friendly",
     )
 
     profile = build_activity_profile(args)
@@ -186,7 +190,9 @@ def test_build_activity_profile_applies_named_profile_overrides():
     assert profile.observe_timeout == 12.5
     assert profile.stable_ms == 750
     assert profile.byte_quiet_ms == 900
+    assert profile.recent_steps_to_keep == 5
     assert profile.prompt_mode == "stateful_delta"
+    assert profile.prompt_layout == "cache_friendly"
 
 
 def test_build_activity_route_set_applies_profile_overrides():
@@ -198,7 +204,9 @@ def test_build_activity_route_set_applies_profile_overrides():
         observe_timeout=12.5,
         stable_ms=750,
         byte_quiet_ms=900,
+        recent_steps_to_keep=5,
         prompt_mode="stateful_delta",
+        prompt_layout="cache_friendly",
         codex_stateful=False,
     )
 
@@ -210,6 +218,10 @@ def test_build_activity_route_set_applies_profile_overrides():
     assert route_set.default_profile.observe_timeout == 12.5
     assert route_set.default_profile.stable_ms == 750
     assert route_set.default_profile.byte_quiet_ms == 900
+    assert route_set.default_profile.recent_steps_to_keep == 5
     assert route_set.default_profile.prompt_mode == "stateful_delta"
+    assert route_set.default_profile.prompt_layout == "cache_friendly"
     assert route_set.routes[0].profile.name == "tw2-game"
+    assert route_set.routes[0].profile.recent_steps_to_keep == 5
     assert route_set.routes[0].profile.prompt_mode == "stateful_delta"
+    assert route_set.routes[0].profile.prompt_layout == "cache_friendly"

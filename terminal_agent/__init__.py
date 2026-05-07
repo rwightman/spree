@@ -19,6 +19,8 @@ __all__ = [
     "ObservationHints",
     "OpenAICompatibleAdapter",
     "PromptModule",
+    "PromptLayout",
+    "PromptMode",
     "PromptProfile",
     "PromptRenderContext",
     "PtySession",
@@ -44,7 +46,15 @@ from .memory import JsonMemoryStore
 from .models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, PromptProfile
-from .runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
+from .runner import (
+    ActivityBudget,
+    ActivityProfile,
+    ActivityRoute,
+    ActivityRunner,
+    PromptLayout,
+    PromptMode,
+    RoutedActivityRunner,
+)
 from .terminal import Observation, TerminalScreen, TurnObserver
 from .transports.base import SessionDisconnected
 from .transports.pty import PtySession

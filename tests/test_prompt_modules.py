@@ -53,11 +53,19 @@ def test_generic_prompt_modules_render_labeled_observation_sections():
     results = collect_prompt_module_results(GENERIC_TERMINAL_MODULES, context())
     rendered = render_prompt_modules(results)
 
-    assert "[generic_terminal]" in rendered
+    assert "[generic_terminal]" not in rendered
     assert "Most recent terminal output:\nCommand:" in rendered
     assert "Likely active prompt:\nCommand:" in rendered
     assert "Input mode hint:\nunknown - inspect the screen" in rendered
     assert rendered.rstrip().endswith("Full current screen:\nCommand:")
+
+
+def test_prompt_modules_can_render_debug_level_headers():
+    results = collect_prompt_module_results(GENERIC_TERMINAL_MODULES, context())
+    rendered = render_prompt_modules(results, include_level_headers=True)
+
+    assert "[generic_terminal]" in rendered
+    assert "Most recent terminal output:\nCommand:" in rendered
 
 
 def test_empty_module_results_are_traced_but_not_rendered():

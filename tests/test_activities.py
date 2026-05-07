@@ -122,6 +122,6 @@ def test_prompt_module_assistance_levels_are_ablatable():
     tw2_prompt = render_prompt_modules(collect_prompt_module_results(TW2_PROMPT_MODULES, context))
 
     assert len(generic_prompt) < len(bbs_prompt) < len(tw2_prompt)
-    assert "[generic_terminal]" in generic_prompt
-    assert "[bbs_conventions]" in bbs_prompt
-    assert "[game_interface]" in tw2_prompt
+    assert "Most recent terminal output:" in generic_prompt
+    assert "BBS convention:" in bbs_prompt
+    assert "Trade Wars 2 command vocabulary" in tw2_prompt
