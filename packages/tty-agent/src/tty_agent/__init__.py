@@ -33,6 +33,7 @@ __all__ = [
     "TerminalAgent",
     "TerminalSessionAgent",
     "TerminalScreen",
+    "TEXT_ADVENTURE_PROFILE",
     "TurnObserver",
     "render_action_schema",
     "strip_ansi",
@@ -45,7 +46,7 @@ from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
 from .models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
-from .profiles import EMPTY_PROFILE, SHELL_PROFILE, PromptProfile
+from .profiles import EMPTY_PROFILE, SHELL_PROFILE, TEXT_ADVENTURE_PROFILE, PromptProfile
 from .runner import (
     ActivityBudget,
     ActivityProfile,
