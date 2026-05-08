@@ -97,6 +97,7 @@ def main() -> None:
         observe_timeout=args.observe_timeout,
         stable_ms=args.stable_ms,
         byte_quiet_ms=args.byte_quiet_ms,
+        prompt_fast_path=args.prompt_fast_path,
         recent_steps_to_keep=args.recent_steps_to_keep,
         screen_tail_chars=args.screen_tail_chars,
         compact_every_steps=args.compact_every_steps,
@@ -160,8 +161,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--columns", type=int, default=100)
     parser.add_argument("--lines", type=int, default=30)
     parser.add_argument("--observe-timeout", type=float, default=5.0)
-    parser.add_argument("--stable-ms", type=int, default=300)
+    parser.add_argument("--stable-ms", type=int, default=50)
     parser.add_argument("--byte-quiet-ms", type=int, default=0)
+    parser.add_argument(
+        "--prompt-fast-path",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="return as soon as the text-adventure prompt regex matches; use --no-prompt-fast-path to wait for stability",
+    )
     parser.add_argument("--recent-steps-to-keep", type=int, default=5)
     parser.add_argument("--screen-tail-chars", type=int, default=1600)
     parser.add_argument("--compact-every-steps", type=int, default=12)

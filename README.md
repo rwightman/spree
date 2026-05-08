@@ -184,6 +184,17 @@ Story/game data is intentionally not bundled or committed. The Zork example
 uses `tty_agent` only: `PtySession`, `TerminalScreen`, `TurnObserver`, and the
 `TEXT_ADVENTURE_PROFILE` prompt profile.
 
+To let a local OpenAI-compatible model play, use the activity example. It uses
+the text-adventure prompt fast path, so the runner can advance as soon as the
+`>` parser prompt appears instead of waiting for BBS-style screen quiescence:
+
+```bash
+uv run python examples/zork_activity.py runtime/zcode/zork1.z3 \
+  --model google/gemma-4-31B-it \
+  --base-url http://127.0.0.1:8000/v1 \
+  --max-decision-ticks 100
+```
+
 ## Activity Traces And Replays
 
 `run-activity` writes one JSONL record per decision tick. Each record includes
@@ -263,7 +274,6 @@ Pretty-print a trace:
 ```bash
 python scripts/trace_pretty.py runtime/logs/activity.jsonl \
   --show-new-text \
-  --show-controls \
   --out runtime/logs/activity.pretty.txt
 ```
 

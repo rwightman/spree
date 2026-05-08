@@ -18,8 +18,10 @@ class FakeAgent:
 
     def __init__(self):
         self.actions = []
+        self.observe_kwargs = []
 
     def observe_turn(self, **_kwargs):
+        self.observe_kwargs.append(_kwargs)
         return Observation(
             agent_id=self.agent_id,
             pretty_screen="Command:",
@@ -233,6 +235,28 @@ def test_activity_runner_renders_schema_from_action_policy(tmp_path):
     assert "Supported named keys: enter" in system_prompt
     assert '"submit_lines"' not in system_prompt
     assert '"send_raw"' not in system_prompt
+
+
+def test_activity_runner_forwards_prompt_fast_path_to_agent(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}', "{}"])
+    profile = ActivityProfile(
+        name="text-adventure",
+        objective="test fast prompt detection",
+        stable_ms=50,
+        byte_quiet_ms=0,
+        prompt_fast_path=True,
+    )
+
+    ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        agent,
+        model,
+        ActivityBudget(max_decision_ticks=1),
+    )
+
+    assert agent.observe_kwargs[0]["stable_ms"] == 50
+    assert agent.observe_kwargs[0]["byte_quiet_ms"] == 0
+    assert agent.observe_kwargs[0]["prompt_fast_path"] is True
 
 
 def test_routed_activity_runner_switches_profiles_from_observation(tmp_path):
