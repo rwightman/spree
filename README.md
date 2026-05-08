@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/spree.png" alt="Spree" width="100%">
+</p>
+
 # Spree BBS Gym
 
 Terminal-agent sprees through BBS doors, TUIs, and text worlds.
