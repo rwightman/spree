@@ -167,6 +167,23 @@ The generic PTY path can be checked without the BBS:
 python -m examples.shell_agent
 ```
 
+Spree can also drive local text adventures through the same PTY path. Install a
+terminal Z-machine interpreter such as Frotz and place your own local story
+file under ignored runtime state:
+
+```bash
+sudo apt install frotz
+mkdir -p runtime/zcode
+# put your local Zork/Z-code story file at runtime/zcode/zork1.z3
+uv run python examples/zork_agent.py runtime/zcode/zork1.z3 \
+  --move look \
+  --move inventory
+```
+
+Story/game data is intentionally not bundled or committed. The Zork example
+uses `tty_agent` only: `PtySession`, `TerminalScreen`, `TurnObserver`, and the
+`TEXT_ADVENTURE_PROFILE` prompt profile.
+
 ## Activity Traces And Replays
 
 `run-activity` writes one JSONL record per decision tick. Each record includes

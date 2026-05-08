@@ -37,4 +37,13 @@ SHELL_PROFILE = PromptProfile.from_patterns(
     },
 )
 
+TEXT_ADVENTURE_PROFILE = PromptProfile.from_patterns(
+    "text-adventure",
+    {
+        "command-prompt": r"(?:^|\n)>\s*$",
+        "yes-no-prompt": r"(?:yes/no|y/n|affirmative).*[:?]\s*$",
+        "more-prompt": r"(?:\[MORE\]|--More--)\s*$",
+    },
+)
+
 DEFAULT_PROFILE = EMPTY_PROFILE
