@@ -14,12 +14,11 @@ def visible_controls(text: str) -> str:
     for char in text:
         code = ord(char)
         if char == "\r":
-            out.append(r"\r")
+            out.append("␍")
         elif char == "\n":
-            out.append(r"\n")
             out.append("\n")
         elif char == "\t":
-            out.append(r"\t")
+            out.append("→\t")
         elif char == "\x1b":
             out.append(r"\x1b")
         elif code < 32 or code == 127:
@@ -27,6 +26,15 @@ def visible_controls(text: str) -> str:
         else:
             out.append(char)
     return "".join(out)
+
+
+def terminal_text(text: str, *, show_controls: bool) -> str:
+    """Render terminal text with real newlines instead of visible newline escapes."""
+
+    normalized = text.replace("\r\n", "\n")
+    if show_controls:
+        return visible_controls(normalized)
+    return normalized.replace("\r", "\n")
 
 
 def text_field(step: dict[str, Any], field: str) -> str:
@@ -88,14 +96,11 @@ def render_step(
         lines.append(f"prompt_modules: {json.dumps(module_summary, sort_keys=True)}")
 
     screen = text_field(step, screen_field)
-    if show_controls:
-        screen = visible_controls(screen)
+    screen = terminal_text(screen, show_controls=show_controls)
     lines.extend(["", f"{screen_field}:", screen])
 
     if show_new_text and screen_field != "new_text":
-        new_text = text_field(step, "new_text")
-        if show_controls:
-            new_text = visible_controls(new_text)
+        new_text = terminal_text(text_field(step, "new_text"), show_controls=show_controls)
         lines.extend(["", "new_text:", new_text])
 
     if show_model_response and isinstance(validation, dict):
@@ -105,11 +110,11 @@ def render_step(
             raw = model_response.get("response", "")
             parsed = model_response.get("parsed_response", "")
             if isinstance(reasoning, str) and reasoning:
-                lines.extend(["", "reasoning:", visible_controls(reasoning) if show_controls else reasoning])
+                lines.extend(["", "reasoning:", terminal_text(reasoning, show_controls=show_controls)])
             if isinstance(raw, str):
-                lines.extend(["", "model_response:", visible_controls(raw) if show_controls else raw])
+                lines.extend(["", "model_response:", terminal_text(raw, show_controls=show_controls)])
             if isinstance(parsed, str):
-                lines.extend(["", "parsed_response:", visible_controls(parsed) if show_controls else parsed])
+                lines.extend(["", "parsed_response:", terminal_text(parsed, show_controls=show_controls)])
 
     if show_prompt:
         prompt = step.get("prompt")
@@ -137,7 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("trace", type=Path)
     parser.add_argument("--screen-field", choices=["model_text", "pretty_screen", "new_text"], default="model_text")
     parser.add_argument("--show-new-text", action="store_true", help="also print observation.new_text")
-    parser.add_argument("--show-controls", action="store_true", help=r"render CR/ESC/control bytes as \r, \x1b, etc.")
+    parser.add_argument(
+        "--show-controls",
+        action="store_true",
+        help=r"mark bare CR/ESC/control bytes while preserving normal line breaks",
+    )
     parser.add_argument("--show-prompt", action="store_true")
     parser.add_argument("--show-model-response", action="store_true")
     parser.add_argument("--out", type=Path)

@@ -81,6 +81,7 @@ class ActivityProfile:
     observe_timeout: float = 10.0
     stable_ms: int = 300
     byte_quiet_ms: int = 0
+    prompt_fast_path: bool = False
     poll_interval: float = 0.05
     recent_steps_to_keep: int = 4
     screen_tail_chars: int = 800
@@ -199,6 +200,7 @@ class ActivityRunner:
                     stable_ms=active_profile.stable_ms,
                     byte_quiet_ms=active_profile.byte_quiet_ms,
                     poll_interval=active_profile.poll_interval,
+                    prompt_fast_path=active_profile.prompt_fast_path,
                 )
             except SessionDisconnected:
                 stop_reason = "disconnected"
