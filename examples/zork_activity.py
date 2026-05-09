@@ -11,7 +11,7 @@ from tty_agent.actions import ActionPolicy
 from tty_agent.agent import TerminalSessionAgent
 from tty_agent.hints import InputModalityProfile, InputModeRule
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import OpenAICompatibleAdapter, output_filters_for_model
+from tty_agent.models import CodexCliAdapter, OpenAICompatibleAdapter, output_filters_for_model
 from tty_agent.profiles import TEXT_ADVENTURE_PROFILE
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
@@ -77,14 +77,30 @@ def main() -> None:
             "PATH": os.environ.get("PATH", ""),
         },
     )
-    model = OpenAICompatibleAdapter(
-        model=args.model,
-        base_url=args.base_url,
-        api_key=args.api_key,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        output_filters=output_filters_for_model(args.model, args.response_filter),
-    )
+    output_filters = output_filters_for_model(args.model, args.response_filter)
+    if args.provider == "codex":
+        model = CodexCliAdapter(
+            model=args.model,
+            profile=args.codex_profile,
+            executable=args.codex_executable,
+            timeout=args.codex_timeout,
+            sandbox=args.codex_sandbox,
+            cwd=args.codex_cwd,
+            extra_args=args.codex_arg,
+            stateful=args.codex_stateful,
+            session_file=args.codex_session_file,
+            output_filters=output_filters,
+        )
+    else:
+        model = OpenAICompatibleAdapter(
+            model=args.model,
+            base_url=args.base_url,
+            api_key=args.api_key,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            output_filters=output_filters,
+        )
+    prompt_mode = args.prompt_mode or ("stateful_delta" if args.codex_stateful else "stateless_full")
     profile = ActivityProfile(
         name="zork",
         objective=args.objective,
@@ -101,6 +117,7 @@ def main() -> None:
         recent_steps_to_keep=args.recent_steps_to_keep,
         screen_tail_chars=args.screen_tail_chars,
         compact_every_steps=args.compact_every_steps,
+        prompt_mode=prompt_mode,
         prompt_layout=args.prompt_layout,
         input_modality_profile=TEXT_ADVENTURE_INPUT_MODALITY,
         prompt_modules=GENERIC_TERMINAL_MODULES + (TEXT_ADVENTURE_GUIDANCE,),
@@ -148,12 +165,23 @@ def parse_args() -> argparse.Namespace:
         help="argument passed before the story file; repeat for multiple arguments",
     )
     parser.add_argument("--agent-id", default="zork-gemma4")
+    parser.add_argument("--provider", choices=["openai-compatible", "codex"], default="openai-compatible")
     parser.add_argument("--model", default="gemma4")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="local")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--max-tokens", type=int, default=4096)
-    parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"], default="gemma4")
+    parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"], default="auto")
+    parser.add_argument("--codex-profile")
+    parser.add_argument("--codex-executable", default="codex")
+    parser.add_argument("--codex-timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="read-only"
+    )
+    parser.add_argument("--codex-cwd")
+    parser.add_argument("--codex-arg", action="append", default=[])
+    parser.add_argument("--codex-stateful", action="store_true")
+    parser.add_argument("--codex-session-file", type=Path)
     parser.add_argument("--transcript", type=Path, default=Path("runtime/transcripts/zork-activity.raw"))
     parser.add_argument("--log-path", type=Path, default=Path("runtime/logs/zork-activity.jsonl"))
     parser.add_argument("--memory-root", type=Path, default=Path("runtime/memory"))
@@ -172,6 +200,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recent-steps-to-keep", type=int, default=5)
     parser.add_argument("--screen-tail-chars", type=int, default=1600)
     parser.add_argument("--compact-every-steps", type=int, default=12)
+    parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"], default="cache_friendly")
     parser.add_argument("--max-decision-ticks", type=int, default=20)
     parser.add_argument("--max-wall-seconds", type=float, default=900.0)
