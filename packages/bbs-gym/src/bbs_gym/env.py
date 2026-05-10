@@ -29,6 +29,7 @@ class BbsGym:
             rlogin_port: int = 2513,
             rlogin_terminal: str = "ansi",
             transport: str = "telnet",
+            telnet_enter_sequence: str = "cr",
             agent_registry: AgentRegistry | None = None,
             agent_registry_path: str | Path | None = None,
     ) -> None:
@@ -36,6 +37,7 @@ class BbsGym:
         self.port = port
         self.rlogin_port = rlogin_port
         self.rlogin_terminal = rlogin_terminal
+        self.telnet_enter_sequence = telnet_enter_sequence
         self.transcript_dir = Path(transcript_dir)
         self.profile = profile
         self.columns = columns
@@ -60,7 +62,13 @@ class BbsGym:
                 telnet_password = record.resolve_password()
                 if telnet_password is None:
                     raise AccountConfigError(f"telnet login requires a resolved BBS password for {agent_id!r}")
-            session = TelnetSession(self.host, self.port, transcript_path=transcript, encoding="cp437")
+            session = TelnetSession(
+                self.host,
+                self.port,
+                transcript_path=transcript,
+                encoding="cp437",
+                enter_sequence=self.telnet_enter_sequence,
+            )
         elif active_transport == "rlogin":
             if record is None:
                 raise AccountConfigError(f"rlogin requires an agent registry entry for {agent_id!r}")
@@ -87,6 +95,8 @@ class BbsGym:
             "port": self.port if active_transport == "telnet" else self.rlogin_port,
             "encoding": session.encoding,
         }
+        if active_transport == "telnet":
+            metadata["telnet_enter_sequence"] = self.telnet_enter_sequence
         if active_transport == "rlogin":
             metadata["terminal"] = self.rlogin_terminal
         if record is not None:

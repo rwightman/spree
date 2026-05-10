@@ -6,11 +6,12 @@ def test_bbs_gym_connect_uses_effective_model_metadata(monkeypatch, tmp_path):
     class FakeSession:
         encoding = "cp437"
 
-        def __init__(self, host, port, transcript_path=None, encoding="cp437"):
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
             self.host = host
             self.port = port
             self.transcript_path = transcript_path
             self.encoding = encoding
+            self.enter_sequence = enter_sequence
             self.closed = False
 
         def connect(self):
@@ -31,15 +32,43 @@ def test_bbs_gym_connect_uses_effective_model_metadata(monkeypatch, tmp_path):
     assert agent.observer.metadata["model"] == {"provider": "codex", "model": "gpt-5.5", "sandbox": "read-only"}
 
 
-def test_bbs_gym_telnet_uses_agent_registry_for_login(monkeypatch, tmp_path):
+def test_bbs_gym_telnet_enter_sequence_is_forwarded(monkeypatch, tmp_path):
     class FakeSession:
         encoding = "cp437"
 
-        def __init__(self, host, port, transcript_path=None, encoding="cp437"):
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
             self.host = host
             self.port = port
             self.transcript_path = transcript_path
             self.encoding = encoding
+            self.enter_sequence = enter_sequence
+
+        def connect(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("bbs_gym.env.TelnetSession", FakeSession)
+    gym = BbsGym(transcript_dir=tmp_path, transport="telnet", telnet_enter_sequence="lf")
+
+    agent = gym.connect("tele-arena-codex")
+
+    assert agent.session.enter_sequence == "lf"
+    assert agent.metadata["telnet_enter_sequence"] == "lf"
+    assert agent.observer.metadata["telnet_enter_sequence"] == "lf"
+
+
+def test_bbs_gym_telnet_uses_agent_registry_for_login(monkeypatch, tmp_path):
+    class FakeSession:
+        encoding = "cp437"
+
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
+            self.host = host
+            self.port = port
+            self.transcript_path = transcript_path
+            self.encoding = encoding
+            self.enter_sequence = enter_sequence
             self.closed = False
             self.chunks = [
                 b"Synchronet BBS",
@@ -111,11 +140,12 @@ def test_bbs_gym_telnet_login_handles_initial_password_prompt(monkeypatch, tmp_p
     class FakeSession:
         encoding = "cp437"
 
-        def __init__(self, host, port, transcript_path=None, encoding="cp437"):
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
             self.host = host
             self.port = port
             self.transcript_path = transcript_path
             self.encoding = encoding
+            self.enter_sequence = enter_sequence
             self.chunks = [b"Password:", b"[Hit a key]"]
             self.sent: list[bytes] = []
             self.position = 0

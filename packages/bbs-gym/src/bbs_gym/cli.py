@@ -105,6 +105,7 @@ def run_activity(args: argparse.Namespace) -> int:
             rlogin_port=args.rlogin_port,
             rlogin_terminal=args.rlogin_terminal,
             transport=args.transport,
+            telnet_enter_sequence=args.telnet_enter,
             agent_registry=registry,
         ) as gym:
             agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
@@ -149,6 +150,7 @@ def run_routed(args: argparse.Namespace) -> int:
             rlogin_port=args.rlogin_port,
             rlogin_terminal=args.rlogin_terminal,
             transport=args.transport,
+            telnet_enter_sequence=args.telnet_enter,
             agent_registry=registry,
         ) as gym:
             agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
@@ -495,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--rlogin-port", type=int, default=2513)
     run_parser.add_argument("--rlogin-terminal", default="ansi")
     run_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
+    run_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
     run_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument("--node", type=int)
@@ -542,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--rlogin-port", type=int, default=2513)
     routed_parser.add_argument("--rlogin-terminal", default="ansi")
     routed_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
+    routed_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
     routed_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     routed_parser.add_argument("--agent-id", default="agent-001")
     routed_parser.add_argument("--node", type=int)

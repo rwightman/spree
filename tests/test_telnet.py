@@ -36,6 +36,24 @@ def test_telnet_enter_key_matches_empty_send_line():
     assert line_bytes == bytes(session._sock.sent) == b"\r"
 
 
+def test_telnet_enter_sequence_can_use_lf():
+    session = TelnetSession(enter_sequence="lf")
+    session._sock = FakeSocket()
+
+    session.send_key("enter")
+
+    assert bytes(session._sock.sent) == b"\n"
+
+
+def test_telnet_enter_sequence_can_use_crlf():
+    session = TelnetSession(enter_sequence="crlf")
+    session._sock = FakeSocket()
+
+    session.send_key("enter")
+
+    assert bytes(session._sock.sent) == b"\r\n"
+
+
 def test_telnet_key_accepts_printable_character():
     session = TelnetSession()
     session._sock = FakeSocket()

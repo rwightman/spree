@@ -1,0 +1,264 @@
+diff --git a/a/src/org/tdod/ether/taimpl/commands/debug/DoExport.java b/b/src/org/tdod/ether/taimpl/commands/debug/DoExport.java
+index d937978..04818e7 100755
+--- a/a/src/org/tdod/ether/taimpl/commands/debug/DoExport.java
++++ b/b/src/org/tdod/ether/taimpl/commands/debug/DoExport.java
+@@ -32,11 +32,12 @@
+ package org.tdod.ether.taimpl.commands.debug;
+ 
+ import org.tdod.ether.ta.commands.SysopCommand;
+-import org.tdod.ether.ta.cosmos.Area;
+-import org.tdod.ether.ta.manager.WorldManager;
+-import org.tdod.ether.ta.player.Player;
+-
+-import com.thoughtworks.xstream.XStream;
++import org.tdod.ether.ta.cosmos.Area;
++import org.tdod.ether.ta.manager.WorldManager;
++import org.tdod.ether.ta.player.Player;
++import org.tdod.ether.util.XStreamFactory;
++
++import com.thoughtworks.xstream.XStream;
+ 
+ /**
+  * This is a utility class that takes the currently read in area and exports it
+@@ -46,7 +47,7 @@ import com.thoughtworks.xstream.XStream;
+  */
+ public class DoExport extends SysopCommand {
+ 
+-   private XStream _xstream = new XStream();
++   private XStream _xstream = XStreamFactory.create();
+ 
+    /**
+     * Executes the "export" command.
+diff --git a/a/src/org/tdod/ether/taimpl/cosmos/DefaultCommandTriggerDatabase.java b/b/src/org/tdod/ether/taimpl/cosmos/DefaultCommandTriggerDatabase.java
+index 81f6e19..3218a35 100755
+--- a/a/src/org/tdod/ether/taimpl/cosmos/DefaultCommandTriggerDatabase.java
++++ b/b/src/org/tdod/ether/taimpl/cosmos/DefaultCommandTriggerDatabase.java
+@@ -39,12 +39,12 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.tdod.ether.ta.cosmos.CommandTrigger;
+ import org.tdod.ether.ta.cosmos.CommandTriggerDatabase;
+-import org.tdod.ether.ta.cosmos.CommandTriggers;
+-import org.tdod.ether.util.InvalidFileException;
+-import org.tdod.ether.util.PropertiesManager;
+-
+-import com.thoughtworks.xstream.XStream;
+-import com.thoughtworks.xstream.io.xml.DomDriver;
++import org.tdod.ether.ta.cosmos.CommandTriggers;
++import org.tdod.ether.util.InvalidFileException;
++import org.tdod.ether.util.PropertiesManager;
++import org.tdod.ether.util.XStreamFactory;
++
++import com.thoughtworks.xstream.XStream;
+ 
+ /**
+  * The default command trigger data store.
+@@ -54,7 +54,7 @@ public class DefaultCommandTriggerDatabase implements CommandTriggerDatabase {
+ 
+    private static Log _log = LogFactory.getLog(DefaultCommandTriggerDatabase.class);
+ 
+-   private XStream _xstream = new XStream(new DomDriver());
++   private XStream _xstream = XStreamFactory.create();
+ 
+    private CommandTriggers _commandTriggers = new DefaultCommandTriggers();
+ 
+diff --git a/a/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDatabase.java b/b/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDatabase.java
+index 8e583de..e8d0d03 100755
+--- a/a/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDatabase.java
++++ b/b/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDatabase.java
+@@ -43,12 +43,12 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.tdod.ether.ta.cosmos.Area;
+ import org.tdod.ether.ta.cosmos.Room;
+-import org.tdod.ether.ta.cosmos.RoomDatabase;
+-import org.tdod.ether.util.InvalidFileException;
+-import org.tdod.ether.util.PropertiesManager;
+-
+-import com.thoughtworks.xstream.XStream;
+-import com.thoughtworks.xstream.io.xml.DomDriver;
++import org.tdod.ether.ta.cosmos.RoomDatabase;
++import org.tdod.ether.util.InvalidFileException;
++import org.tdod.ether.util.PropertiesManager;
++import org.tdod.ether.util.XStreamFactory;
++
++import com.thoughtworks.xstream.XStream;
+ 
+ 
+ /**
+@@ -92,7 +92,7 @@ public class DefaultRoomDatabase implements RoomDatabase {
+ 
+    private static Log _log = LogFactory.getLog(DefaultRoomDatabase.class);
+ 
+-   private XStream _xstream = new XStream(new DomDriver());
++   private XStream _xstream = XStreamFactory.create();
+ 
+    private Area _area = new DefaultArea();
+ 
+diff --git a/a/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDescDatabase.java b/b/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDescDatabase.java
+index 85f6972..ddbac2a 100755
+--- a/a/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDescDatabase.java
++++ b/b/src/org/tdod/ether/taimpl/cosmos/DefaultRoomDescDatabase.java
+@@ -42,12 +42,12 @@ import java.util.Set;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.tdod.ether.ta.cosmos.RoomDescDatabase;
+-import org.tdod.ether.ta.cosmos.RoomDescriptions;
+-import org.tdod.ether.util.InvalidFileException;
+-import org.tdod.ether.util.PropertiesManager;
+-
+-import com.thoughtworks.xstream.XStream;
+-import com.thoughtworks.xstream.io.xml.DomDriver;
++import org.tdod.ether.ta.cosmos.RoomDescriptions;
++import org.tdod.ether.util.InvalidFileException;
++import org.tdod.ether.util.PropertiesManager;
++import org.tdod.ether.util.XStreamFactory;
++
++import com.thoughtworks.xstream.XStream;
+ 
+ /**
+  * The default implementation for room descriptions.
+@@ -58,7 +58,7 @@ public class DefaultRoomDescDatabase implements RoomDescDatabase {
+ 
+    private static Log _log = LogFactory.getLog(DefaultRoomDescDatabase.class);
+ 
+-   private XStream _xstream = new XStream(new DomDriver());
++   private XStream _xstream = XStreamFactory.create();
+ 
+    private RoomDescriptions _roomDescription = new DefaultRoomDescriptions();
+ 
+diff --git a/a/src/org/tdod/ether/taimpl/telnet/DefaultTaShell.java b/b/src/org/tdod/ether/taimpl/telnet/DefaultTaShell.java
+index f3ea12a..b7bb752 100755
+--- a/a/src/org/tdod/ether/taimpl/telnet/DefaultTaShell.java
++++ b/b/src/org/tdod/ether/taimpl/telnet/DefaultTaShell.java
+@@ -53,13 +53,12 @@ public class DefaultTaShell implements TaShell {
+    private static Log _log = LogFactory.getLog(DefaultTaShell.class);
+ 
+    private Connection _connection;
+-   private ShellIo    _shellIo;
+-   private Process    _process;
+-   private Thread     _shellThread;
+-
+-   // private boolean    _threadSuspended = true;
+-
+-   private InputStreamGobbler _inputGobbler = null;
++   private ShellIo    _shellIo;
++   private Process    _process;
++   private final Object _cleanupMonitor = new Object();
++   private boolean    _cleanupRequested;
++
++   private InputStreamGobbler _inputGobbler = null;
+ 
+    //**********
+    // Public methods
+@@ -151,12 +150,13 @@ public class DefaultTaShell implements TaShell {
+       return _connection;
+    }
+    
+-   public void cleanup(String info) {
+-      _shellThread.resume();
+-      // _threadSuspended = false;
+-      // _shellThread.notify();
+-      _log.info("Cleanup for " + info);
+-   }
++   public void cleanup(String info) {
++      synchronized (_cleanupMonitor) {
++         _cleanupRequested = true;
++         _cleanupMonitor.notifyAll();
++      }
++      _log.info("Cleanup for " + info);
++   }
+     
+    public void setHideInput(boolean hideInput) {
+       _inputGobbler.setHideInput(hideInput);
+@@ -166,23 +166,16 @@ public class DefaultTaShell implements TaShell {
+    // Private methods
+    //**********
+ 
+-   private void exec() throws InterruptedException {
+-      _inputGobbler = new InputStreamGobbler(_connection, _shellIo, this);
+-      _inputGobbler.start();         
+-      _shellThread = Thread.currentThread();
+-      PlayerConnectedManager.postPlayerConnectedEvent(PlayerConnectedEventId.Connected, this);
+-      
+-      _shellThread.suspend();
+-      
+-      /* try {
+-         synchronized(_shellThread) {
+-            while (_threadSuspended) {
+-               _shellThread.wait();
+-            }
+-         }         
+-      } catch (InterruptedException e){
+-         _log.info("Shell thread interrupted.  Shutting down.");
+-      } */
+-   }
+-
+-}
++   private void exec() throws InterruptedException {
++      _inputGobbler = new InputStreamGobbler(_connection, _shellIo, this);
++      _inputGobbler.start();         
++      PlayerConnectedManager.postPlayerConnectedEvent(PlayerConnectedEventId.Connected, this);
++
++      synchronized (_cleanupMonitor) {
++         while (!_cleanupRequested) {
++            _cleanupMonitor.wait();
++         }
++      }
++   }
++
++}
+diff --git a/b/src/org/tdod/ether/util/XStreamFactory.java b/b/src/org/tdod/ether/util/XStreamFactory.java
+new file mode 100644
+index 0000000..97e4f41
+--- /dev/null
++++ b/b/src/org/tdod/ether/util/XStreamFactory.java
+@@ -0,0 +1,50 @@
++/****************************************************************************
++ * Ether Code base, version 1.0                                             *
++ *==========================================================================*
++ * Copyright (C) 2011 by Ron Kinney                                         *
++ * All rights reserved.                                                     *
++ ****************************************************************************/
++
++package org.tdod.ether.util;
++
++import com.thoughtworks.xstream.XStream;
++import com.thoughtworks.xstream.io.HierarchicalStreamDriver;
++import com.thoughtworks.xstream.io.xml.DomDriver;
++
++/**
++ * Factory for XStream instances used to load Ether's XML data files.
++ */
++public final class XStreamFactory {
++
++   private static final String[] ALLOWED_TYPES = new String[] {
++      "org.tdod.ether.**"
++   };
++
++   /**
++    * Utility class.
++    */
++   private XStreamFactory() {
++   }
++
++   /**
++    * Creates an XStream instance backed by the default DOM driver.
++    *
++    * @return an XStream instance.
++    */
++   public static XStream create() {
++      return create(new DomDriver());
++   }
++
++   /**
++    * Creates an XStream instance backed by the specified driver.
++    *
++    * @param driver the stream driver.
++    *
++    * @return an XStream instance.
++    */
++   public static XStream create(HierarchicalStreamDriver driver) {
++      XStream xstream = new XStream(driver);
++      xstream.allowTypesByWildcard(ALLOWED_TYPES);
++      return xstream;
++   }
++}

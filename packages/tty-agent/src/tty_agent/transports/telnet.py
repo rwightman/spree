@@ -25,7 +25,6 @@ SB = 250
 SE = 240
 
 TELNET_KEY_BYTES = {
-    "enter": b"\r",
     "escape": b"\x1b",
     "tab": b"\t",
     "backspace": b"\x7f",
@@ -36,6 +35,12 @@ TELNET_KEY_BYTES = {
     "left": b"\x1b[D",
 }
 
+TELNET_ENTER_SEQUENCES = {
+    "cr": b"\r",
+    "lf": b"\n",
+    "crlf": b"\r\n",
+}
+
 
 @dataclass
 class TelnetSession:
@@ -44,6 +49,7 @@ class TelnetSession:
     timeout: float = 10.0
     transcript_path: Path | None = None
     encoding: str = "utf-8"
+    enter_sequence: str = "cr"
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
     _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
     _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
@@ -76,15 +82,24 @@ class TelnetSession:
         self.send_key("enter")
 
     def send_key(self, key: str) -> None:
-        payload = TELNET_KEY_BYTES.get(key)
+        payload = self._enter_bytes() if key == "enter" else TELNET_KEY_BYTES.get(key)
         if payload is None and is_printable_key(key):
             payload = key.encode(self.encoding)
         if payload is None:
-            supported = ", ".join(sorted(TELNET_KEY_BYTES))
+            supported = ", ".join(["enter", *sorted(TELNET_KEY_BYTES)])
             raise ActionError(
                 f"unsupported key {key!r}; use one printable character or one of these named keys: {supported}"
             )
         self.send_bytes(payload)
+
+    def _enter_bytes(self) -> bytes:
+        try:
+            return TELNET_ENTER_SEQUENCES[self.enter_sequence]
+        except KeyError as exc:
+            supported = ", ".join(sorted(TELNET_ENTER_SEQUENCES))
+            raise ActionError(
+                f"unsupported telnet enter sequence {self.enter_sequence!r}; use one of: {supported}"
+            ) from exc
 
     def send_bytes(self, payload: bytes) -> None:
         if self._sock is None:
