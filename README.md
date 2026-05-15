@@ -198,7 +198,9 @@ uv run python examples/zork_activity.py runtime/zcode/zork1.z3 \
 Spree can also drive Tele-Arena through the standalone Ether telnet server. The
 setup is more involved because the repo does not bundle Ether, Tele-Arena data,
 converted game files, or player state. See [TELE_ARENA.md](TELE_ARENA.md) for
-the download, conversion, Ether setup, Java notes, and the wrapper command:
+the download, conversion, the
+[`ether-arena`](https://github.com/rwightman/ether-arena) fork, and the wrapper
+command:
 
 ```bash
 uv run python examples/tele_arena_activity.py \

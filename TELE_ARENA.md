@@ -13,17 +13,21 @@ because that is what the Synchronet/TW2 path currently expects.
 - Tested with Tele-Arena 5.6d data converted by AreaBuilder.
 - Tested with the Ether Java telnet server on `127.0.0.1:3000`.
 - Tested with Codex via `examples/tele_arena_activity.py`.
+- Ether runtime fixes are maintained outside this repo in
+  <https://github.com/rwightman/ether-arena>.
 - Game data, Ether archives, generated data, player files, and logs belong
   under ignored `runtime/tele-arena/`.
 
 This repo does not ship Tele-Arena, Ether, converted data, player files, or
 registration material. Use files you are allowed to run. Ether's own install
 notes state that Ether does not include the copyrighted Tele-Arena data files.
+For Java/runtime fixes, use the `ether-arena` fork.
 
 ## Sources
 
-- Ether runtime: <https://sourceforge.net/projects/jether/files/ether1.00b56.zip/download>
-- Ether source: <https://sourceforge.net/projects/jether/files/src/ether_src1.00b53.zip/download>
+- Ether fork with local runtime fixes: <https://github.com/rwightman/ether-arena>
+- Original Ether runtime: <https://sourceforge.net/projects/jether/files/ether1.00b56.zip/download>
+- Original Ether source: <https://sourceforge.net/projects/jether/files/src/ether_src1.00b53.zip/download>
 - Ether/AreaBuilder install notes: <https://tdod.org/ether/install.html>
 - Tele-Arena module page: <https://www.mbbsemu.com/Module/TSGARN>
 - Tele-Arena wiki notes: <https://wiki.mbbsemu.com/doku.php?id=modules%3Atsgarn>
@@ -34,11 +38,9 @@ notes state that Ether does not include the copyrighted Tele-Arena data files.
 sudo apt install unzip ant default-jdk
 ```
 
-The original Ether tooling was built for old Java. The path below worked in
-the local development tree with Java 21 after patching/rebuilding Ether from
-source and using a modern XStream jar. If you are setting this up from scratch,
-an older JDK is usually the lower-friction path. Java 21 notes are included
-where they mattered during the local setup.
+The original Ether tooling was built for old Java. For Java 21, use the
+`ether-arena` fork. It carries the Java/runtime fixes separately from Spree's
+terminal-agent harness code.
 
 ## 2. Put Archives Under Runtime
 
@@ -52,7 +54,6 @@ Download or place these archives there:
 
 ```text
 runtime/tele-arena/downloads/ether1.00b56.zip
-runtime/tele-arena/downloads/ether_src1.00b53.zip
 runtime/tele-arena/downloads/AreaBuilder1.00b1.zip
 runtime/tele-arena/downloads/TSGARN_MBBSEmu.zip
 ```
@@ -61,28 +62,31 @@ runtime/tele-arena/downloads/TSGARN_MBBSEmu.zip
 needs. The original installer can also work if you extract the same message
 files yourself.
 
-## 3. Unpack Ether And AreaBuilder
+## 3. Prepare Ether And AreaBuilder
 
 ```bash
 mkdir -p runtime/tele-arena/ether \
-  runtime/tele-arena/ether-src \
   runtime/tele-arena/area-builder
 
 unzip -q runtime/tele-arena/downloads/ether1.00b56.zip \
   -d runtime/tele-arena/ether
 
-unzip -q runtime/tele-arena/downloads/ether_src1.00b53.zip \
-  -d runtime/tele-arena/ether-src
-
 unzip -q runtime/tele-arena/downloads/AreaBuilder1.00b1.zip \
   -d runtime/tele-arena/area-builder
+```
+
+For the patched Java source tree, clone the fork under ignored runtime storage:
+
+```bash
+git clone https://github.com/rwightman/ether-arena.git \
+  runtime/tele-arena/ether-arena
 ```
 
 The resulting paths should include:
 
 ```text
 runtime/tele-arena/ether/ether/
-runtime/tele-arena/ether-src/ether/
+runtime/tele-arena/ether-arena/
 runtime/tele-arena/area-builder/AreaBuilder/
 ```
 
@@ -139,11 +143,13 @@ and `tamessages.properties`.
 From the repository root:
 
 ```bash
+ETHER_HOME=runtime/tele-arena/ether-arena
+
 cp runtime/tele-arena/area-builder/AreaBuilder/build/town.xml \
   runtime/tele-arena/area-builder/AreaBuilder/build/world1.xml \
   runtime/tele-arena/area-builder/AreaBuilder/build/town_room_desc.xml \
   runtime/tele-arena/area-builder/AreaBuilder/build/world_room_desc.xml \
-  runtime/tele-arena/ether/ether/area/
+  "$ETHER_HOME/area/"
 
 cp runtime/tele-arena/area-builder/AreaBuilder/build/armor.dat \
   runtime/tele-arena/area-builder/AreaBuilder/build/barriers.dat \
@@ -160,13 +166,17 @@ cp runtime/tele-arena/area-builder/AreaBuilder/build/armor.dat \
   runtime/tele-arena/area-builder/AreaBuilder/build/traps.dat \
   runtime/tele-arena/area-builder/AreaBuilder/build/treasures.dat \
   runtime/tele-arena/area-builder/AreaBuilder/build/weapons.dat \
-  runtime/tele-arena/ether/ether/data/
+  "$ETHER_HOME/data/"
 ```
+
+Set `ETHER_HOME=runtime/tele-arena/ether/ether` instead if you intentionally
+want to run the original unpacked runtime.
 
 ## 7. Start Ether
 
 ```bash
-cd runtime/tele-arena/ether/ether
+cd runtime/tele-arena/ether-arena
+ant jar
 java -DTaConfigFile=config/ta.properties -jar ether.jar
 ```
 
@@ -178,24 +188,7 @@ Genesis ;Server up
 ```
 
 If the original Ether jar fails on a modern JDK with XStream or reflection
-errors, either run it with an older JDK or rebuild the Ether source with a
-modern XStream jar. The repo includes a source-only Java 21 patch for the two
-issues seen locally: modern XStream type permissions and the removed
-`Thread.suspend`/`Thread.resume` APIs.
-
-```bash
-cd runtime/tele-arena/ether-src/ether
-patch -p2 < ../../../../docs/patches/ether-java21.patch
-ant
-```
-
-Then copy the rebuilt `ether.jar` plus the newer XStream jar into
-`runtime/tele-arena/ether/ether/`.
-
-Keep this as a source patch rather than committing rebuilt jars or game data. A
-patch keeps the setup reproducible while preserving the boundary between
-Spree's harness code and third-party game assets. A separate Ether fork only
-makes sense if the patch grows into ongoing runtime maintenance.
+errors, use the `ether-arena` fork above.
 
 ## 8. Smoke Test The Telnet Prompt
 
