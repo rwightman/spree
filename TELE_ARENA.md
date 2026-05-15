@@ -1,7 +1,7 @@
 # Tele-Arena Through Ether
 
 This is the experimental path for running Tele-Arena as a standalone telnet
-target and driving it with Spree's `bbs-door-safe` profile. It does not use
+target and driving it with Spree's `bbs-door-line` profile. It does not use
 Synchronet. Ether serves the game directly on telnet port `3000`.
 
 The important harness detail is line endings: Ether accepts LF for Enter. Keep
@@ -12,7 +12,7 @@ because that is what the Synchronet/TW2 path currently expects.
 
 - Tested with Tele-Arena 5.6d data converted by AreaBuilder.
 - Tested with the Ether Java telnet server on `127.0.0.1:3000`.
-- Tested with Codex via `examples/tele_arena_activity.py`.
+- Tested with Codex and Claude CLI via `examples/tele_arena_activity.py`.
 - Ether runtime fixes are maintained outside this repo in
   <https://github.com/rwightman/ether-arena>.
 - Game data, Ether archives, generated data, player files, and logs belong
@@ -205,12 +205,13 @@ Welcome to the Java port of Tele-Arena 5.6d!
 Enter your character's name or type NEW:
 ```
 
-## 9. Let Codex Play Through The Wrapper
+## 9. Let An Agent Play Through The Wrapper
 
 From the repository root:
 
 ```bash
 uv run python examples/tele_arena_activity.py \
+  --activity bbs-door-line \
   --provider codex \
   --model gpt-5.5 \
   --max-decision-ticks 100
@@ -224,24 +225,43 @@ uv run bbs-gym run-activity \
   --port 3000 \
   --transport telnet \
   --telnet-enter lf \
-  --activity bbs-door-safe \
+  --activity bbs-door-line \
   --provider codex \
   --model gpt-5.5
+```
+
+`bbs-door-line` is the preferred Tele-Arena profile. It allows `submit_line`
+for complete line-oriented commands while keeping `type_text` and `press_key`
+available for prompts that behave like single-key BBS inputs. Use
+`bbs-door-safe` when testing a door that auto-accepts values before Enter, such
+as the TW2 JavaScript door.
+
+Claude Code can run through the same wrapper in stateful mode:
+
+```bash
+uv run python examples/tele_arena_activity.py \
+  --activity bbs-door-line \
+  --provider claude \
+  --model sonnet \
+  --agent-id tele-arena-claude \
+  --claude-stateful \
+  --claude-session-file runtime/claude-sessions/tele-arena-claude.session \
+  --max-decision-ticks 100
 ```
 
 The trace defaults to:
 
 ```text
-runtime/logs/tele-arena-codex-bbs-door-safe-lf.jsonl
+runtime/logs/tele-arena-codex-bbs-door-line-lf.jsonl
 ```
 
 Pretty-print it with:
 
 ```bash
 python scripts/trace_pretty.py \
-  runtime/logs/tele-arena-codex-bbs-door-safe-lf.jsonl \
+  runtime/logs/tele-arena-codex-bbs-door-line-lf.jsonl \
   --show-new-text \
-  --out runtime/logs/tele-arena-codex-bbs-door-safe-lf.pretty.txt
+  --out runtime/logs/tele-arena-codex-bbs-door-line-lf.pretty.txt
 ```
 
 ## Observed Result
@@ -251,11 +271,19 @@ creation, entered the north plaza, used `HELP`, `STATUS`, `INVENTORY`, `EXITS`,
 and `LOOK`, navigated to the equipment shop, bought a torch/waterskin/food,
 visited the guild hall, returned to the plaza, and hung up cleanly at step 100.
 
+A stateful Claude run with `bbs-door-line` created `ArenaLine`, completed
+character creation, bought starter supplies, entered the arena, fought a giant
+bat, died, recovered in the temple, and continued until the 100-step budget.
+The same run used `submit_line` for most complete commands and had no action
+validation failures.
+
 ## Notes
 
 - Use `--telnet-enter lf` for Ether. CR-only caused repeated delayed submits.
-- `bbs-door-safe` is the right starting profile because Tele-Arena often
-  accepts one-character choices but also has typed command lines.
+- `bbs-door-line` is the right starting profile for Tele-Arena because most
+  gameplay commands are typed lines that expect Enter.
+- `bbs-door-safe` is still useful for doors that often auto-accept typed values
+  before Enter.
 - The wrapper is intentionally thin; pass any extra `bbs-gym run-activity`
   arguments after the wrapper arguments and they will be forwarded.
 - The current objective is conservative. For more exploratory runs, override

@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from tty_agent.ansi import strip_ansi
-from tty_agent.models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from tty_agent.models import (
+    AnthropicAdapter,
+    ClaudeCliAdapter,
+    CodexCliAdapter,
+    OpenAICompatibleAdapter,
+    ScriptedModelAdapter,
+)
 from tty_agent.models import output_filters_for_model
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
 from tty_agent.terminal import TerminalScreen, TurnObserver
@@ -212,6 +218,8 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
         overrides["prompt_mode"] = "stateful_delta"
+    elif provider == "claude" and _claude_stateful(args, model_config):
+        overrides["prompt_mode"] = "stateful_delta"
     if getattr(args, "prompt_layout", None) is not None:
         overrides["prompt_layout"] = args.prompt_layout
     return overrides
@@ -249,6 +257,26 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             stateful=_codex_stateful(args, model_config),
             session_id=getattr(args, "codex_session_id", None) or _config_str(model_config, "session_id"),
             session_file=getattr(args, "codex_session_file", None) or _config_str(model_config, "session_file"),
+            output_filters=output_filters_for_model(
+                args.model or _config_str(model_config, "model") or "",
+                args.response_filter or _config_str(model_config, "response_filter"),
+            ),
+        )
+    elif provider == "claude":
+        model = ClaudeCliAdapter(
+            model=args.model or _config_str(model_config, "model"),
+            executable=getattr(args, "claude_executable", None) or _config_str(model_config, "executable") or "claude",
+            timeout=_config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 300.0),
+            cwd=getattr(args, "claude_cwd", None) or _config_str(model_config, "cwd"),
+            extra_args=_config_str_list(model_config, "extra_args") + (getattr(args, "claude_arg", []) or []),
+            stateful=_claude_stateful(args, model_config),
+            session_id=getattr(args, "claude_session_id", None) or _config_str(model_config, "session_id"),
+            session_file=getattr(args, "claude_session_file", None) or _config_str(model_config, "session_file"),
+            permission_mode=getattr(args, "claude_permission_mode", None)
+            or _config_str(model_config, "permission_mode")
+            or "dontAsk",
+            tools=_claude_tools(args, model_config),
+            bare=_claude_bare(args, model_config),
             output_filters=output_filters_for_model(
                 args.model or _config_str(model_config, "model") or "",
                 args.response_filter or _config_str(model_config, "response_filter"),
@@ -312,6 +340,29 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
                 "stateful": _codex_stateful(args, model_config),
                 "session_id": getattr(args, "codex_session_id", None) or _config_str(model_config, "session_id"),
                 "session_file": getattr(args, "codex_session_file", None) or _config_str(model_config, "session_file"),
+                "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
+            }
+        )
+    if provider == "claude":
+        model_name = args.model or _config_str(model_config, "model") or ""
+        return _without_empty_values(
+            {
+                "provider": "claude",
+                "model": model_name,
+                "executable": getattr(args, "claude_executable", None)
+                or _config_str(model_config, "executable")
+                or "claude",
+                "timeout": _config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 300.0),
+                "cwd": getattr(args, "claude_cwd", None) or _config_str(model_config, "cwd"),
+                "extra_args": _config_str_list(model_config, "extra_args") + (getattr(args, "claude_arg", []) or []),
+                "stateful": _claude_stateful(args, model_config),
+                "session_id": getattr(args, "claude_session_id", None) or _config_str(model_config, "session_id"),
+                "session_file": getattr(args, "claude_session_file", None) or _config_str(model_config, "session_file"),
+                "permission_mode": getattr(args, "claude_permission_mode", None)
+                or _config_str(model_config, "permission_mode")
+                or "dontAsk",
+                "tools": _claude_tools(args, model_config),
+                "bare": _claude_bare(args, model_config),
                 "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
             }
         )
@@ -446,6 +497,31 @@ def _codex_stateful(args: argparse.Namespace, model_config: dict[str, Any]) -> b
     return False
 
 
+def _claude_stateful(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
+    if getattr(args, "claude_stateful", False):
+        return True
+    if "stateful" in model_config:
+        return _config_bool(model_config, "stateful")
+    return False
+
+
+def _claude_bare(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
+    if getattr(args, "claude_bare", False):
+        return True
+    if "bare" in model_config:
+        return _config_bool(model_config, "bare")
+    return False
+
+
+def _claude_tools(args: argparse.Namespace, model_config: dict[str, Any]) -> str | None:
+    value = getattr(args, "claude_tools", None)
+    if value is not None:
+        return value
+    if "tools" in model_config:
+        return _config_str(model_config, "tools")
+    return ""
+
+
 def _without_empty_values(data: dict[str, object | None]) -> dict[str, object]:
     return {key: value for key, value in data.items() if value not in (None, "", [], {})}
 
@@ -501,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument("--node", type=int)
-    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "codex", "scripted"])
+    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
     run_parser.add_argument("--base-url")
     run_parser.add_argument("--api-key")
     run_parser.add_argument("--no-anthropic-cache", action="store_true")
@@ -519,6 +595,18 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--codex-stateful", action="store_true")
     run_parser.add_argument("--codex-session-id")
     run_parser.add_argument("--codex-session-file")
+    run_parser.add_argument("--claude-executable")
+    run_parser.add_argument("--claude-timeout", type=float)
+    run_parser.add_argument("--claude-cwd")
+    run_parser.add_argument("--claude-arg", action="append", default=[])
+    run_parser.add_argument("--claude-stateful", action="store_true")
+    run_parser.add_argument("--claude-session-id")
+    run_parser.add_argument("--claude-session-file")
+    run_parser.add_argument(
+        "--claude-permission-mode", choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
+    )
+    run_parser.add_argument("--claude-tools")
+    run_parser.add_argument("--claude-bare", action="store_true")
     run_parser.add_argument("--activity", default="bbs-main-menu")
     run_parser.add_argument(
         "--profile-objective",
@@ -549,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
     routed_parser.add_argument("--agent-id", default="agent-001")
     routed_parser.add_argument("--node", type=int)
-    routed_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "codex", "scripted"])
+    routed_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
     routed_parser.add_argument("--base-url")
     routed_parser.add_argument("--api-key")
     routed_parser.add_argument("--no-anthropic-cache", action="store_true")
@@ -567,6 +655,19 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--codex-stateful", action="store_true")
     routed_parser.add_argument("--codex-session-id")
     routed_parser.add_argument("--codex-session-file")
+    routed_parser.add_argument("--claude-executable")
+    routed_parser.add_argument("--claude-timeout", type=float)
+    routed_parser.add_argument("--claude-cwd")
+    routed_parser.add_argument("--claude-arg", action="append", default=[])
+    routed_parser.add_argument("--claude-stateful", action="store_true")
+    routed_parser.add_argument("--claude-session-id")
+    routed_parser.add_argument("--claude-session-file")
+    routed_parser.add_argument(
+        "--claude-permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
+    )
+    routed_parser.add_argument("--claude-tools")
+    routed_parser.add_argument("--claude-bare", action="store_true")
     routed_parser.add_argument("--route-set", choices=activity_route_set_names(), default="tw2-auto")
     routed_parser.add_argument(
         "--profile-objective",

@@ -18,19 +18,27 @@ def _option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
 
-def test_tele_arena_example_defaults_to_bbs_door_safe_with_lf_enter():
+def test_tele_arena_example_defaults_to_bbs_door_line_with_lf_enter():
     args, passthrough = parse_args([])
 
     argv = build_bbs_gym_argv(args)
 
     assert passthrough == []
     assert argv[0] == "run-activity"
-    assert _option(argv, "--activity") == "bbs-door-safe"
+    assert _option(argv, "--activity") == "bbs-door-line"
     assert _option(argv, "--transport") == "telnet"
     assert _option(argv, "--telnet-enter") == "lf"
     assert _option(argv, "--provider") == "codex"
     assert _option(argv, "--model") == "gpt-5.5"
     assert _option(argv, "--run-objective") == DEFAULT_RUN_OBJECTIVE
+
+
+def test_tele_arena_example_can_select_safe_activity():
+    args, _passthrough = parse_args(["--activity", "bbs-door-safe"])
+
+    argv = build_bbs_gym_argv(args)
+
+    assert _option(argv, "--activity") == "bbs-door-safe"
 
 
 def test_tele_arena_example_forwards_model_and_codex_options():
@@ -76,3 +84,36 @@ def test_tele_arena_example_forwards_model_and_codex_options():
     assert _option(argv, "--response-filter") == "gemma4"
     assert "--codex-stateful" in argv
     assert _option(argv, "--codex-session-file") == "runtime/codex-sessions/tele-arena.session"
+
+
+def test_tele_arena_example_forwards_claude_options():
+    args, passthrough = parse_args(
+        [
+            "--provider",
+            "claude",
+            "--model",
+            "sonnet",
+            "--claude-stateful",
+            "--claude-session-file",
+            "runtime/claude-sessions/tele-arena.session",
+            "--claude-timeout",
+            "120",
+            "--claude-permission-mode",
+            "dontAsk",
+            "--claude-tools",
+            "",
+            "--claude-bare",
+        ]
+    )
+
+    argv = build_bbs_gym_argv(args)
+
+    assert passthrough == []
+    assert _option(argv, "--provider") == "claude"
+    assert _option(argv, "--model") == "sonnet"
+    assert "--claude-stateful" in argv
+    assert _option(argv, "--claude-session-file") == "runtime/claude-sessions/tele-arena.session"
+    assert _option(argv, "--claude-timeout") == "120.0"
+    assert _option(argv, "--claude-permission-mode") == "dontAsk"
+    assert _option(argv, "--claude-tools") == ""
+    assert "--claude-bare" in argv

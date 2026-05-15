@@ -2,7 +2,7 @@ import argparse
 
 from bbs_gym.accounts import AgentRecord, AgentRegistry
 from bbs_gym.cli import build_activity_profile, build_activity_route_set, build_model, build_model_metadata
-from tty_agent.models import CodexCliAdapter, OpenAICompatibleAdapter
+from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
 
 
 def test_build_model_uses_agent_registry_model_config():
@@ -98,6 +98,65 @@ def test_build_model_uses_codex_registry_model_config():
     assert str(model.session_file) == "runtime/codex-provider/codex.session"
 
 
+def test_build_model_uses_claude_registry_model_config():
+    registry = AgentRegistry(
+        agents={
+            "claude-001": AgentRecord(
+                agent_id="claude-001",
+                bbs_alias="ClaudeOne",
+                model={
+                    "provider": "claude",
+                    "model": "claude-sonnet-4-6",
+                    "executable": "claude",
+                    "timeout": 12,
+                    "cwd": "runtime/claude-provider",
+                    "extra_args": ["--debug"],
+                    "stateful": True,
+                    "session_file": "runtime/claude-provider/claude.session",
+                    "permission_mode": "dontAsk",
+                    "tools": "",
+                    "bare": True,
+                },
+            )
+        }
+    )
+    args = argparse.Namespace(
+        agent_id="claude-001",
+        provider=None,
+        scripted_response=[],
+        model=None,
+        base_url=None,
+        api_key=None,
+        temperature=None,
+        max_tokens=None,
+        response_filter=None,
+        no_anthropic_cache=False,
+        claude_executable=None,
+        claude_timeout=None,
+        claude_cwd=None,
+        claude_arg=[],
+        claude_stateful=False,
+        claude_session_id=None,
+        claude_session_file=None,
+        claude_permission_mode=None,
+        claude_tools=None,
+        claude_bare=False,
+    )
+
+    model = build_model(args, registry)
+
+    assert isinstance(model, ClaudeCliAdapter)
+    assert model.model == "claude-sonnet-4-6"
+    assert model.timeout == 12
+    assert str(model.cwd) == "runtime/claude-provider"
+    assert model.extra_args == ["--debug"]
+    assert model.stateful is True
+    assert str(model.session_file) == "runtime/claude-provider/claude.session"
+    assert model.permission_mode == "dontAsk"
+    assert model.tools == ""
+    assert model.bare is True
+
+
 def test_build_model_metadata_reflects_cli_provider_override():
     registry = AgentRegistry(
         agents={
@@ -164,6 +223,40 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
         prompt_mode=None,
         prompt_layout=None,
         codex_stateful=False,
+    )
+
+    profile = build_activity_profile(args, registry)
+
+    assert profile.prompt_mode == "stateful_delta"
+
+
+def test_build_activity_profile_uses_stateful_delta_for_stateful_claude():
+    registry = AgentRegistry(
+        agents={
+            "claude-001": AgentRecord(
+                agent_id="claude-001",
+                bbs_alias="ClaudeOne",
+                model={
+                    "provider": "claude",
+                    "model": "claude-sonnet-4-6",
+                    "stateful": True,
+                },
+            )
+        }
+    )
+    args = argparse.Namespace(
+        agent_id="claude-001",
+        provider=None,
+        activity="tw2-game",
+        profile_objective=None,
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        prompt_mode=None,
+        prompt_layout=None,
+        codex_stateful=False,
+        claude_stateful=False,
     )
 
     profile = build_activity_profile(args, registry)

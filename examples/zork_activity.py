@@ -11,7 +11,7 @@ from tty_agent.actions import ActionPolicy
 from tty_agent.agent import TerminalSessionAgent
 from tty_agent.hints import InputModalityProfile, InputModeRule
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import CodexCliAdapter, OpenAICompatibleAdapter, output_filters_for_model
+from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter, output_filters_for_model
 from tty_agent.profiles import TEXT_ADVENTURE_PROFILE
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
@@ -91,6 +91,20 @@ def main() -> None:
             session_file=args.codex_session_file,
             output_filters=output_filters,
         )
+    elif args.provider == "claude":
+        model = ClaudeCliAdapter(
+            model=args.model,
+            executable=args.claude_executable,
+            timeout=args.claude_timeout,
+            cwd=args.claude_cwd,
+            extra_args=args.claude_arg,
+            stateful=args.claude_stateful,
+            session_file=args.claude_session_file,
+            permission_mode=args.claude_permission_mode,
+            tools=args.claude_tools,
+            bare=args.claude_bare,
+            output_filters=output_filters,
+        )
     else:
         model = OpenAICompatibleAdapter(
             model=args.model,
@@ -100,7 +114,9 @@ def main() -> None:
             max_tokens=args.max_tokens,
             output_filters=output_filters,
         )
-    prompt_mode = args.prompt_mode or ("stateful_delta" if args.codex_stateful else "stateless_full")
+    prompt_mode = args.prompt_mode or (
+        "stateful_delta" if args.codex_stateful or args.claude_stateful else "stateless_full"
+    )
     profile = ActivityProfile(
         name="zork",
         objective=args.objective,
@@ -165,7 +181,7 @@ def parse_args() -> argparse.Namespace:
         help="argument passed before the story file; repeat for multiple arguments",
     )
     parser.add_argument("--agent-id", default="zork-gemma4")
-    parser.add_argument("--provider", choices=["openai-compatible", "codex"], default="openai-compatible")
+    parser.add_argument("--provider", choices=["openai-compatible", "claude", "codex"], default="openai-compatible")
     parser.add_argument("--model", default="gemma4")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="local")
@@ -176,12 +192,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-executable", default="codex")
     parser.add_argument("--codex-timeout", type=float, default=300.0)
     parser.add_argument(
-        "--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="read-only"
+        "--codex-sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="read-only",
     )
     parser.add_argument("--codex-cwd")
     parser.add_argument("--codex-arg", action="append", default=[])
     parser.add_argument("--codex-stateful", action="store_true")
     parser.add_argument("--codex-session-file", type=Path)
+    parser.add_argument("--claude-executable", default="claude")
+    parser.add_argument("--claude-timeout", type=float, default=300.0)
+    parser.add_argument("--claude-cwd")
+    parser.add_argument("--claude-arg", action="append", default=[])
+    parser.add_argument("--claude-stateful", action="store_true")
+    parser.add_argument("--claude-session-file", type=Path)
+    parser.add_argument(
+        "--claude-permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
+        default="dontAsk",
+    )
+    parser.add_argument("--claude-tools", default="")
+    parser.add_argument("--claude-bare", action="store_true")
     parser.add_argument("--transcript", type=Path, default=Path("runtime/transcripts/zork-activity.raw"))
     parser.add_argument("--log-path", type=Path, default=Path("runtime/logs/zork-activity.jsonl"))
     parser.add_argument("--memory-root", type=Path, default=Path("runtime/memory"))

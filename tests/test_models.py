@@ -1,5 +1,6 @@
 from tty_agent.models import (
     AnthropicAdapter,
+    ClaudeCliAdapter,
     CodexCliAdapter,
     CompactionPrompt,
     DecisionPrompt,
@@ -340,6 +341,101 @@ def test_codex_cli_adapter_raises_on_command_failure(monkeypatch):
         adapter.chat([ModelMessage("user", "screen")])
     except RuntimeError as exc:
         assert "codex exec failed" in str(exc)
+        assert "stderr detail" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_claude_cli_adapter_invokes_claude_print(monkeypatch):
+    captured = {}
+    session_id = "11111111-2222-3333-4444-555555555555"
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = f'{{"session_id":"{session_id}","result":"{{\\"action\\": \\"wait\\", \\"arguments\\": {{}}}}"}}'
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        captured["command"] = command
+        captured["input"] = input
+        captured["text"] = text
+        captured["capture_output"] = capture_output
+        captured["timeout"] = timeout
+        captured["cwd"] = cwd
+        captured["check"] = check
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = ClaudeCliAdapter(
+        model="claude-sonnet-4-6",
+        timeout=42.0,
+        extra_args=["--debug"],
+    )
+
+    action = adapter.decide(DecisionPrompt("system schema", "current screen"))
+
+    assert action.action == "wait"
+    assert captured["command"][:5] == ["claude", "-p", "--output-format", "json", "--input-format"]
+    assert "text" in captured["command"]
+    assert "--no-session-persistence" in captured["command"]
+    assert "--bare" not in captured["command"]
+    assert captured["command"][captured["command"].index("--model") + 1] == "claude-sonnet-4-6"
+    assert captured["command"][captured["command"].index("--permission-mode") + 1] == "dontAsk"
+    assert captured["command"][captured["command"].index("--tools") + 1] == ""
+    assert captured["command"][-1] == "--debug"
+    assert captured["timeout"] == 42.0
+    assert "SYSTEM MESSAGE:\nsystem schema" in captured["input"]
+    assert "USER MESSAGE:\ncurrent screen" in captured["input"]
+
+
+def test_claude_cli_adapter_resumes_stateful_session(monkeypatch, tmp_path):
+    commands = []
+    session_id = "11111111-2222-3333-4444-555555555555"
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        del input, text, capture_output, timeout, cwd, check
+        commands.append(command)
+        return Result(f'{{"session_id":"{session_id}","result":"{{\\"action\\": \\"wait\\", \\"arguments\\": {{}}}}"}}')
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    session_file = tmp_path / "claude.session"
+    adapter = ClaudeCliAdapter(model="claude-sonnet-4-6", stateful=True, session_file=session_file)
+
+    first = adapter.decide(DecisionPrompt("system schema", "current screen", mode="stateful_delta", stage="bootstrap"))
+    second = adapter.decide(DecisionPrompt("delta system", "delta screen", mode="stateful_delta", stage="delta"))
+
+    assert first.action == "wait"
+    assert second.action == "wait"
+    assert adapter.session_id == session_id
+    assert session_file.read_text(encoding="utf-8").strip() == session_id
+    assert "--no-session-persistence" not in commands[0]
+    assert "--resume" not in commands[0]
+    assert commands[1][commands[1].index("--resume") + 1] == session_id
+
+
+def test_claude_cli_adapter_raises_on_command_failure(monkeypatch):
+    class Result:
+        returncode = 2
+        stdout = "stdout detail"
+        stderr = "stderr detail"
+
+    def fake_run(*_args, **_kwargs):
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = ClaudeCliAdapter()
+
+    try:
+        adapter.chat([ModelMessage("user", "screen")])
+    except RuntimeError as exc:
+        assert "claude -p failed" in str(exc)
         assert "stderr detail" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")

@@ -65,6 +65,15 @@ def test_activity_profile_factory_returns_bbs_door_safe_profile():
     assert any(module.name == "bbs.door_safe_input" for module in profile.prompt_modules)
 
 
+def test_activity_profile_factory_returns_bbs_door_line_profile():
+    profile = activity_profile("bbs-door-line")
+
+    assert profile.name == "bbs-door-line"
+    assert "submit_line" in profile.action_policy.allowed_actions
+    assert "type_text" in profile.action_policy.allowed_actions
+    assert any(module.name == "bbs.door_safe_input" for module in profile.prompt_modules)
+
+
 def test_activity_profile_factory_overrides_named_profile_objectives():
     tw2_game = activity_profile("tw2-game", "custom game objective")
     tw2_entry = activity_profile("tw2-entry", "custom entry objective")

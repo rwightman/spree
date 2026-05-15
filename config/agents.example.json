@@ -34,6 +34,19 @@
         "sandbox": "read-only",
         "timeout": 300
       }
+    },
+    {
+      "agent_id": "claude-cli-debug",
+      "bbs_alias": "ClaudeDbg",
+      "bbs_password_env": "BBS_CLAUDE_DEBUG_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "claude",
+        "model": "claude-sonnet-4-5",
+        "permission_mode": "dontAsk",
+        "tools": "",
+        "timeout": 300
+      }
     }
   ]
 }

@@ -32,8 +32,9 @@ model/harness
 - Original DOS door target: BRE and TW2002 via the optional DOSEMU image.
 - Optional local model server: vLLM, Ollama, or llama.cpp through an
   OpenAI-compatible `/v1/chat/completions` endpoint.
-- Optional Codex provider: local `codex exec` subprocess calls for experiments
-  where Codex itself plays through the same terminal-action contract.
+- Optional CLI providers: local `codex exec` and `claude -p` subprocess calls
+  for experiments where coding-agent CLIs play through the same
+  terminal-action contract.
 
 Synchronet was chosen because it is actively maintained, has Docker support,
 ships with useful JavaScript doors, and supports classic BBS door dropfiles.
@@ -46,8 +47,8 @@ shell.
 `tty_agent` owns behavior that applies to any interactive terminal target:
 
 - structured terminal actions and validation,
-- model adapters for OpenAI-compatible endpoints, Anthropic, Codex CLI, and
-  scripted tests,
+- model adapters for OpenAI-compatible endpoints, Anthropic, Codex CLI,
+  Claude CLI, and scripted tests,
 - raw and parsed model-response tracking,
 - JSON-backed memory, compaction, and memory commits,
 - pyte-backed terminal rendering and quiescence observation,
@@ -366,9 +367,9 @@ Provider-specific optimizations are allowed when they do not change the
 internal contract. Anthropic prompt caching is enabled for the stable system
 prompt/action schema. OpenAI-compatible local servers can receive extra request
 body fields from the agent registry when needed. The Codex CLI adapter runs
-`codex exec` as a subprocess for each harness call, captures the final message,
-and parses it through the same action/summary/memory paths as the HTTP
-providers.
+`codex exec` as a subprocess and the Claude CLI adapter runs `claude -p` as a
+subprocess for each harness call. Both capture the final message and parse it
+through the same action/summary/memory paths as the HTTP providers.
 
 Decision prompts support two modes. `stateless_full` is the default and sends
 the complete harness context on every decision tick. `stateful_delta` sends one
@@ -386,12 +387,12 @@ and recent history, while volatile budget and current-screen modules stay near
 the end. This is intended for A/B tests with vLLM-style prefix caching without
 changing the model-visible action contract.
 
-The Codex CLI provider can run with `stateful=True`. In that mode, the first
-call uses `codex exec --json` so the adapter can capture the Codex session id.
-Later calls use `codex exec resume <session_id>` and should use
-`stateful_delta` prompts by default. Session ids can optionally be persisted to a
-file, but provider session state remains an optimization; benchmark replay and
-campaign state still come from harness traces and JSON memory.
+The Codex and Claude CLI providers can run with `stateful=True`. In that mode,
+the first call captures the provider session id, later calls resume that same
+session, and the activity should use `stateful_delta` prompts by default.
+Session ids can optionally be persisted to a file, but provider session state
+remains an optimization; benchmark replay and campaign state still come from
+harness traces and JSON memory.
 
 ## Runner, Clocks, And Memory
 
@@ -432,6 +433,11 @@ keystroke-level input: `press_key` for one-character hotkeys and `type_text` for
 numeric values/offers/destinations, followed by a fresh observation before
 deciding whether Enter is needed. Specialized profiles such as `tw2-game` can
 still add more game-specific modules and modality hints.
+
+The `bbs-door-line` profile is the same broad BBS/door layer with `submit_line`
+enabled for line-oriented doors such as Ether/Tele-Arena. It is appropriate
+when most commands are text lines submitted with Enter and the two-step
+`type_text` plus `press_key enter` pattern is just decision overhead.
 
 A future campaign runner should compose activities into fair model-vs-model
 schedules instead of replacing these activity runners.

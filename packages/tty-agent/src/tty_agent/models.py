@@ -401,6 +401,109 @@ class CodexCliAdapter(TextChatAdapter):
         self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
 
 
+class ClaudeCliAdapter(TextChatAdapter):
+    """Adapter that invokes the local ``claude -p`` CLI for each model call."""
+
+    def __init__(
+            self,
+            model: str | None = None,
+            executable: str = "claude",
+            timeout: float = 300.0,
+            cwd: str | Path | None = None,
+            extra_args: list[str] | None = None,
+            stateful: bool = False,
+            session_id: str | None = None,
+            session_file: str | Path | None = None,
+            permission_mode: str | None = "dontAsk",
+            tools: str | None = "",
+            bare: bool = False,
+            name: str | None = None,
+            output_filters: tuple[OutputFilter, ...] | None = None,
+    ) -> None:
+        self.model = model
+        self.executable = executable
+        self.timeout = timeout
+        self.cwd = Path(cwd) if cwd is not None else None
+        self.extra_args = list(extra_args or [])
+        self.stateful = stateful
+        self.session_id = session_id
+        self.session_file = Path(session_file) if session_file is not None else None
+        self.permission_mode = permission_mode
+        self.tools = tools
+        self.bare = bare
+        self.name = name or _claude_adapter_name(model)
+        self.output_filters = output_filters_for_model(model or "") if output_filters is None else output_filters
+        if self.session_id is None:
+            self.session_id = self._read_session_file()
+
+    def chat(self, messages: list[ModelMessage]) -> str:
+        prompt_text = _claude_prompt_text(messages)
+        command = self._command()
+        if self.cwd is not None:
+            self.cwd.mkdir(parents=True, exist_ok=True)
+        try:
+            result = subprocess.run(
+                command,
+                input=prompt_text,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout,
+                cwd=self.cwd,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"claude -p timed out after {self.timeout:g}s") from exc
+        except OSError as exc:
+            raise RuntimeError(f"failed to run claude executable {self.executable!r}: {exc}") from exc
+        if result.returncode != 0:
+            detail = _command_failure_detail(result.stdout, result.stderr)
+            raise RuntimeError(f"claude -p failed with exit code {result.returncode}: {detail}")
+
+        output, session_id = _parse_claude_json_result(result.stdout)
+        if self.stateful and self.session_id is None:
+            self.session_id = session_id
+            if self.session_id is None:
+                raise RuntimeError("claude -p did not report a session id in JSON output")
+            self._write_session_file()
+        return output or result.stdout.strip()
+
+    def _command(self) -> list[str]:
+        command = [
+            self.executable,
+            "-p",
+            "--output-format",
+            "json",
+            "--input-format",
+            "text",
+        ]
+        if self.bare:
+            command.append("--bare")
+        if not self.stateful:
+            command.append("--no-session-persistence")
+        if self.stateful and self.session_id:
+            command.extend(["--resume", self.session_id])
+        if self.model:
+            command.extend(["--model", self.model])
+        if self.permission_mode:
+            command.extend(["--permission-mode", self.permission_mode])
+        if self.tools is not None:
+            command.extend(["--tools", self.tools])
+        command.extend(self.extra_args)
+        return command
+
+    def _read_session_file(self) -> str | None:
+        if self.session_file is None or not self.session_file.exists():
+            return None
+        session_id = self.session_file.read_text(encoding="utf-8").strip()
+        return session_id or None
+
+    def _write_session_file(self) -> None:
+        if self.session_file is None or self.session_id is None:
+            return
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
+
+
 class ScriptedModelAdapter(TextChatAdapter):
     """Deterministic adapter for tests and dry runs."""
 
@@ -479,7 +582,26 @@ def _codex_adapter_name(model: str | None, profile: str | None) -> str:
     return "codex"
 
 
+def _claude_adapter_name(model: str | None) -> str:
+    if model:
+        return f"claude:{model}"
+    return "claude"
+
+
 def _codex_prompt_text(messages: list[ModelMessage]) -> str:
+    lines = [
+        "You are being invoked non-interactively as a decision model for a tty-agent harness.",
+        "Do not run shell commands, inspect files, or modify the workspace.",
+        "Return only the final text requested by the harness.",
+        "",
+    ]
+    for message in messages:
+        role = message.role.upper()
+        lines.extend([f"{role} MESSAGE:", message.content.strip(), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _claude_prompt_text(messages: list[ModelMessage]) -> str:
     lines = [
         "You are being invoked non-interactively as a decision model for a tty-agent harness.",
         "Do not run shell commands, inspect files, or modify the workspace.",
@@ -501,6 +623,31 @@ def _command_failure_detail(stdout: str, stderr: str) -> str:
 
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 SESSION_ID_KEYS = ("session_id", "conversation_id", "thread_id")
+
+
+def _parse_claude_json_result(stdout: str) -> tuple[str, str | None]:
+    """Extract final text and session id from ``claude -p --output-format json`` output."""
+
+    data = _json_mapping_from_text(stdout)
+    if data is None:
+        return stdout.strip(), None
+    session_id = _find_uuid_for_keys(data, SESSION_ID_KEYS) or _find_uuid_anywhere(data)
+    for key in ("result", "response", "output", "text", "message"):
+        value = data.get(key)
+        if isinstance(value, str):
+            return value.strip(), session_id
+    content = data.get("content")
+    if isinstance(content, str):
+        return content.strip(), session_id
+    if isinstance(content, list):
+        text = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+        if text:
+            return text.strip(), session_id
+    return stdout.strip(), session_id
 
 
 def _extract_codex_session_id(stdout: str) -> str | None:

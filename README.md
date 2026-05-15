@@ -33,8 +33,8 @@ License: Apache-2.0, Copyright 2026 Ross Wightman.
   and `uv run bbs-gym run-activity` for bounded model-driven sessions.
   `uv run bbs-gym run-routed` keeps one session open while switching
   activity profiles from observed terminal state.
-- Model providers: OpenAI-compatible chat endpoints, Anthropic Messages, Codex
-  CLI subprocess calls, and scripted test responses.
+- Model providers: OpenAI-compatible chat endpoints, Anthropic Messages,
+  Codex CLI, Claude CLI, and scripted test responses.
 - Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
   raw transcripts can be replayed into ANSI HTML or animated GIFs with
   `scripts/ansi_screencap.py`.
@@ -195,6 +195,17 @@ uv run python examples/zork_activity.py runtime/zcode/zork1.z3 \
   --max-decision-ticks 100
 ```
 
+The same example can run a stateful Claude Code session through `claude -p`:
+
+```bash
+uv run python examples/zork_activity.py runtime/zcode/zork1.z3 \
+  --provider claude \
+  --model sonnet \
+  --claude-stateful \
+  --claude-session-file runtime/claude-sessions/zork.session \
+  --max-decision-ticks 100
+```
+
 Spree can also drive Tele-Arena through the standalone Ether telnet server. The
 setup is more involved because the repo does not bundle Ether, Tele-Arena data,
 converted game files, or player state. See [TELE_ARENA.md](TELE_ARENA.md) for
@@ -204,6 +215,7 @@ command:
 
 ```bash
 uv run python examples/tele_arena_activity.py \
+  --activity bbs-door-line \
   --provider codex \
   --model gpt-5.5 \
   --max-decision-ticks 100
@@ -233,6 +245,11 @@ The `bbs-door-safe` profile is available directly through `run-activity` for
 experiments with stronger models. It removes `submit_line` and biases door-game
 input toward `press_key` for hotkeys and `type_text` for numeric values,
 observing before pressing Enter.
+
+The `bbs-door-line` profile is the line-oriented counterpart for doors such as
+Ether/Tele-Arena where normal commands are submitted with Enter. It keeps
+`submit_line` available while preserving `press_key` and `type_text` for
+single-key or partial-input prompts.
 
 Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
 servers with prefix caching. The default `timeline_first` layout preserves the
@@ -408,6 +425,43 @@ uv run bbs-gym run-activity \
 Use `--codex-session-file runtime/codex-sessions/codex-debug.session` if you
 want the captured Codex session id persisted for later runs. Without a session
 file, the session id is only kept in memory for the current process.
+
+## Claude CLI Provider
+
+The `claude` provider invokes the local Claude Code CLI in non-interactive
+`claude -p` mode with `--output-format json`. This is separate from the
+`anthropic` provider, which talks directly to the Anthropic Messages API.
+
+```bash
+uv run bbs-gym run-activity \
+  --transport rlogin \
+  --agent-id claude-cli-debug \
+  --provider claude \
+  --model claude-sonnet-4-5 \
+  --activity tw2-entry
+```
+
+By default the adapter passes `--permission-mode dontAsk` and `--tools ""` so
+Claude Code acts as a text decision model rather than a workspace agent. Use
+`--claude-bare` only when you explicitly want Claude Code's bare mode. Useful
+options are `--claude-executable`, `--claude-timeout`, `--claude-cwd`, and
+repeated `--claude-arg=...` values.
+
+For stateful Claude CLI runs, `--claude-stateful` stores the returned session id
+and resumes it with `--resume` on later decision ticks. When `--claude-stateful`
+is set and no explicit `--prompt-mode` is provided, the activity automatically
+uses `--prompt-mode stateful_delta`.
+
+```bash
+uv run bbs-gym run-activity \
+  --transport rlogin \
+  --agent-id claude-cli-debug \
+  --provider claude \
+  --model claude-sonnet-4-5 \
+  --claude-stateful \
+  --claude-session-file runtime/claude-sessions/claude-cli-debug.session \
+  --activity tw2-entry
+```
 
 ## Agent Accounts
 

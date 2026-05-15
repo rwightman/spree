@@ -61,6 +61,27 @@ BBS_DOOR_SAFE_PROFILE = ActivityProfile(
     compact_recent_chars=12_000,
 )
 
+BBS_DOOR_LINE_PROFILE = ActivityProfile(
+    name="bbs-door-line",
+    objective=(
+        "Explore the current line-oriented BBS or door-game activity through normal terminal commands. Use "
+        "submit_line for complete typed commands, use press_key for single-key prompts, recover from mistakes, and "
+        "avoid sysop/admin areas."
+    ),
+    action_policy=bbs_action_policy(
+        allowed_actions=frozenset({"submit_line", "type_text", "press_key", "wait", "hangup"}),
+        max_text_chars=240,
+        max_line_chars=240,
+        max_lines=5,
+    ),
+    input_modality_profile=BBS_INPUT_MODALITY_PROFILE,
+    prompt_modules=BBS_DOOR_PROMPT_MODULES,
+    recent_steps_to_keep=4,
+    screen_tail_chars=1_600,
+    compact_every_steps=20,
+    compact_recent_chars=12_000,
+)
+
 TW2_ENTRY_PROFILE = ActivityProfile(
     name="tw2-entry",
     objective=(
@@ -113,6 +134,8 @@ def activity_profile(name: str, objective: str | None = None) -> ActivityProfile
         profile = BBS_MAIN_MENU_PROFILE
     elif name == "bbs-door-safe":
         profile = BBS_DOOR_SAFE_PROFILE
+    elif name == "bbs-door-line":
+        profile = BBS_DOOR_LINE_PROFILE
     else:
         return ActivityProfile(
             name=name,

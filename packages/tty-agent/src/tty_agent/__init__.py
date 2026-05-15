@@ -8,6 +8,7 @@ __all__ = [
     "ActivityRoute",
     "ActivityRunner",
     "AnthropicAdapter",
+    "ClaudeCliAdapter",
     "CodexCliAdapter",
     "EMPTY_PROFILE",
     "FullScreenModule",
@@ -44,7 +45,7 @@ from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
 from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
-from .models import AnthropicAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from .models import AnthropicAdapter, ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, TEXT_ADVENTURE_PROFILE, PromptProfile
 from .runner import (
