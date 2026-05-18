@@ -251,6 +251,29 @@ Ether/Tele-Arena where normal commands are submitted with Enter. It keeps
 `submit_line` available while preserving `press_key` and `type_text` for
 single-key or partial-input prompts.
 
+`run-match` runs several agents against the same BBS or door server in
+round-robin order. Each participant gets its own terminal session, model
+adapter, stateful provider session, recent-step context, campaign memory, and
+per-agent trace; the match trace records the schedule. For example, a
+Claude-vs-Codex Tele-Arena smoke can use:
+
+```bash
+uv run bbs-gym run-match \
+  --host 127.0.0.1 \
+  --port 3000 \
+  --transport telnet \
+  --telnet-enter lf \
+  --no-agents-config \
+  --activity bbs-door-line \
+  --participant arena-codex:codex:gpt-5.5 \
+  --participant arena-claude:claude:sonnet \
+  --codex-stateful \
+  --claude-stateful \
+  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agent: {opponents}. Explore, survive, gain equipment, and battle opponents if you encounter them." \
+  --max-rounds 100 \
+  --max-decision-ticks 100
+```
+
 Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
 servers with prefix caching. The default `timeline_first` layout preserves the
 existing trace-oriented prompt order; `cache_friendly` moves stable objectives,

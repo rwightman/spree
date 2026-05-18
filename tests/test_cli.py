@@ -1,7 +1,14 @@
 import argparse
 
 from bbs_gym.accounts import AgentRecord, AgentRegistry
-from bbs_gym.cli import build_activity_profile, build_activity_route_set, build_model, build_model_metadata
+from bbs_gym.cli import (
+    build_activity_profile,
+    build_activity_route_set,
+    build_match_participants,
+    build_model,
+    build_model_metadata,
+    match_participant_specs,
+)
 from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
 
 
@@ -318,3 +325,55 @@ def test_build_activity_route_set_applies_profile_overrides():
     assert route_set.routes[0].profile.recent_steps_to_keep == 5
     assert route_set.routes[0].profile.prompt_mode == "stateful_delta"
     assert route_set.routes[0].profile.prompt_layout == "cache_friendly"
+
+
+def test_match_participant_specs_parse_inline_provider_and_model():
+    args = argparse.Namespace(
+        participant=["codex-blue:codex:gpt-5.5", "claude-red:claude:sonnet"],
+        agent_id=[],
+    )
+
+    specs = match_participant_specs(args)
+
+    assert [spec.agent_id for spec in specs] == ["codex-blue", "claude-red"]
+    assert specs[0].provider == "codex"
+    assert specs[0].model == "gpt-5.5"
+    assert specs[1].provider == "claude"
+    assert specs[1].model == "sonnet"
+
+
+def test_build_match_participants_formats_objectives_and_logs(tmp_path):
+    args = argparse.Namespace(
+        participant=["codex-blue:scripted:unused", "claude-red:scripted:unused"],
+        agent_id=[],
+        provider=None,
+        scripted_response=['{"action": "wait", "arguments": {}}'],
+        model=None,
+        base_url=None,
+        api_key=None,
+        temperature=None,
+        max_tokens=None,
+        response_filter=None,
+        no_anthropic_cache=False,
+        activity="bbs-door-line",
+        profile_objective=None,
+        run_objective="{agent_id} should find {opponents}",
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        prompt_mode=None,
+        prompt_layout=None,
+        codex_stateful=False,
+        claude_stateful=False,
+        log_path=str(tmp_path / "match.jsonl"),
+    )
+
+    participants = build_match_participants(args, match_participant_specs(args), registry=None)
+
+    assert [participant.spec.agent_id for participant in participants] == ["codex-blue", "claude-red"]
+    assert participants[0].runner.run_objective == "codex-blue should find claude-red"
+    assert participants[1].runner.run_objective == "claude-red should find codex-blue"
+    assert participants[0].runner.profile.name == "bbs-door-line"
+    assert participants[0].log_path == tmp_path / "match.codex-blue.jsonl"
+    assert participants[1].log_path == tmp_path / "match.claude-red.jsonl"

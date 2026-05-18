@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,27 @@ from .routing import ActivityRouteSet, activity_route_set, activity_route_set_na
 
 DEFAULT_AGENTS_CONFIG = Path("config/agents.local.json")
 DEFAULT_OPENAI_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_MATCH_OBJECTIVE = (
+    "Play this shared terminal activity as {agent_id}. Other active agents in the match: {opponents}. "
+    "Explore, survive, improve your position, and interact with opponents when useful."
+)
+
+
+@dataclass(frozen=True)
+class MatchParticipantSpec:
+    agent_id: str
+    provider: str | None = None
+    model: str | None = None
+
+
+@dataclass
+class MatchParticipantRuntime:
+    spec: MatchParticipantSpec
+    args: argparse.Namespace
+    model: object
+    model_metadata: dict[str, object]
+    runner: ActivityRunner
+    log_path: Path
 
 
 def smoke(args: argparse.Namespace) -> int:
@@ -179,6 +200,81 @@ def run_routed(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_match(args: argparse.Namespace) -> int:
+    try:
+        registry = None if args.no_agents_config else load_agent_registry(args.agents_config, required=False)
+        specs = match_participant_specs(args)
+        participants = build_match_participants(args, specs, registry)
+    except (AccountConfigError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    match_log_path = Path(args.log_path)
+    states = []
+    round_number = 0
+    try:
+        with BbsGym(
+            host=args.host,
+            port=args.port,
+            rlogin_port=args.rlogin_port,
+            rlogin_terminal=args.rlogin_terminal,
+            transport=args.transport,
+            telnet_enter_sequence=args.telnet_enter,
+            agent_registry=registry,
+        ) as gym:
+            for participant in participants:
+                agent = gym.connect(participant.spec.agent_id, model_metadata=participant.model_metadata)
+                state = participant.runner.start_state(
+                    agent,
+                    participant.model,
+                    ActivityBudget(
+                        max_decision_ticks=args.max_decision_ticks,
+                        max_wall_seconds=args.max_wall_seconds,
+                    ),
+                )
+                states.append((participant, state))
+
+            while round_number < args.max_rounds and any(not state.completed for _, state in states):
+                round_number += 1
+                for participant, state in states:
+                    if state.completed:
+                        continue
+                    step = participant.runner.run_step(state)
+                    _write_match_event(
+                        match_log_path,
+                        {
+                            "type": "agent_step",
+                            "round": round_number,
+                            "agent_id": participant.spec.agent_id,
+                            "step": step.step if step is not None else None,
+                            "completed": state.completed,
+                            "stop_reason": state.stop_reason if state.completed else "",
+                            "active_profile": (state.active_profile.name if state.active_profile is not None else ""),
+                            "action": step.action if step is not None else None,
+                            "agent_log_path": str(participant.log_path),
+                            "timestamp": step.timestamp if step is not None else None,
+                        },
+                    )
+
+            if round_number >= args.max_rounds:
+                for _, state in states:
+                    if not state.completed:
+                        state.stop_reason = "match_rounds"
+                        state.completed = True
+
+            results = [(participant, participant.runner.finish_state(state)) for participant, state in states]
+    except (OSError, AccountConfigError, ValueError) as exc:
+        print(f"connection failed: {exc}", file=sys.stderr)
+        return 1
+
+    summary = ", ".join(
+        f"{result.agent_id}:steps={len(result.steps)} stop={result.stop_reason}"
+        for _, result in results
+    )
+    print(f"match participants={len(results)} rounds={round_number} {summary} log={match_log_path}")
+    return 0
+
+
 def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityProfile:
     profile = activity_profile(args.activity, args.profile_objective)
     overrides = build_profile_overrides(args, registry)
@@ -201,6 +297,46 @@ def build_activity_route_set(args: argparse.Namespace, registry: AgentRegistry |
     return replace(route_set, default_profile=default_profile, routes=routes)
 
 
+def match_participant_specs(args: argparse.Namespace) -> list[MatchParticipantSpec]:
+    specs = [_parse_match_participant(value) for value in getattr(args, "participant", [])]
+    specs.extend(MatchParticipantSpec(agent_id=agent_id) for agent_id in getattr(args, "agent_id", []))
+    if len(specs) < 2:
+        raise ValueError("run-match requires at least two --participant or --agent-id values")
+
+    seen: set[str] = set()
+    for spec in specs:
+        if spec.agent_id in seen:
+            raise ValueError(f"duplicate match agent_id: {spec.agent_id}")
+        seen.add(spec.agent_id)
+    return specs
+
+
+def build_match_participants(
+        args: argparse.Namespace,
+        specs: list[MatchParticipantSpec],
+        registry: AgentRegistry | None,
+) -> list[MatchParticipantRuntime]:
+    participants: list[MatchParticipantRuntime] = []
+    for spec in specs:
+        participant_args = _participant_args(args, spec)
+        opponents = [other.agent_id for other in specs if other.agent_id != spec.agent_id]
+        profile = build_activity_profile(participant_args, registry)
+        log_path = _agent_log_path(args.log_path, spec.agent_id)
+        objective = _format_match_objective(args.run_objective or DEFAULT_MATCH_OBJECTIVE, spec.agent_id, opponents)
+        runner = ActivityRunner(profile, log_path=log_path, run_objective=objective)
+        participants.append(
+            MatchParticipantRuntime(
+                spec=spec,
+                args=participant_args,
+                model=build_model(participant_args, registry),
+                model_metadata=build_model_metadata(participant_args, registry),
+                runner=runner,
+                log_path=log_path,
+            )
+        )
+    return participants
+
+
 def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | None = None) -> dict[str, object]:
     record = registry.maybe_get(args.agent_id) if registry is not None else None
     model_config = record.model if record is not None else {}
@@ -214,6 +350,8 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
         overrides["byte_quiet_ms"] = args.byte_quiet_ms
     if getattr(args, "recent_steps_to_keep", None) is not None:
         overrides["recent_steps_to_keep"] = args.recent_steps_to_keep
+    if getattr(args, "model_error_retries", None) is not None:
+        overrides["model_error_retries"] = args.model_error_retries
     if getattr(args, "prompt_mode", None) is not None:
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
@@ -223,6 +361,48 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
     if getattr(args, "prompt_layout", None) is not None:
         overrides["prompt_layout"] = args.prompt_layout
     return overrides
+
+
+def _parse_match_participant(value: str) -> MatchParticipantSpec:
+    parts = value.split(":", 2)
+    if len(parts) == 1:
+        agent_id = parts[0].strip()
+        if not agent_id:
+            raise ValueError("match participant agent_id must not be empty")
+        return MatchParticipantSpec(agent_id=agent_id)
+    if len(parts) != 3:
+        raise ValueError("match participant must be agent_id or agent_id:provider:model")
+    agent_id, provider, model = (part.strip() for part in parts)
+    if not agent_id or not provider or not model:
+        raise ValueError("match participant must be agent_id or agent_id:provider:model")
+    return MatchParticipantSpec(agent_id=agent_id, provider=provider, model=model)
+
+
+def _participant_args(args: argparse.Namespace, spec: MatchParticipantSpec) -> argparse.Namespace:
+    data = vars(args).copy()
+    data["agent_id"] = spec.agent_id
+    if spec.provider is not None:
+        data["provider"] = spec.provider
+    if spec.model is not None:
+        data["model"] = spec.model
+    return argparse.Namespace(**data)
+
+
+def _format_match_objective(template: str, agent_id: str, opponents: list[str]) -> str:
+    return template.replace("{agent_id}", agent_id).replace("{opponents}", ", ".join(opponents) or "none")
+
+
+def _agent_log_path(match_log_path: str | Path, agent_id: str) -> Path:
+    path = Path(match_log_path)
+    safe_agent = "".join(char if char.isalnum() or char in "-_." else "_" for char in agent_id)
+    suffix = path.suffix or ".jsonl"
+    return path.with_name(f"{path.stem}.{safe_agent}{suffix}")
+
+
+def _write_match_event(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
@@ -250,7 +430,7 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             model=args.model or _config_str(model_config, "model"),
             profile=getattr(args, "codex_profile", None) or _config_str(model_config, "profile"),
             executable=getattr(args, "codex_executable", None) or _config_str(model_config, "executable") or "codex",
-            timeout=_config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 300.0),
+            timeout=_config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 600.0),
             sandbox=getattr(args, "codex_sandbox", None) or _config_str(model_config, "sandbox") or "read-only",
             cwd=getattr(args, "codex_cwd", None) or _config_str(model_config, "cwd"),
             extra_args=_config_str_list(model_config, "extra_args") + (getattr(args, "codex_arg", []) or []),
@@ -266,7 +446,7 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
         model = ClaudeCliAdapter(
             model=args.model or _config_str(model_config, "model"),
             executable=getattr(args, "claude_executable", None) or _config_str(model_config, "executable") or "claude",
-            timeout=_config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 300.0),
+            timeout=_config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 600.0),
             cwd=getattr(args, "claude_cwd", None) or _config_str(model_config, "cwd"),
             extra_args=_config_str_list(model_config, "extra_args") + (getattr(args, "claude_arg", []) or []),
             stateful=_claude_stateful(args, model_config),
@@ -333,7 +513,7 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
                 "executable": getattr(args, "codex_executable", None)
                 or _config_str(model_config, "executable")
                 or "codex",
-                "timeout": _config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 300.0),
+                "timeout": _config_float(getattr(args, "codex_timeout", None), model_config, "timeout", 600.0),
                 "sandbox": getattr(args, "codex_sandbox", None) or _config_str(model_config, "sandbox") or "read-only",
                 "cwd": getattr(args, "codex_cwd", None) or _config_str(model_config, "cwd"),
                 "extra_args": _config_str_list(model_config, "extra_args") + (getattr(args, "codex_arg", []) or []),
@@ -352,7 +532,7 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
                 "executable": getattr(args, "claude_executable", None)
                 or _config_str(model_config, "executable")
                 or "claude",
-                "timeout": _config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 300.0),
+                "timeout": _config_float(getattr(args, "claude_timeout", None), model_config, "timeout", 600.0),
                 "cwd": getattr(args, "claude_cwd", None) or _config_str(model_config, "cwd"),
                 "extra_args": _config_str_list(model_config, "extra_args") + (getattr(args, "claude_arg", []) or []),
                 "stateful": _claude_stateful(args, model_config),
@@ -516,10 +696,10 @@ def _claude_bare(args: argparse.Namespace, model_config: dict[str, Any]) -> bool
 def _claude_tools(args: argparse.Namespace, model_config: dict[str, Any]) -> str | None:
     value = getattr(args, "claude_tools", None)
     if value is not None:
-        return value
+        return value or None
     if "tools" in model_config:
         return _config_str(model_config, "tools")
-    return ""
+    return None
 
 
 def _without_empty_values(data: dict[str, object | None]) -> dict[str, object]:
@@ -603,7 +783,8 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--claude-session-id")
     run_parser.add_argument("--claude-session-file")
     run_parser.add_argument(
-        "--claude-permission-mode", choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
+        "--claude-permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
     )
     run_parser.add_argument("--claude-tools")
     run_parser.add_argument("--claude-bare", action="store_true")
@@ -622,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--stable-ms", type=int)
     run_parser.add_argument("--byte-quiet-ms", type=int)
     run_parser.add_argument("--recent-steps-to-keep", type=int)
+    run_parser.add_argument("--model-error-retries", type=int)
     run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     run_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
@@ -683,10 +865,89 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--stable-ms", type=int)
     routed_parser.add_argument("--byte-quiet-ms", type=int)
     routed_parser.add_argument("--recent-steps-to-keep", type=int)
+    routed_parser.add_argument("--model-error-retries", type=int)
     routed_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     routed_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
     routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
     routed_parser.set_defaults(func=run_routed)
+
+    match_parser = subparsers.add_parser("run-match", help="run a round-robin multi-agent BBS activity")
+    match_parser.add_argument("--host", default="127.0.0.1")
+    match_parser.add_argument("--port", type=int, default=2323)
+    match_parser.add_argument("--rlogin-port", type=int, default=2513)
+    match_parser.add_argument("--rlogin-terminal", default="ansi")
+    match_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
+    match_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
+    match_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    match_parser.add_argument(
+        "--no-agents-config",
+        action="store_true",
+        help="ignore the agent registry; useful for standalone telnet games with inline participants",
+    )
+    match_parser.add_argument(
+        "--participant",
+        action="append",
+        default=[],
+        help="match participant as agent_id or agent_id:provider:model; repeat for each player",
+    )
+    match_parser.add_argument(
+        "--agent-id",
+        action="append",
+        default=[],
+        help="agent id loaded from --agents-config; repeat for each player",
+    )
+    match_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
+    match_parser.add_argument("--base-url")
+    match_parser.add_argument("--api-key")
+    match_parser.add_argument("--no-anthropic-cache", action="store_true")
+    match_parser.add_argument("--model")
+    match_parser.add_argument("--scripted-response", action="append", default=[])
+    match_parser.add_argument("--temperature", type=float)
+    match_parser.add_argument("--max-tokens", type=int)
+    match_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
+    match_parser.add_argument("--codex-profile")
+    match_parser.add_argument("--codex-executable")
+    match_parser.add_argument("--codex-timeout", type=float)
+    match_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
+    match_parser.add_argument("--codex-cwd")
+    match_parser.add_argument("--codex-arg", action="append", default=[])
+    match_parser.add_argument("--codex-stateful", action="store_true")
+    match_parser.add_argument("--codex-session-id")
+    match_parser.add_argument("--codex-session-file")
+    match_parser.add_argument("--claude-executable")
+    match_parser.add_argument("--claude-timeout", type=float)
+    match_parser.add_argument("--claude-cwd")
+    match_parser.add_argument("--claude-arg", action="append", default=[])
+    match_parser.add_argument("--claude-stateful", action="store_true")
+    match_parser.add_argument("--claude-session-id")
+    match_parser.add_argument("--claude-session-file")
+    match_parser.add_argument(
+        "--claude-permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
+    )
+    match_parser.add_argument("--claude-tools")
+    match_parser.add_argument("--claude-bare", action="store_true")
+    match_parser.add_argument("--activity", default="bbs-door-line")
+    match_parser.add_argument(
+        "--profile-objective",
+        help="override the selected profile's built-in objective",
+    )
+    match_parser.add_argument(
+        "--run-objective",
+        help="match objective template; supports {agent_id} and {opponents}",
+    )
+    match_parser.add_argument("--max-rounds", type=int, default=50)
+    match_parser.add_argument("--max-decision-ticks", type=int, default=50)
+    match_parser.add_argument("--max-wall-seconds", type=float, default=600.0)
+    match_parser.add_argument("--observe-timeout", type=float)
+    match_parser.add_argument("--stable-ms", type=int)
+    match_parser.add_argument("--byte-quiet-ms", type=int)
+    match_parser.add_argument("--recent-steps-to-keep", type=int)
+    match_parser.add_argument("--model-error-retries", type=int)
+    match_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
+    match_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
+    match_parser.add_argument("--log-path", default="runtime/logs/match.jsonl")
+    match_parser.set_defaults(func=run_match)
 
     accounts_parser = subparsers.add_parser("accounts", help="manage BBS agent account registry")
     accounts_subparsers = accounts_parser.add_subparsers(dest="accounts_command", required=True)
