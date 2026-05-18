@@ -28,6 +28,27 @@ class ModelMessage:
         return {"role": self.role, "content": self.content}
 
 
+class ModelError(RuntimeError):
+    """Raised when a model provider fails before producing a parseable response."""
+
+    def __init__(
+            self,
+            message: str,
+            *,
+            command: list[str] | tuple[str, ...] = (),
+            stdout: str | bytes | None = "",
+            stderr: str | bytes | None = "",
+    ) -> None:
+        super().__init__(message)
+        self.command = tuple(command)
+        self.stdout = _subprocess_text(stdout)
+        self.stderr = _subprocess_text(stderr)
+
+
+class ModelTimeoutError(ModelError):
+    """Raised when a model provider command times out."""
+
+
 @dataclass(frozen=True)
 class DecisionPrompt:
     system: str
@@ -284,7 +305,7 @@ class CodexCliAdapter(TextChatAdapter):
             model: str | None = None,
             profile: str | None = None,
             executable: str = "codex",
-            timeout: float = 300.0,
+            timeout: float = 600.0,
             sandbox: str = "read-only",
             cwd: str | Path | None = None,
             extra_args: list[str] | None = None,
@@ -327,16 +348,34 @@ class CodexCliAdapter(TextChatAdapter):
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(f"codex exec timed out after {self.timeout:g}s") from exc
+                stdout = _subprocess_text(exc.stdout or exc.output)
+                stderr = _subprocess_text(exc.stderr)
+                detail = _command_failure_detail(stdout, stderr)
+                raise ModelTimeoutError(
+                    f"codex exec timed out after {self.timeout:g}s: {detail}",
+                    command=command,
+                    stdout=stdout,
+                    stderr=stderr,
+                ) from exc
             except OSError as exc:
-                raise RuntimeError(f"failed to run codex executable {self.executable!r}: {exc}") from exc
+                raise ModelError(f"failed to run codex executable {self.executable!r}: {exc}", command=command) from exc
             if result.returncode != 0:
                 detail = _command_failure_detail(result.stdout, result.stderr)
-                raise RuntimeError(f"codex exec failed with exit code {result.returncode}: {detail}")
+                raise ModelError(
+                    f"codex exec failed with exit code {result.returncode}: {detail}",
+                    command=command,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
             if self.stateful and self.session_id is None:
                 self.session_id = _extract_codex_session_id(result.stdout)
                 if self.session_id is None:
-                    raise RuntimeError("codex exec did not report a session id in --json output")
+                    raise ModelError(
+                        "codex exec did not report a session id in --json output",
+                        command=command,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                    )
                 self._write_session_file()
             if output_path.exists():
                 output = output_path.read_text(encoding="utf-8").strip()
@@ -408,14 +447,14 @@ class ClaudeCliAdapter(TextChatAdapter):
             self,
             model: str | None = None,
             executable: str = "claude",
-            timeout: float = 300.0,
+            timeout: float = 600.0,
             cwd: str | Path | None = None,
             extra_args: list[str] | None = None,
             stateful: bool = False,
             session_id: str | None = None,
             session_file: str | Path | None = None,
             permission_mode: str | None = "dontAsk",
-            tools: str | None = "",
+            tools: str | None = None,
             bare: bool = False,
             name: str | None = None,
             output_filters: tuple[OutputFilter, ...] | None = None,
@@ -452,18 +491,36 @@ class ClaudeCliAdapter(TextChatAdapter):
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"claude -p timed out after {self.timeout:g}s") from exc
+            stdout = _subprocess_text(exc.stdout or exc.output)
+            stderr = _subprocess_text(exc.stderr)
+            detail = _command_failure_detail(stdout, stderr)
+            raise ModelTimeoutError(
+                f"claude -p timed out after {self.timeout:g}s: {detail}",
+                command=command,
+                stdout=stdout,
+                stderr=stderr,
+            ) from exc
         except OSError as exc:
-            raise RuntimeError(f"failed to run claude executable {self.executable!r}: {exc}") from exc
+            raise ModelError(f"failed to run claude executable {self.executable!r}: {exc}", command=command) from exc
         if result.returncode != 0:
             detail = _command_failure_detail(result.stdout, result.stderr)
-            raise RuntimeError(f"claude -p failed with exit code {result.returncode}: {detail}")
+            raise ModelError(
+                f"claude -p failed with exit code {result.returncode}: {detail}",
+                command=command,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
 
         output, session_id = _parse_claude_json_result(result.stdout)
         if self.stateful and self.session_id is None:
             self.session_id = session_id
             if self.session_id is None:
-                raise RuntimeError("claude -p did not report a session id in JSON output")
+                raise ModelError(
+                    "claude -p did not report a session id in JSON output",
+                    command=command,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
             self._write_session_file()
         return output or result.stdout.strip()
 
@@ -486,7 +543,7 @@ class ClaudeCliAdapter(TextChatAdapter):
             command.extend(["--model", self.model])
         if self.permission_mode:
             command.extend(["--permission-mode", self.permission_mode])
-        if self.tools is not None:
+        if self.tools and self.tools.strip():
             command.extend(["--tools", self.tools])
         command.extend(self.extra_args)
         return command
@@ -612,6 +669,14 @@ def _claude_prompt_text(messages: list[ModelMessage]) -> str:
         role = message.role.upper()
         lines.extend([f"{role} MESSAGE:", message.content.strip(), ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _command_failure_detail(stdout: str, stderr: str) -> str:

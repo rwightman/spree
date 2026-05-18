@@ -12,7 +12,15 @@ from .agent import ActionExecution, TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
 from .hints import InputModalityProfile, ObservationHints
 from .memory import JsonMemoryStore
-from .models import CompactionPrompt, DecisionPrompt, MemoryCommitPrompt, ModelAdapter, SessionSummary
+from .models import (
+    CompactionPrompt,
+    DecisionPrompt,
+    MemoryCommitPrompt,
+    MemoryPatch,
+    ModelAdapter,
+    ModelError,
+    SessionSummary,
+)
 from .prompt_modules import (
     GENERIC_TERMINAL_MODULES,
     PROMPT_MODULES_SCHEMA_VERSION,
@@ -88,6 +96,7 @@ class ActivityProfile:
     compact_every_steps: int = 20
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
+    model_error_retries: int = 1
     include_model_responses_in_context: bool = False
     prompt_mode: PromptMode = "stateless_full"
     prompt_layout: PromptLayout = "timeline_first"
@@ -155,6 +164,25 @@ class ActivityRoute:
     reason: str = ""
 
 
+@dataclass
+class ActivityRunState:
+    agent: TerminalAgent
+    model: ModelAdapter
+    budget: ActivityBudget
+    agent_id: str
+    campaign_memory: dict[str, Any]
+    session_summary: SessionSummary = field(default_factory=SessionSummary)
+    recent_steps: list[StepRecord] = field(default_factory=list)
+    all_steps: list[StepRecord] = field(default_factory=list)
+    stop_reason: str = "budget"
+    last_observation: Observation | None = None
+    previous_observation: Observation | None = None
+    last_action_for_hints: Action | None = None
+    active_profile: ActivityProfile | None = None
+    decision_prompts_sent: dict[str, int] = field(default_factory=dict)
+    completed: bool = False
+
+
 class ActivityRunner:
     def __init__(
             self,
@@ -171,6 +199,205 @@ class ActivityRunner:
     def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
         return self._run(agent, model, budget, stop_on_completion=True)
 
+    def start_state(
+            self,
+            agent: TerminalAgent,
+            model: ModelAdapter,
+            budget: ActivityBudget | None = None,
+    ) -> ActivityRunState:
+        agent_id = getattr(agent, "agent_id", "agent")
+        return ActivityRunState(
+            agent=agent,
+            model=model,
+            budget=budget or ActivityBudget(),
+            agent_id=agent_id,
+            campaign_memory=self.memory_store.load(agent_id),
+            active_profile=self.profile,
+        )
+
+    def run_step(
+            self,
+            state: ActivityRunState,
+            profile_selector: Callable[[Observation, ActivityProfile], tuple[ActivityProfile, list[dict[str, Any]]]]
+            | None = None,
+            stop_on_completion: bool = True,
+    ) -> StepRecord | None:
+        if state.completed:
+            return None
+        if not state.budget.remaining():
+            state.stop_reason = "budget"
+            state.completed = True
+            return None
+
+        active_profile = state.active_profile or self.profile
+        self.profile = active_profile
+        try:
+            observation = state.agent.observe_turn(
+                timeout=active_profile.observe_timeout,
+                stable_ms=active_profile.stable_ms,
+                byte_quiet_ms=active_profile.byte_quiet_ms,
+                poll_interval=active_profile.poll_interval,
+                prompt_fast_path=active_profile.prompt_fast_path,
+            )
+        except SessionDisconnected:
+            state.stop_reason = "disconnected"
+            state.completed = True
+            return None
+
+        route_events: list[dict[str, Any]] = []
+        if profile_selector is not None:
+            selected_profile, route_events = profile_selector(observation, active_profile)
+            active_profile = selected_profile
+            self.profile = active_profile
+        state.active_profile = active_profile
+        state.last_observation = observation
+
+        if stop_on_completion and active_profile.should_exit(observation, None, state.budget):
+            state.stop_reason = "profile_complete"
+            step = self._terminal_step_record(
+                step_number=len(state.all_steps) + 1,
+                observation=observation,
+                budget=state.budget,
+                stop_reason=state.stop_reason,
+                active_profile=active_profile,
+                events=route_events,
+            )
+            state.all_steps.append(step)
+            state.recent_steps.append(step)
+            self._write_step(step)
+            state.completed = True
+            return step
+
+        if not state.budget.remaining():
+            state.stop_reason = "budget"
+            step = self._terminal_step_record(
+                step_number=len(state.all_steps) + 1,
+                observation=observation,
+                budget=state.budget,
+                stop_reason=state.stop_reason,
+                active_profile=active_profile,
+                events=route_events,
+            )
+            state.all_steps.append(step)
+            state.recent_steps.append(step)
+            self._write_step(step)
+            state.completed = True
+            return step
+
+        if self._should_compact(state.all_steps, state.recent_steps):
+            state.session_summary = self._compact(
+                state.model,
+                state.session_summary,
+                state.recent_steps,
+                observation,
+            )
+            state.recent_steps = state.recent_steps[-self.profile.recent_steps_to_keep:]
+
+        hints = ObservationHints.from_observation(
+            observation=observation,
+            previous_observation=state.previous_observation,
+            last_action=state.last_action_for_hints,
+            modality_profile=self.profile.input_modality_profile,
+        )
+        prompt_module_results = self._prompt_module_results(
+            agent_id=state.agent_id,
+            observation=observation,
+            hints=hints,
+            campaign_memory=state.campaign_memory,
+            session_summary=state.session_summary,
+            recent_steps=state.recent_steps,
+            budget=state.budget,
+        )
+        profile_prompt_count = state.decision_prompts_sent.get(active_profile.name, 0)
+        prompt_stage = self._prompt_stage(profile_prompt_count)
+        prompt = self._build_decision_prompt(
+            agent_id=state.agent_id,
+            campaign_memory=state.campaign_memory,
+            session_summary=state.session_summary,
+            recent_steps=state.recent_steps,
+            budget=state.budget,
+            prompt_module_results=prompt_module_results,
+            prompt_stage=prompt_stage,
+        )
+
+        action, validation = self._decide_with_retry(state.model, prompt)
+        state.decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
+        executed_action = action
+        execution: dict[str, Any] = {}
+        if action is None:
+            state.budget.record_validation_failure()
+
+        state.budget.consume_tick()
+
+        if action is not None:
+            try:
+                execution = self._execution_record(state.agent.act_action(action))
+            except ActionError as exc:
+                executed_action = None
+                state.budget.record_validation_failure()
+                validation = self._execution_error_validation(validation, str(exc))
+
+        step = StepRecord(
+            step=state.budget.decision_ticks,
+            observation=observation.as_dict(),
+            prompt={
+                "system": prompt.system,
+                "user": prompt.user,
+                "mode": prompt.mode,
+                "stage": prompt.stage,
+                "layout": active_profile.prompt_layout,
+            },
+            action=action.to_dict() if action else None,
+            validation=validation,
+            execution=execution,
+            budget=state.budget.to_dict(),
+            prompt_modules=prompt_module_trace(prompt_module_results),
+            active_profile=active_profile.name,
+            run_objective=self.run_objective,
+            events=route_events,
+        )
+        state.all_steps.append(step)
+        state.recent_steps.append(step)
+        state.recent_steps = state.recent_steps[-self.profile.recent_steps_to_keep:]
+        self._write_step(step)
+        state.previous_observation = observation
+        state.last_action_for_hints = executed_action
+
+        if state.budget.too_many_validation_failures():
+            state.stop_reason = "validation_failures"
+            state.completed = True
+        elif executed_action and executed_action.action == "hangup":
+            state.stop_reason = "hangup"
+            state.completed = True
+        elif stop_on_completion and active_profile.should_exit(observation, None, state.budget):
+            state.stop_reason = "profile_complete"
+            state.completed = True
+        elif not state.budget.remaining():
+            state.stop_reason = "budget"
+            state.completed = True
+        return step
+
+    def finish_state(self, state: ActivityRunState) -> ActivityResult:
+        if self._has_decision_steps(state.all_steps) and state.last_observation is not None:
+            patch = self._commit_memory(
+                state.model,
+                state.campaign_memory,
+                state.session_summary,
+                state.recent_steps,
+                state.last_observation,
+            )
+            self.memory_store.save_patch(state.agent_id, patch)
+
+        active_profile = state.active_profile or self.profile
+        return ActivityResult(
+            activity=active_profile.name,
+            agent_id=state.agent_id,
+            steps=state.all_steps,
+            session_summary=state.session_summary,
+            stop_reason=state.stop_reason,
+            run_objective=self.run_objective,
+        )
+
     def _run(
             self,
             agent: TerminalAgent,
@@ -180,168 +407,17 @@ class ActivityRunner:
             | None = None,
             stop_on_completion: bool = True,
     ) -> ActivityResult:
-        budget = budget or ActivityBudget()
-        agent_id = getattr(agent, "agent_id", "agent")
-        campaign_memory = self.memory_store.load(agent_id)
-        session_summary = SessionSummary()
-        recent_steps: list[StepRecord] = []
-        all_steps: list[StepRecord] = []
-        stop_reason = "budget"
-        last_observation: Observation | None = None
-        previous_observation: Observation | None = None
-        last_action_for_hints: Action | None = None
-        active_profile = self.profile
-        decision_prompts_sent: dict[str, int] = {}
-
-        while budget.remaining():
-            try:
-                observation = agent.observe_turn(
-                    timeout=active_profile.observe_timeout,
-                    stable_ms=active_profile.stable_ms,
-                    byte_quiet_ms=active_profile.byte_quiet_ms,
-                    poll_interval=active_profile.poll_interval,
-                    prompt_fast_path=active_profile.prompt_fast_path,
-                )
-            except SessionDisconnected:
-                stop_reason = "disconnected"
-                break
-
-            route_events: list[dict[str, Any]] = []
-            if profile_selector is not None:
-                selected_profile, route_events = profile_selector(observation, active_profile)
-                active_profile = selected_profile
-                self.profile = active_profile
-            last_observation = observation
-
-            if stop_on_completion and active_profile.should_exit(observation, None, budget):
-                stop_reason = "profile_complete"
-                step = self._terminal_step_record(
-                    step_number=len(all_steps) + 1,
-                    observation=observation,
-                    budget=budget,
-                    stop_reason=stop_reason,
-                    active_profile=active_profile,
-                    events=route_events,
-                )
-                all_steps.append(step)
-                recent_steps.append(step)
-                self._write_step(step)
-                break
-
-            if not budget.remaining():
-                stop_reason = "budget"
-                step = self._terminal_step_record(
-                    step_number=len(all_steps) + 1,
-                    observation=observation,
-                    budget=budget,
-                    stop_reason=stop_reason,
-                    active_profile=active_profile,
-                    events=route_events,
-                )
-                all_steps.append(step)
-                recent_steps.append(step)
-                self._write_step(step)
-                break
-
-            if self._should_compact(all_steps, recent_steps):
-                session_summary = self._compact(model, session_summary, recent_steps, observation)
-                recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
-
-            hints = ObservationHints.from_observation(
-                observation=observation,
-                previous_observation=previous_observation,
-                last_action=last_action_for_hints,
-                modality_profile=self.profile.input_modality_profile,
+        state = self.start_state(agent, model, budget)
+        while not state.completed and state.budget.remaining():
+            self.run_step(
+                state,
+                profile_selector=profile_selector,
+                stop_on_completion=stop_on_completion,
             )
-            prompt_module_results = self._prompt_module_results(
-                agent_id=agent_id,
-                observation=observation,
-                hints=hints,
-                campaign_memory=campaign_memory,
-                session_summary=session_summary,
-                recent_steps=recent_steps,
-                budget=budget,
-            )
-            profile_prompt_count = decision_prompts_sent.get(active_profile.name, 0)
-            prompt_stage = self._prompt_stage(profile_prompt_count)
-            prompt = self._build_decision_prompt(
-                agent_id=agent_id,
-                campaign_memory=campaign_memory,
-                session_summary=session_summary,
-                recent_steps=recent_steps,
-                budget=budget,
-                prompt_module_results=prompt_module_results,
-                prompt_stage=prompt_stage,
-            )
-
-            action, validation = self._decide_with_retry(model, prompt)
-            decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
-            executed_action = action
-            execution: dict[str, Any] = {}
-            if action is None:
-                budget.record_validation_failure()
-
-            budget.consume_tick()
-
-            if action is not None:
-                try:
-                    execution = self._execution_record(agent.act_action(action))
-                except ActionError as exc:
-                    executed_action = None
-                    budget.record_validation_failure()
-                    validation = self._execution_error_validation(validation, str(exc))
-
-            step = StepRecord(
-                step=budget.decision_ticks,
-                observation=observation.as_dict(),
-                prompt={
-                    "system": prompt.system,
-                    "user": prompt.user,
-                    "mode": prompt.mode,
-                    "stage": prompt.stage,
-                    "layout": active_profile.prompt_layout,
-                },
-                action=action.to_dict() if action else None,
-                validation=validation,
-                execution=execution,
-                budget=budget.to_dict(),
-                prompt_modules=prompt_module_trace(prompt_module_results),
-                active_profile=active_profile.name,
-                run_objective=self.run_objective,
-                events=route_events,
-            )
-            all_steps.append(step)
-            recent_steps.append(step)
-            recent_steps = recent_steps[-self.profile.recent_steps_to_keep:]
-            self._write_step(step)
-            previous_observation = observation
-            last_action_for_hints = executed_action
-
-            if budget.too_many_validation_failures():
-                stop_reason = "validation_failures"
-                break
-            if executed_action and executed_action.action == "hangup":
-                stop_reason = "hangup"
-                break
-            if stop_on_completion and active_profile.should_exit(observation, None, budget):
-                stop_reason = "profile_complete"
-                break
-            if not budget.remaining():
-                stop_reason = "budget"
-                break
-
-        if self._has_decision_steps(all_steps) and last_observation is not None:
-            patch = self._commit_memory(model, campaign_memory, session_summary, recent_steps, last_observation)
-            self.memory_store.save_patch(agent_id, patch)
-
-        return ActivityResult(
-            activity=self.profile.name,
-            agent_id=agent_id,
-            steps=all_steps,
-            session_summary=session_summary,
-            stop_reason=stop_reason,
-            run_objective=self.run_objective,
-        )
+        if not state.completed and not state.budget.remaining():
+            state.stop_reason = "budget"
+            state.completed = True
+        return self.finish_state(state)
 
     def _build_decision_prompt(
             self,
@@ -543,29 +619,91 @@ class ActivityRunner:
 
     def _decide_with_retry(self, model: ModelAdapter, prompt: DecisionPrompt) -> tuple[Action | None, dict[str, Any]]:
         invalid_responses: list[dict[str, str]] = []
-        try:
-            action = model.decide(prompt, self.profile.action_policy)
-            return action, {"accepted": True, "notes": [], "model_response": self._model_response_record(model)}
-        except ActionError as first_exc:
-            first_error = str(first_exc)
-            invalid_responses.append(self._invalid_response_record(model, "initial", first_error))
+        model_errors: list[dict[str, Any]] = []
+
+        action, first_error, attempt_errors = self._try_model_decision(model, prompt, "initial")
+        model_errors.extend(attempt_errors)
+        if action is not None:
+            return action, self._accepted_validation(model, model_errors=model_errors)
+        if first_error is None:
+            return None, self._model_error_validation(model_errors)
+        invalid_responses.append(self._invalid_response_record(model, "initial", first_error))
 
         retry_prompt = prompt
         for retry in range(1, self.profile.invalid_json_retries + 1):
             retry_prompt = self._build_retry_prompt(prompt, first_error, retry)
-            try:
-                action = model.decide(retry_prompt, self.profile.action_policy)
-                return action, {
-                    "accepted": True,
-                    "notes": [f"repaired_after_error: {first_error}"],
-                    "model_response": self._model_response_record(model),
-                    "invalid_responses": invalid_responses,
-                }
-            except ActionError as retry_exc:
-                first_error = str(retry_exc)
-                invalid_responses.append(self._invalid_response_record(model, f"repair-{retry}", first_error))
+            action, retry_error, attempt_errors = self._try_model_decision(model, retry_prompt, f"repair-{retry}")
+            model_errors.extend(attempt_errors)
+            if action is not None:
+                return action, self._accepted_validation(
+                    model,
+                    notes=[f"repaired_after_error: {first_error}"],
+                    invalid_responses=invalid_responses,
+                    model_errors=model_errors,
+                )
+            if retry_error is None:
+                return None, self._model_error_validation(model_errors, invalid_responses=invalid_responses)
+            first_error = retry_error
+            invalid_responses.append(self._invalid_response_record(model, f"repair-{retry}", first_error))
 
-        return None, {"accepted": False, "notes": [first_error], "invalid_responses": invalid_responses}
+        validation: dict[str, Any] = {
+            "accepted": False,
+            "notes": [first_error],
+            "invalid_responses": invalid_responses,
+        }
+        if model_errors:
+            validation["model_errors"] = model_errors
+        return None, validation
+
+    def _try_model_decision(
+            self,
+            model: ModelAdapter,
+            prompt: DecisionPrompt,
+            stage: str,
+    ) -> tuple[Action | None, str | None, list[dict[str, Any]]]:
+        model_errors: list[dict[str, Any]] = []
+        for provider_attempt in range(0, self.profile.model_error_retries + 1):
+            try:
+                return model.decide(prompt, self.profile.action_policy), None, model_errors
+            except ModelError as exc:
+                model_errors.append(self._model_error_record(exc, stage, provider_attempt))
+            except ActionError as exc:
+                return None, str(exc), model_errors
+        return None, None, model_errors
+
+    def _accepted_validation(
+            self,
+            model: ModelAdapter,
+            notes: list[str] | None = None,
+            invalid_responses: list[dict[str, str]] | None = None,
+            model_errors: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        validation: dict[str, Any] = {
+            "accepted": True,
+            "notes": list(notes or []),
+            "model_response": self._model_response_record(model),
+        }
+        if invalid_responses:
+            validation["invalid_responses"] = invalid_responses
+        if model_errors:
+            validation["model_errors"] = model_errors
+            validation["notes"].append("recovered_after_model_error")
+        return validation
+
+    def _model_error_validation(
+            self,
+            model_errors: list[dict[str, Any]],
+            invalid_responses: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        last_error = model_errors[-1]["message"] if model_errors else "model provider failed"
+        validation: dict[str, Any] = {
+            "accepted": False,
+            "notes": [f"model_error: {last_error}"],
+            "model_errors": model_errors,
+        }
+        if invalid_responses:
+            validation["invalid_responses"] = invalid_responses
+        return validation
 
     def _execution_error_validation(self, validation: dict[str, Any], error: str) -> dict[str, Any]:
         notes = list(validation.get("notes", []))
@@ -648,7 +786,17 @@ class ActivityRunner:
                 ]
             ),
         )
-        return model.compact(prompt)
+        try:
+            return model.compact(prompt)
+        except ModelError as exc:
+            return SessionSummary(
+                current_state=session_summary.current_state,
+                last_error=f"compaction_model_error: {exc}",
+                open_subgoals=session_summary.open_subgoals,
+                discovered_facts=session_summary.discovered_facts,
+                failed_actions=session_summary.failed_actions,
+                strategy_notes=session_summary.strategy_notes,
+            )
 
     def _commit_memory(
             self,
@@ -671,7 +819,10 @@ class ActivityRunner:
                 ]
             ),
         )
-        return model.commit_memory(prompt)
+        try:
+            return model.commit_memory(prompt)
+        except ModelError:
+            return MemoryPatch()
 
     def _summary_text(self, summary: SessionSummary) -> str:
         return "(empty)" if summary.is_empty() else json.dumps(summary.to_dict(), indent=2, sort_keys=True)
@@ -685,6 +836,17 @@ class ActivityRunner:
             }
         )
         return record
+
+    def _model_error_record(self, error: ModelError, stage: str, provider_attempt: int) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "provider_attempt": provider_attempt,
+            "type": error.__class__.__name__,
+            "message": self._truncate(str(error), 2_000),
+            "command": list(error.command),
+            "stdout": self._truncate(error.stdout, 2_000),
+            "stderr": self._truncate(error.stderr, 2_000),
+        }
 
     def _model_response_record(self, model: ModelAdapter) -> dict[str, str]:
         raw = getattr(model, "last_response", "")

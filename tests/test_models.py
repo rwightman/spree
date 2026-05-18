@@ -1,3 +1,5 @@
+import subprocess
+
 from tty_agent.models import (
     AnthropicAdapter,
     ClaudeCliAdapter,
@@ -6,6 +8,7 @@ from tty_agent.models import (
     DecisionPrompt,
     MemoryCommitPrompt,
     ModelMessage,
+    ModelTimeoutError,
     OpenAICompatibleAdapter,
     SessionSummary,
     TextChatAdapter,
@@ -381,11 +384,31 @@ def test_claude_cli_adapter_invokes_claude_print(monkeypatch):
     assert "--bare" not in captured["command"]
     assert captured["command"][captured["command"].index("--model") + 1] == "claude-sonnet-4-6"
     assert captured["command"][captured["command"].index("--permission-mode") + 1] == "dontAsk"
-    assert captured["command"][captured["command"].index("--tools") + 1] == ""
+    assert "--tools" not in captured["command"]
     assert captured["command"][-1] == "--debug"
     assert captured["timeout"] == 42.0
     assert "SYSTEM MESSAGE:\nsystem schema" in captured["input"]
     assert "USER MESSAGE:\ncurrent screen" in captured["input"]
+
+
+def test_claude_cli_adapter_includes_non_empty_tools(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = '{"result":"{\\"action\\": \\"wait\\", \\"arguments\\": {}}"}'
+
+    def fake_run(command, *_args, **_kwargs):
+        captured["command"] = command
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = ClaudeCliAdapter(tools="Bash,Read")
+
+    adapter.decide(DecisionPrompt("system schema", "current screen"))
+
+    assert captured["command"][captured["command"].index("--tools") + 1] == "Bash,Read"
 
 
 def test_claude_cli_adapter_resumes_stateful_session(monkeypatch, tmp_path):
@@ -439,3 +462,28 @@ def test_claude_cli_adapter_raises_on_command_failure(monkeypatch):
         assert "stderr detail" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_claude_cli_adapter_timeout_includes_stdout_and_stderr(monkeypatch):
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        del input, text, capture_output, cwd, check
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = ClaudeCliAdapter(timeout=12.0)
+
+    try:
+        adapter.chat([ModelMessage("user", "screen")])
+    except ModelTimeoutError as exc:
+        assert "claude -p timed out after 12s" in str(exc)
+        assert "partial stdout" in str(exc)
+        assert "partial stderr" in str(exc)
+        assert exc.stdout == "partial stdout"
+        assert exc.stderr == "partial stderr"
+    else:
+        raise AssertionError("expected ModelTimeoutError")

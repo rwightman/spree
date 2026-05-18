@@ -6,6 +6,7 @@ __all__ = [
     "ActivityBudget",
     "ActivityProfile",
     "ActivityRoute",
+    "ActivityRunState",
     "ActivityRunner",
     "AnthropicAdapter",
     "ClaudeCliAdapter",
@@ -16,6 +17,8 @@ __all__ = [
     "InputModalityProfile",
     "InputModeRule",
     "JsonMemoryStore",
+    "ModelError",
+    "ModelTimeoutError",
     "Observation",
     "ObservationHints",
     "OpenAICompatibleAdapter",
@@ -45,13 +48,22 @@ from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
 from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
-from .models import AnthropicAdapter, ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter, ScriptedModelAdapter
+from .models import (
+    AnthropicAdapter,
+    ClaudeCliAdapter,
+    CodexCliAdapter,
+    ModelError,
+    ModelTimeoutError,
+    OpenAICompatibleAdapter,
+    ScriptedModelAdapter,
+)
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext
 from .profiles import EMPTY_PROFILE, SHELL_PROFILE, TEXT_ADVENTURE_PROFILE, PromptProfile
 from .runner import (
     ActivityBudget,
     ActivityProfile,
     ActivityRoute,
+    ActivityRunState,
     ActivityRunner,
     PromptLayout,
     PromptMode,

@@ -277,6 +277,36 @@ bat, died, recovered in the temple, and continued until the 100-step budget.
 The same run used `submit_line` for most complete commands and had no action
 validation failures.
 
+## 10. Let Two Agents Play A Match
+
+`run-match` opens one telnet session per participant and alternates one
+decision tick per active agent. Inline participant specs use
+`agent_id:provider:model`; each participant still gets its own per-agent JSONL
+trace and model state.
+
+```bash
+uv run bbs-gym run-match \
+  --host 127.0.0.1 \
+  --port 3000 \
+  --transport telnet \
+  --telnet-enter lf \
+  --no-agents-config \
+  --activity bbs-door-line \
+  --participant arena-codex:codex:gpt-5.5 \
+  --participant arena-claude:claude:sonnet \
+  --codex-stateful \
+  --claude-stateful \
+  --prompt-layout cache_friendly \
+  --log-path runtime/logs/tele-arena-match.jsonl \
+  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agent: {opponents}. Explore, survive, gain equipment, and battle opponents if you encounter them." \
+  --max-rounds 100 \
+  --max-decision-ticks 100
+```
+
+The match trace goes to `runtime/logs/tele-arena-match.jsonl`. Per-agent traces
+use the same stem, for example `tele-arena-match.arena-codex.jsonl` and
+`tele-arena-match.arena-claude.jsonl`.
+
 ## Notes
 
 - Use `--telnet-enter lf` for Ether. CR-only caused repeated delayed submits.

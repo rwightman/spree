@@ -6,7 +6,7 @@ from bbs_gym.activities import TW2_ENTRY_PROFILE
 from tty_agent.actions import Action, ActionError, ActionPolicy
 from tty_agent.agent import ActionExecution
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import ScriptedModelAdapter
+from tty_agent.models import ModelTimeoutError, ScriptedModelAdapter
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from tty_agent.terminal import Observation
@@ -168,6 +168,37 @@ def test_activity_runner_sends_actions_and_logs_memory(tmp_path):
     assert result.steps[0].execution["sent_bytes"]["combined"]["repr"] == "b'?\\n'"
     assert memory.load("agent-001") == {"durable_facts": ["Asked for help."]}
     assert (tmp_path / "steps.jsonl").read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_activity_runner_can_step_state_incrementally(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "submit_line", "arguments": {"text": "look"}}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Stepped manually."]}',
+        ]
+    )
+    memory = JsonMemoryStore(tmp_path / "memory")
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test stepping"),
+        memory_store=memory,
+        log_path=tmp_path / "steps.jsonl",
+    )
+    state = runner.start_state(agent, model, ActivityBudget(max_decision_ticks=5))
+
+    first = runner.run_step(state)
+    second = runner.run_step(state)
+    result = runner.finish_state(state)
+
+    assert first is not None
+    assert second is not None
+    assert first.step == 1
+    assert second.step == 2
+    assert state.completed is True
+    assert result.stop_reason == "hangup"
+    assert [action.action for action in agent.actions] == ["submit_line", "hangup"]
+    assert memory.load("agent-001") == {"durable_facts": ["Stepped manually."]}
 
 
 def test_activity_runner_counts_invalid_model_actions(tmp_path):
@@ -519,6 +550,77 @@ def test_activity_runner_logs_action_execution_errors_without_crashing(tmp_path)
     assert result.stop_reason == "validation_failures"
     assert result.steps[0].validation["accepted"] is False
     assert "action_error" in result.steps[0].validation["notes"][0]
+
+
+def test_activity_runner_retries_model_timeout_without_crashing(tmp_path):
+    class TimeoutThenWaitModel(ScriptedModelAdapter):
+        def __init__(self):
+            super().__init__(
+                [
+                    '{"action": "wait", "arguments": {}}',
+                    '{"action": "hangup", "arguments": {}}',
+                    '{"durable_facts": ["Recovered from provider timeout."]}',
+                ]
+            )
+            self.calls = 0
+
+        def decide(self, prompt, policy=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelTimeoutError(
+                    "claude -p timed out after 600s: partial stderr",
+                    command=["claude", "-p"],
+                    stdout="partial stdout",
+                    stderr="partial stderr",
+                )
+            return super().decide(prompt, policy)
+
+    agent = FakeAgent()
+    model = TimeoutThenWaitModel()
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test provider retry", model_error_retries=1),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=5))
+
+    assert result.stop_reason == "hangup"
+    assert result.steps[0].validation["accepted"] is True
+    assert "recovered_after_model_error" in result.steps[0].validation["notes"]
+    model_error = result.steps[0].validation["model_errors"][0]
+    assert model_error["type"] == "ModelTimeoutError"
+    assert model_error["stdout"] == "partial stdout"
+    assert model_error["stderr"] == "partial stderr"
+    assert model_error["command"] == ["claude", "-p"]
+
+
+def test_activity_runner_records_model_timeout_failure_without_crashing(tmp_path):
+    class AlwaysTimeoutModel(ScriptedModelAdapter):
+        def __init__(self):
+            super().__init__([])
+
+        def decide(self, _prompt, _policy=None):
+            raise ModelTimeoutError(
+                "claude -p timed out after 600s: partial stderr",
+                command=["claude", "-p"],
+                stdout="partial stdout",
+                stderr="partial stderr",
+            )
+
+    agent = FakeAgent()
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test provider failure", model_error_retries=1),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, AlwaysTimeoutModel(), ActivityBudget(max_decision_ticks=5, max_validation_failures=1))
+
+    assert result.stop_reason == "validation_failures"
+    assert result.steps[0].action is None
+    assert result.steps[0].validation["accepted"] is False
+    assert result.steps[0].validation["model_errors"][0]["stdout"] == "partial stdout"
+    assert result.steps[0].validation["model_errors"][1]["stderr"] == "partial stderr"
+    assert "model_error:" in result.steps[0].validation["notes"][0]
 
 
 def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):

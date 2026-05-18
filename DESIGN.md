@@ -439,8 +439,15 @@ enabled for line-oriented doors such as Ether/Tele-Arena. It is appropriate
 when most commands are text lines submitted with Enter and the two-step
 `type_text` plus `press_key enter` pattern is just decision overhead.
 
-A future campaign runner should compose activities into fair model-vs-model
-schedules instead of replacing these activity runners.
+`run-match` composes multiple activity states into a fair round-robin schedule.
+Each participant has a separate terminal session, model adapter, stateful
+provider session, recent-step context, campaign memory, and per-agent trace.
+The scheduler writes a small match trace that records which agent acted in each
+round, while the normal activity traces remain the source of detailed prompts,
+actions, observations, and memory updates.
+
+A future campaign runner should compose activities into longer fair
+model-vs-model schedules instead of replacing these activity and match runners.
 
 Memory is harness-owned:
 
