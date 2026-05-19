@@ -201,6 +201,33 @@ def test_activity_runner_can_step_state_incrementally(tmp_path):
     assert memory.load("agent-001") == {"durable_facts": ["Stepped manually."]}
 
 
+def test_activity_runner_can_prepare_then_commit_step(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(['{"action": "submit_line", "arguments": {"text": "look"}}'])
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test split stepping"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+        log_path=tmp_path / "steps.jsonl",
+    )
+    state = runner.start_state(agent, model, ActivityBudget(max_decision_ticks=5))
+
+    prepared = runner.prepare_step(state)
+
+    assert prepared is not None
+    assert prepared.action is not None
+    assert prepared.action.action == "submit_line"
+    assert agent.actions == []
+    assert state.budget.decision_ticks == 0
+
+    step = runner.commit_prepared_step(state, prepared)
+
+    assert step is not None
+    assert step.step == 1
+    assert [action.action for action in agent.actions] == ["submit_line"]
+    assert state.budget.decision_ticks == 1
+    assert (tmp_path / "steps.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
 def test_activity_runner_counts_invalid_model_actions(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(["not json", "still not json"])

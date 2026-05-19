@@ -15,8 +15,9 @@ from bbs_gym.cli import main as bbs_gym_main
 
 DEFAULT_RUN_OBJECTIVE = (
     "Play Tele-Arena through this telnet session. If asked for a character name, create or log in as "
-    "ArenaCodex. Explore carefully, learn commands, survive fights, gain experience or gold, buy useful "
-    "starter supplies, and recover from mistakes."
+    "ArenaCodex. Stay connected unless the run objective explicitly says to leave. Survive fights, gain "
+    "experience and gold, buy and equip useful starter supplies, spend gold wisely, recover when hurt, and "
+    "keep making progress instead of quitting early."
 )
 
 
@@ -109,6 +110,8 @@ def build_bbs_gym_argv(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--prompt-layout", args.prompt_layout])
     if args.recent_steps_to_keep is not None:
         cmd.extend(["--recent-steps-to-keep", str(args.recent_steps_to_keep)])
+    for disabled_action in args.disabled_actions:
+        cmd.extend(["--disable-action", disabled_action])
     return cmd
 
 
@@ -153,6 +156,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
     parser.add_argument("--recent-steps-to-keep", type=int)
+    parser.add_argument("--disable-action", dest="disabled_actions", action="append", default=["hangup"])
     parser.add_argument("--max-decision-ticks", type=int, default=100)
     parser.add_argument("--max-wall-seconds", type=float, default=2400.0)
     parser.add_argument("--observe-timeout", type=float, default=8.0)

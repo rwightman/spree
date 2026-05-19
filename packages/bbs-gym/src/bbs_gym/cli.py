@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from tty_agent.ansi import strip_ansi
+from tty_agent.actions import DEFAULT_ALLOWED_ACTIONS
 from tty_agent.models import (
     AnthropicAdapter,
     ClaudeCliAdapter,
@@ -261,6 +262,7 @@ def _apply_match_config(args: argparse.Namespace) -> None:
             "model_error_retries": "model_error_retries",
             "prompt_mode": "prompt_mode",
             "prompt_layout": "prompt_layout",
+            "disabled_actions": "disabled_actions",
         },
     )
     _set_config_values(
@@ -375,6 +377,7 @@ def _required_config_str(config: dict[str, Any], key: str, owner: str) -> str:
 
 def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityProfile:
     profile = activity_profile(args.activity, args.profile_objective)
+    profile = _profile_with_action_overrides(profile, args)
     overrides = build_profile_overrides(args, registry)
     return replace(profile, **overrides) if overrides else profile
 
@@ -385,14 +388,41 @@ def build_activity_route_set(args: argparse.Namespace, registry: AgentRegistry |
     default_overrides = dict(overrides)
     if getattr(args, "profile_objective", None):
         default_overrides["objective"] = args.profile_objective
-    default_profile = (
-        replace(route_set.default_profile, **default_overrides) if default_overrides else route_set.default_profile
-    )
+    default_profile = _profile_with_action_overrides(route_set.default_profile, args)
+    default_profile = replace(default_profile, **default_overrides) if default_overrides else default_profile
     routes = tuple(
-        replace(route, profile=replace(route.profile, **overrides) if overrides else route.profile)
+        replace(
+            route,
+            profile=replace(_profile_with_action_overrides(route.profile, args), **overrides)
+            if overrides
+            else _profile_with_action_overrides(route.profile, args),
+        )
         for route in route_set.routes
     )
     return replace(route_set, default_profile=default_profile, routes=routes)
+
+
+def _profile_with_action_overrides(profile: ActivityProfile, args: argparse.Namespace) -> ActivityProfile:
+    disabled_actions = _disabled_actions(args)
+    if not disabled_actions:
+        return profile
+    allowed_actions = frozenset(
+        action for action in profile.action_policy.allowed_actions if action not in disabled_actions
+    )
+    return replace(profile, action_policy=replace(profile.action_policy, allowed_actions=allowed_actions))
+
+
+def _disabled_actions(args: argparse.Namespace) -> frozenset[str]:
+    values = getattr(args, "disabled_actions", []) or []
+    if isinstance(values, str):
+        values = [values]
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError("disabled_actions must be a list of action names")
+    disabled = frozenset(values)
+    unknown = disabled - (DEFAULT_ALLOWED_ACTIONS | {"send_raw"})
+    if unknown:
+        raise ValueError(f"unknown disabled action(s): {', '.join(sorted(unknown))}")
+    return disabled
 
 
 def match_participant_specs(args: argparse.Namespace) -> list[MatchParticipantSpec]:
@@ -912,6 +942,13 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--model-error-retries", type=int)
     run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     run_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
+    run_parser.add_argument(
+        "--disable-action",
+        dest="disabled_actions",
+        action="append",
+        default=[],
+        help="remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup",
+    )
     run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)
 
@@ -974,6 +1011,13 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--model-error-retries", type=int)
     routed_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     routed_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
+    routed_parser.add_argument(
+        "--disable-action",
+        dest="disabled_actions",
+        action="append",
+        default=[],
+        help="remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup",
+    )
     routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
     routed_parser.set_defaults(func=run_routed)
 
@@ -1064,6 +1108,13 @@ def main(argv: list[str] | None = None) -> int:
     match_parser.add_argument("--model-error-retries", type=int)
     match_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
     match_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
+    match_parser.add_argument(
+        "--disable-action",
+        dest="disabled_actions",
+        action="append",
+        default=[],
+        help="remove an action from every participant's activity schema; repeatable, e.g. --disable-action hangup",
+    )
     match_parser.add_argument("--log-path", default="runtime/logs/match.jsonl")
     match_parser.set_defaults(func=run_match)
 

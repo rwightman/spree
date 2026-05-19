@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from bbs_gym.match import (
@@ -99,11 +100,84 @@ def test_run_scheduled_match_sequential_writes_order_and_steps(tmp_path):
     assert events[1]["order"] == ["alpha", "bravo"]
 
 
-def participant(agent_id: str, tmp_path: Path) -> MatchParticipantRuntime:
+def test_run_scheduled_match_parallel_barrier_commits_configured_order(tmp_path):
+    participants = [
+        participant("alpha", tmp_path, delay=0.03),
+        participant("bravo", tmp_path, delay=0.0),
+    ]
+    match_log = tmp_path / "barrier.jsonl"
+
+    run_scheduled_match(
+        FakeGym(),
+        participants,
+        MatchSchedulerConfig(
+            mode="parallel_barrier",
+            order="fixed",
+            max_rounds=1,
+            max_decision_ticks=5,
+            max_wall_seconds=60,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    assert _event(events, "commit_order")["order"] == ["alpha", "bravo"]
+    assert _agent_step_order(events) == ["alpha", "bravo"]
+    assert {event["agent_id"] for event in events if event["type"] == "agent_decision_completed"} == {
+        "alpha",
+        "bravo",
+    }
+
+
+def test_run_scheduled_match_parallel_race_commits_completion_order(tmp_path):
+    participants = [
+        participant("alpha", tmp_path, delay=0.05),
+        participant("bravo", tmp_path, delay=0.0),
+    ]
+    match_log = tmp_path / "race.jsonl"
+
+    run_scheduled_match(
+        FakeGym(),
+        participants,
+        MatchSchedulerConfig(
+            mode="parallel_race",
+            order="fixed",
+            max_rounds=1,
+            max_decision_ticks=5,
+            max_wall_seconds=60,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    assert _event(events, "commit_order")["order"] == ["bravo", "alpha"]
+    assert _agent_step_order(events) == ["bravo", "alpha"]
+
+
+def _event(events: list[dict], event_type: str) -> dict:
+    return next(event for event in events if event["type"] == event_type)
+
+
+def _agent_step_order(events: list[dict]) -> list[str]:
+    return [event["agent_id"] for event in events if event["type"] == "agent_step"]
+
+
+class DelayedScriptedModelAdapter(ScriptedModelAdapter):
+    def __init__(self, responses: list[str], delay: float) -> None:
+        super().__init__(responses)
+        self.delay = delay
+
+    def decide(self, prompt, policy=None):
+        if self.delay:
+            time.sleep(self.delay)
+        return super().decide(prompt, policy)
+
+
+def participant(agent_id: str, tmp_path: Path, delay: float = 0.0) -> MatchParticipantRuntime:
     return MatchParticipantRuntime(
         spec=MatchParticipantSpec(agent_id, "scripted", "unused"),
         args=object(),
-        model=ScriptedModelAdapter(['{"action": "wait", "arguments": {}}']),
+        model=DelayedScriptedModelAdapter(['{"action": "wait", "arguments": {}}'], delay),
         model_metadata={"provider": "scripted"},
         runner=ActivityRunner(ActivityProfile(name="test", objective="test"), log_path=tmp_path / f"{agent_id}.jsonl"),
         log_path=tmp_path / f"{agent_id}.jsonl",
