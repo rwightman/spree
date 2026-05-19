@@ -1,0 +1,45 @@
+host = "127.0.0.1"
+port = 3000
+transport = "telnet"
+telnet_enter = "lf"
+activity = "bbs-door-line"
+prompt_layout = "cache_friendly"
+recent_steps_to_keep = 5
+log_path = "runtime/logs/tele-arena-melee.jsonl"
+run_objective = "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agents: {opponents}. Explore, survive, gain equipment, find opponents, and battle opponents if you encounter them."
+
+[scheduler]
+mode = "sequential"
+order = "shuffle"
+seed = 20260519
+disconnect_policy = "reconnect"
+max_reconnects = 3
+reconnect_delay = 2.0
+
+[budget]
+max_rounds = 2000
+max_decision_ticks = 2000
+max_wall_seconds = 86400
+
+[[participants]]
+agent_id = "ArenaCodex"
+provider = "codex"
+model = "gpt-5.5"
+stateful = true
+codex_session_file = "runtime/codex-sessions/tele-arena-melee-ArenaCodex.session"
+
+[[participants]]
+agent_id = "ArenaClaude"
+provider = "claude"
+model = "sonnet"
+stateful = true
+claude_session_file = "runtime/claude-sessions/tele-arena-melee-ArenaClaude.session"
+
+[[participants]]
+agent_id = "ArenaGemma"
+provider = "openai-compatible"
+model = "gemma4"
+base_url = "http://localhost:8000/v1"
+temperature = 0.6
+max_tokens = 4096
+response_filter = "gemma4"

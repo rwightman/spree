@@ -7,7 +7,8 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, replace
+import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,12 @@ from tty_agent.transports.telnet import TelnetSession
 from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile
 from .env import BbsGym
+from .match import (
+    MatchParticipantRuntime,
+    MatchParticipantSpec,
+    MatchSchedulerConfig,
+    run_scheduled_match,
+)
 from .profiles import BBS_PROFILE, TW2_PROFILE
 from .routing import ActivityRouteSet, activity_route_set, activity_route_set_names
 
@@ -37,23 +44,6 @@ DEFAULT_MATCH_OBJECTIVE = (
     "Play this shared terminal activity as {agent_id}. Other active agents in the match: {opponents}. "
     "Explore, survive, improve your position, and interact with opponents when useful."
 )
-
-
-@dataclass(frozen=True)
-class MatchParticipantSpec:
-    agent_id: str
-    provider: str | None = None
-    model: str | None = None
-
-
-@dataclass
-class MatchParticipantRuntime:
-    spec: MatchParticipantSpec
-    args: argparse.Namespace
-    model: object
-    model_metadata: dict[str, object]
-    runner: ActivityRunner
-    log_path: Path
 
 
 def smoke(args: argparse.Namespace) -> int:
@@ -202,16 +192,17 @@ def run_routed(args: argparse.Namespace) -> int:
 
 def run_match(args: argparse.Namespace) -> int:
     try:
+        _apply_match_config(args)
+        _validate_match_args(args)
         registry = None if args.no_agents_config else load_agent_registry(args.agents_config, required=False)
         specs = match_participant_specs(args)
         participants = build_match_participants(args, specs, registry)
+        scheduler = build_match_scheduler_config(args)
     except (AccountConfigError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
     match_log_path = Path(args.log_path)
-    states = []
-    round_number = 0
     try:
         with BbsGym(
             host=args.host,
@@ -222,57 +213,164 @@ def run_match(args: argparse.Namespace) -> int:
             telnet_enter_sequence=args.telnet_enter,
             agent_registry=registry,
         ) as gym:
-            for participant in participants:
-                agent = gym.connect(participant.spec.agent_id, model_metadata=participant.model_metadata)
-                state = participant.runner.start_state(
-                    agent,
-                    participant.model,
-                    ActivityBudget(
-                        max_decision_ticks=args.max_decision_ticks,
-                        max_wall_seconds=args.max_wall_seconds,
-                    ),
-                )
-                states.append((participant, state))
-
-            while round_number < args.max_rounds and any(not state.completed for _, state in states):
-                round_number += 1
-                for participant, state in states:
-                    if state.completed:
-                        continue
-                    step = participant.runner.run_step(state)
-                    _write_match_event(
-                        match_log_path,
-                        {
-                            "type": "agent_step",
-                            "round": round_number,
-                            "agent_id": participant.spec.agent_id,
-                            "step": step.step if step is not None else None,
-                            "completed": state.completed,
-                            "stop_reason": state.stop_reason if state.completed else "",
-                            "active_profile": (state.active_profile.name if state.active_profile is not None else ""),
-                            "action": step.action if step is not None else None,
-                            "agent_log_path": str(participant.log_path),
-                            "timestamp": step.timestamp if step is not None else None,
-                        },
-                    )
-
-            if round_number >= args.max_rounds:
-                for _, state in states:
-                    if not state.completed:
-                        state.stop_reason = "match_rounds"
-                        state.completed = True
-
-            results = [(participant, participant.runner.finish_state(state)) for participant, state in states]
+            match_result = run_scheduled_match(gym, participants, scheduler, match_log_path)
     except (OSError, AccountConfigError, ValueError) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
     summary = ", ".join(
         f"{result.agent_id}:steps={len(result.steps)} stop={result.stop_reason}"
-        for _, result in results
+        for _, result in match_result.results
     )
-    print(f"match participants={len(results)} rounds={round_number} {summary} log={match_log_path}")
+    print(
+        f"match participants={len(match_result.results)} rounds={match_result.rounds} "
+        f"scheduler={scheduler.mode} {summary} log={match_log_path}"
+    )
     return 0
+
+
+def _apply_match_config(args: argparse.Namespace) -> None:
+    if getattr(args, "_match_config_applied", False):
+        return
+    args._match_config_applied = True
+    path = getattr(args, "match_config", None)
+    if not path:
+        return
+
+    config = _load_match_config(Path(path))
+    _set_config_values(
+        args,
+        config,
+        {
+            "host": "host",
+            "port": "port",
+            "rlogin_port": "rlogin_port",
+            "rlogin_terminal": "rlogin_terminal",
+            "transport": "transport",
+            "telnet_enter": "telnet_enter",
+            "agents_config": "agents_config",
+            "no_agents_config": "no_agents_config",
+            "activity": "activity",
+            "profile_objective": "profile_objective",
+            "run_objective": "run_objective",
+            "log_path": "log_path",
+            "observe_timeout": "observe_timeout",
+            "stable_ms": "stable_ms",
+            "byte_quiet_ms": "byte_quiet_ms",
+            "recent_steps_to_keep": "recent_steps_to_keep",
+            "model_error_retries": "model_error_retries",
+            "prompt_mode": "prompt_mode",
+            "prompt_layout": "prompt_layout",
+        },
+    )
+    _set_config_values(
+        args,
+        _config_mapping(config, "scheduler"),
+        {
+            "mode": "scheduler_mode",
+            "order": "match_order",
+            "seed": "match_seed",
+            "disconnect_policy": "disconnect_policy",
+            "max_reconnects": "max_reconnects",
+            "reconnect_delay": "reconnect_delay",
+            "max_workers": "max_workers",
+        },
+    )
+    _set_config_values(
+        args,
+        _config_mapping(config, "budget"),
+        {
+            "max_rounds": "max_rounds",
+            "max_decision_ticks": "max_decision_ticks",
+            "max_wall_seconds": "max_wall_seconds",
+        },
+    )
+    if "participants" in config:
+        args._match_participants_config = _match_participant_specs_from_config(config["participants"])
+    _validate_match_args(args)
+
+
+def _load_match_config(path: Path) -> dict[str, Any]:
+    try:
+        if path.suffix == ".json":
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"could not read match config {path}: {exc}") from exc
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"invalid match config {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("match config root must be an object")
+    return data
+
+
+def _set_config_values(args: argparse.Namespace, config: dict[str, Any], mapping: dict[str, str]) -> None:
+    for config_key, arg_key in mapping.items():
+        if config_key in config:
+            setattr(args, arg_key, config[config_key])
+
+
+def _config_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
+    value = config.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"match config field {key!r} must be an object")
+    return value
+
+
+def _match_participant_specs_from_config(value: object) -> list[MatchParticipantSpec]:
+    if not isinstance(value, list):
+        raise ValueError("match config field 'participants' must be a list")
+    specs: list[MatchParticipantSpec] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("each match participant must be an object")
+        agent_id = _required_config_str(item, "agent_id", "match participant")
+        provider = _config_str(item, "provider")
+        model = _config_str(item, "model")
+        specs.append(MatchParticipantSpec(agent_id=agent_id, provider=provider, model=model, config=dict(item)))
+    return specs
+
+
+def _validate_match_args(args: argparse.Namespace) -> None:
+    if args.scheduler_mode not in {"sequential", "parallel_race", "parallel_barrier", "continuous"}:
+        raise ValueError("scheduler_mode must be one of: sequential, parallel_race, parallel_barrier, continuous")
+    if args.match_order not in {"fixed", "shuffle", "rotate"}:
+        raise ValueError("match_order must be one of: fixed, shuffle, rotate")
+    if args.disconnect_policy not in {"stop", "reconnect"}:
+        raise ValueError("disconnect_policy must be one of: stop, reconnect")
+    if args.max_reconnects < 0:
+        raise ValueError("max_reconnects must be >= 0")
+    if args.reconnect_delay < 0:
+        raise ValueError("reconnect_delay must be >= 0")
+    if args.max_workers is not None and args.max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+
+
+def build_match_scheduler_config(args: argparse.Namespace) -> MatchSchedulerConfig:
+    _apply_match_config(args)
+    _validate_match_args(args)
+    return MatchSchedulerConfig(
+        mode=args.scheduler_mode,
+        order=args.match_order,
+        seed=args.match_seed,
+        disconnect_policy=args.disconnect_policy,
+        max_reconnects=args.max_reconnects,
+        reconnect_delay=args.reconnect_delay,
+        max_rounds=args.max_rounds,
+        max_decision_ticks=args.max_decision_ticks,
+        max_wall_seconds=args.max_wall_seconds,
+        max_workers=args.max_workers,
+    )
+
+
+def _required_config_str(config: dict[str, Any], key: str, owner: str) -> str:
+    value = config.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{owner} field {key!r} must be a non-empty string")
+    return value
 
 
 def build_activity_profile(args: argparse.Namespace, registry: AgentRegistry | None = None) -> ActivityProfile:
@@ -298,8 +396,13 @@ def build_activity_route_set(args: argparse.Namespace, registry: AgentRegistry |
 
 
 def match_participant_specs(args: argparse.Namespace) -> list[MatchParticipantSpec]:
-    specs = [_parse_match_participant(value) for value in getattr(args, "participant", [])]
-    specs.extend(MatchParticipantSpec(agent_id=agent_id) for agent_id in getattr(args, "agent_id", []))
+    _apply_match_config(args)
+    configured_specs = getattr(args, "_match_participants_config", None)
+    if configured_specs is not None:
+        specs = list(configured_specs)
+    else:
+        specs = [_parse_match_participant(value) for value in getattr(args, "participant", [])]
+        specs.extend(MatchParticipantSpec(agent_id=agent_id) for agent_id in getattr(args, "agent_id", []))
     if len(specs) < 2:
         raise ValueError("run-match requires at least two --participant or --agent-id values")
 
@@ -381,10 +484,19 @@ def _parse_match_participant(value: str) -> MatchParticipantSpec:
 def _participant_args(args: argparse.Namespace, spec: MatchParticipantSpec) -> argparse.Namespace:
     data = vars(args).copy()
     data["agent_id"] = spec.agent_id
+    if spec.config is not None:
+        for key, value in spec.config.items():
+            data[key.replace("-", "_")] = value
     if spec.provider is not None:
         data["provider"] = spec.provider
     if spec.model is not None:
         data["model"] = spec.model
+    if "stateful" in data:
+        provider = data.get("provider")
+        if provider == "codex":
+            data["codex_stateful"] = bool(data["stateful"])
+        elif provider == "claude":
+            data["claude_stateful"] = bool(data["stateful"])
     return argparse.Namespace(**data)
 
 
@@ -397,12 +509,6 @@ def _agent_log_path(match_log_path: str | Path, agent_id: str) -> Path:
     safe_agent = "".join(char if char.isalnum() or char in "-_." else "_" for char in agent_id)
     suffix = path.suffix or ".jsonl"
     return path.with_name(f"{path.stem}.{safe_agent}{suffix}")
-
-
-def _write_match_event(path: Path, event: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
@@ -871,8 +977,9 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
     routed_parser.set_defaults(func=run_routed)
 
-    match_parser = subparsers.add_parser("run-match", help="run a round-robin multi-agent BBS activity")
+    match_parser = subparsers.add_parser("run-match", help="run a scheduled multi-agent BBS activity")
     match_parser.add_argument("--host", default="127.0.0.1")
+    match_parser.add_argument("--match-config", help="TOML or JSON file describing a multi-agent match")
     match_parser.add_argument("--port", type=int, default=2323)
     match_parser.add_argument("--rlogin-port", type=int, default=2513)
     match_parser.add_argument("--rlogin-terminal", default="ansi")
@@ -939,6 +1046,17 @@ def main(argv: list[str] | None = None) -> int:
     match_parser.add_argument("--max-rounds", type=int, default=50)
     match_parser.add_argument("--max-decision-ticks", type=int, default=50)
     match_parser.add_argument("--max-wall-seconds", type=float, default=600.0)
+    match_parser.add_argument(
+        "--scheduler-mode",
+        choices=["sequential", "parallel_race", "parallel_barrier", "continuous"],
+        default="sequential",
+    )
+    match_parser.add_argument("--match-order", choices=["fixed", "shuffle", "rotate"], default="fixed")
+    match_parser.add_argument("--match-seed", type=int)
+    match_parser.add_argument("--disconnect-policy", choices=["stop", "reconnect"], default="stop")
+    match_parser.add_argument("--max-reconnects", type=int, default=3)
+    match_parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    match_parser.add_argument("--max-workers", type=int)
     match_parser.add_argument("--observe-timeout", type=float)
     match_parser.add_argument("--stable-ms", type=int)
     match_parser.add_argument("--byte-quiet-ms", type=int)

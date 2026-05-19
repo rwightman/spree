@@ -2,12 +2,20 @@ import argparse
 
 from bbs_gym.accounts import AgentRecord, AgentRegistry
 from bbs_gym.cli import (
+    build_match_scheduler_config,
     build_activity_profile,
     build_activity_route_set,
     build_match_participants,
     build_model,
     build_model_metadata,
     match_participant_specs,
+)
+from bbs_gym.match import (
+    MatchParticipantRuntime,
+    MatchParticipantSpec,
+    MatchSchedulerConfig,
+    handle_match_disconnect,
+    match_round_order,
 )
 from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
 
@@ -329,6 +337,7 @@ def test_build_activity_route_set_applies_profile_overrides():
 
 def test_match_participant_specs_parse_inline_provider_and_model():
     args = argparse.Namespace(
+        match_config=None,
         participant=["codex-blue:codex:gpt-5.5", "claude-red:claude:sonnet"],
         agent_id=[],
     )
@@ -344,6 +353,7 @@ def test_match_participant_specs_parse_inline_provider_and_model():
 
 def test_build_match_participants_formats_objectives_and_logs(tmp_path):
     args = argparse.Namespace(
+        match_config=None,
         participant=["codex-blue:scripted:unused", "claude-red:scripted:unused"],
         agent_id=[],
         provider=None,
@@ -377,3 +387,207 @@ def test_build_match_participants_formats_objectives_and_logs(tmp_path):
     assert participants[0].runner.profile.name == "bbs-door-line"
     assert participants[0].log_path == tmp_path / "match.codex-blue.jsonl"
     assert participants[1].log_path == tmp_path / "match.claude-red.jsonl"
+
+
+def test_match_config_toml_supplies_scheduler_budget_and_participants(tmp_path):
+    config_path = tmp_path / "melee.toml"
+    config_path.write_text(
+        """
+activity = "bbs-door-line"
+transport = "telnet"
+telnet_enter = "lf"
+run_objective = "Play as {agent_id}; opponents: {opponents}"
+log_path = "runtime/logs/melee.jsonl"
+
+[scheduler]
+mode = "sequential"
+order = "shuffle"
+seed = 17
+disconnect_policy = "reconnect"
+max_reconnects = 2
+reconnect_delay = 0.0
+max_workers = 4
+
+[budget]
+max_rounds = 250
+max_decision_ticks = 125
+max_wall_seconds = 3600
+
+[[participants]]
+agent_id = "codex-blue"
+provider = "codex"
+model = "gpt-5.5"
+stateful = true
+codex_session_file = "runtime/codex-blue.session"
+
+[[participants]]
+agent_id = "gemma-green"
+provider = "openai-compatible"
+model = "gemma4"
+base_url = "http://localhost:8000/v1"
+temperature = 0.6
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        match_config=str(config_path),
+        participant=[],
+        agent_id=[],
+        provider=None,
+        scripted_response=[],
+        model=None,
+        base_url=None,
+        api_key=None,
+        temperature=None,
+        max_tokens=None,
+        response_filter=None,
+        no_anthropic_cache=False,
+        codex_profile=None,
+        codex_executable=None,
+        codex_timeout=None,
+        codex_sandbox=None,
+        codex_cwd=None,
+        codex_arg=[],
+        codex_stateful=False,
+        codex_session_id=None,
+        codex_session_file=None,
+        claude_stateful=False,
+        activity="tw2-game",
+        profile_objective=None,
+        run_objective=None,
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        model_error_retries=None,
+        prompt_mode=None,
+        prompt_layout=None,
+        log_path=str(tmp_path / "default.jsonl"),
+        max_rounds=50,
+        max_decision_ticks=50,
+        max_wall_seconds=600.0,
+        scheduler_mode="sequential",
+        match_order="fixed",
+        match_seed=None,
+        disconnect_policy="stop",
+        max_reconnects=3,
+        reconnect_delay=2.0,
+        max_workers=None,
+        host="127.0.0.1",
+        port=2323,
+        rlogin_port=2513,
+        rlogin_terminal="ansi",
+        transport="telnet",
+        telnet_enter="cr",
+        agents_config="config/agents.local.json",
+        no_agents_config=False,
+    )
+
+    specs = match_participant_specs(args)
+    participants = build_match_participants(args, specs, registry=None)
+
+    assert args.match_order == "shuffle"
+    assert args.scheduler_mode == "sequential"
+    assert args.match_seed == 17
+    assert args.disconnect_policy == "reconnect"
+    assert args.max_reconnects == 2
+    assert args.reconnect_delay == 0.0
+    assert args.max_workers == 4
+    assert args.max_rounds == 250
+    assert args.max_decision_ticks == 125
+    assert args.max_wall_seconds == 3600
+    assert [spec.agent_id for spec in specs] == ["codex-blue", "gemma-green"]
+    assert isinstance(participants[0].model, CodexCliAdapter)
+    assert participants[0].model.stateful is True
+    assert str(participants[0].model.session_file) == "runtime/codex-blue.session"
+    assert isinstance(participants[1].model, OpenAICompatibleAdapter)
+    assert participants[1].model.base_url == "http://localhost:8000/v1"
+    assert participants[1].model.temperature == 0.6
+    scheduler = build_match_scheduler_config(args)
+    assert scheduler == MatchSchedulerConfig(
+        mode="sequential",
+        order="shuffle",
+        seed=17,
+        disconnect_policy="reconnect",
+        max_reconnects=2,
+        reconnect_delay=0.0,
+        max_rounds=250,
+        max_decision_ticks=125,
+        max_wall_seconds=3600,
+        max_workers=4,
+    )
+
+
+def test_match_round_order_fixed_shuffle_and_rotate_are_deterministic():
+    states = [
+        (argparse.Namespace(spec=argparse.Namespace(agent_id="a")), argparse.Namespace(completed=False)),
+        (argparse.Namespace(spec=argparse.Namespace(agent_id="b")), argparse.Namespace(completed=False)),
+        (argparse.Namespace(spec=argparse.Namespace(agent_id="c")), argparse.Namespace(completed=False)),
+    ]
+
+    assert [participant.spec.agent_id for participant, _ in match_round_order(states, "fixed", random_rng(3), 1)] == [
+        "a",
+        "b",
+        "c",
+    ]
+    assert [participant.spec.agent_id for participant, _ in match_round_order(states, "rotate", random_rng(3), 2)] == [
+        "b",
+        "c",
+        "a",
+    ]
+    assert [participant.spec.agent_id for participant, _ in match_round_order(states, "shuffle", random_rng(3), 1)] == [
+        "b",
+        "c",
+        "a",
+    ]
+
+
+def random_rng(seed: int):
+    import random
+
+    return random.Random(seed)
+
+
+def test_handle_match_disconnect_reconnects_and_logs(tmp_path):
+    class FakeAgent:
+        def __init__(self, agent_id: str) -> None:
+            self.agent_id = agent_id
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeGym:
+        def __init__(self) -> None:
+            self.connected = []
+
+        def connect(self, agent_id, model_metadata=None):
+            self.connected.append((agent_id, model_metadata))
+            return FakeAgent(agent_id)
+
+    old_agent = FakeAgent("arena-codex")
+    state = argparse.Namespace(agent=old_agent, completed=True, stop_reason="disconnected")
+    participant = MatchParticipantRuntime(
+        spec=MatchParticipantSpec("arena-codex", "codex", "gpt-5.5"),
+        args=argparse.Namespace(),
+        model=object(),
+        model_metadata={"provider": "codex"},
+        runner=object(),
+        log_path=tmp_path / "agent.jsonl",
+    )
+    scheduler = MatchSchedulerConfig(disconnect_policy="reconnect", max_reconnects=2, reconnect_delay=0.0)
+    match_log = tmp_path / "match.jsonl"
+    gym = FakeGym()
+
+    handle_match_disconnect(gym, participant, state, scheduler, match_log, round_number=7)
+
+    assert old_agent.closed is True
+    assert state.completed is False
+    assert state.stop_reason == ""
+    assert state.agent.agent_id == "arena-codex"
+    assert participant.reconnects == 1
+    assert gym.connected == [("arena-codex", {"provider": "codex"})]
+    events = [line for line in match_log.read_text(encoding="utf-8").splitlines() if line]
+    assert '"type": "participant_disconnected"' in events[0]
+    assert '"type": "participant_reconnected"' in events[1]
