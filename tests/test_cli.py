@@ -238,6 +238,7 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_codex():
         prompt_mode=None,
         prompt_layout=None,
         codex_stateful=False,
+        disabled_actions=[],
     )
 
     profile = build_activity_profile(args, registry)
@@ -272,6 +273,7 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_claude():
         prompt_layout=None,
         codex_stateful=False,
         claude_stateful=False,
+        disabled_actions=[],
     )
 
     profile = build_activity_profile(args, registry)
@@ -289,6 +291,7 @@ def test_build_activity_profile_applies_named_profile_overrides():
         recent_steps_to_keep=5,
         prompt_mode="stateful_delta",
         prompt_layout="cache_friendly",
+        disabled_actions=[],
     )
 
     profile = build_activity_profile(args)
@@ -301,6 +304,28 @@ def test_build_activity_profile_applies_named_profile_overrides():
     assert profile.recent_steps_to_keep == 5
     assert profile.prompt_mode == "stateful_delta"
     assert profile.prompt_layout == "cache_friendly"
+
+
+def test_build_activity_profile_can_disable_actions():
+    args = argparse.Namespace(
+        activity="bbs-door-line",
+        profile_objective=None,
+        agent_id="agent",
+        provider=None,
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        prompt_mode=None,
+        prompt_layout=None,
+        codex_stateful=False,
+        disabled_actions=["hangup"],
+    )
+
+    profile = build_activity_profile(args)
+
+    assert "hangup" not in profile.action_policy.allowed_actions
+    assert "submit_line" in profile.action_policy.allowed_actions
 
 
 def test_build_activity_route_set_applies_profile_overrides():
@@ -316,6 +341,7 @@ def test_build_activity_route_set_applies_profile_overrides():
         prompt_mode="stateful_delta",
         prompt_layout="cache_friendly",
         codex_stateful=False,
+        disabled_actions=[],
     )
 
     route_set = build_activity_route_set(args)
@@ -376,6 +402,7 @@ def test_build_match_participants_formats_objectives_and_logs(tmp_path):
         prompt_layout=None,
         codex_stateful=False,
         claude_stateful=False,
+        disabled_actions=[],
         log_path=str(tmp_path / "match.jsonl"),
     )
 
@@ -397,6 +424,7 @@ activity = "bbs-door-line"
 transport = "telnet"
 telnet_enter = "lf"
 run_objective = "Play as {agent_id}; opponents: {opponents}"
+disabled_actions = ["hangup"]
 log_path = "runtime/logs/melee.jsonl"
 
 [scheduler]
@@ -463,6 +491,7 @@ temperature = 0.6
         model_error_retries=None,
         prompt_mode=None,
         prompt_layout=None,
+        disabled_actions=[],
         log_path=str(tmp_path / "default.jsonl"),
         max_rounds=50,
         max_decision_ticks=50,
@@ -497,7 +526,9 @@ temperature = 0.6
     assert args.max_rounds == 250
     assert args.max_decision_ticks == 125
     assert args.max_wall_seconds == 3600
+    assert args.disabled_actions == ["hangup"]
     assert [spec.agent_id for spec in specs] == ["codex-blue", "gemma-green"]
+    assert "hangup" not in participants[0].runner.profile.action_policy.allowed_actions
     assert isinstance(participants[0].model, CodexCliAdapter)
     assert participants[0].model.stateful is True
     assert str(participants[0].model.session_file) == "runtime/codex-blue.session"

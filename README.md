@@ -255,10 +255,13 @@ single-key or partial-input prompts.
 participant gets its own terminal session, model adapter, stateful provider
 session, recent-step context, campaign memory, and per-agent trace; the match
 trace records per-round order, actions, disconnects, and reconnects. The
-current scheduler mode is `sequential`: agents act one at a time in the chosen
-per-round order. The default order is fixed CLI order, but competitive runs can
-use seeded shuffle or rotating first-player order. For example, a
-Claude-vs-Codex Tele-Arena smoke can use:
+default scheduler mode is `sequential`: agents act one at a time in the chosen
+per-round order. `parallel_barrier` asks active agents for decisions
+concurrently, then commits actions in the chosen order. `parallel_race` also
+asks concurrently, but commits each action as soon as that agent's decision is
+ready. The default order is fixed CLI order, but competitive runs can use seeded
+shuffle or rotating first-player order. For example, a Claude-vs-Codex
+Tele-Arena smoke can use:
 
 ```bash
 uv run bbs-gym run-match \
@@ -276,7 +279,8 @@ uv run bbs-gym run-match \
   --match-order shuffle \
   --match-seed 20260519 \
   --disconnect-policy reconnect \
-  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agent: {opponents}. Explore, survive, gain equipment, and battle opponents if you encounter them." \
+  --disable-action hangup \
+  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Stay connected; do not hang up or quit. Other active agents: {opponents}. Survive, gain experience and gold, buy and equip useful supplies, spend gold wisely, recover when hurt, find opponents, and defeat them when prepared." \
   --max-rounds 100 \
   --max-decision-ticks 100
 ```
@@ -291,9 +295,9 @@ uv run bbs-gym run-match --match-config examples/tele_arena_melee.toml
 `examples/tele_arena_melee.toml` shows a Codex, Claude, and local
 OpenAI-compatible model sharing one Tele-Arena server. Config files can set the
 activity, transport, budgets, objective template, scheduler mode/order/seed,
-disconnect policy, and per-participant provider settings. Config values are
-treated as the match definition when `--match-config` is used. Parallel
-scheduler modes are reserved for the next runner phase-splitting pass.
+disconnect policy, disabled actions, and per-participant provider settings.
+Config values are treated as the match definition when `--match-config` is used.
+The `continuous` scheduler mode is reserved for a future always-running race scheduler.
 
 Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
 servers with prefix caching. The default `timeline_first` layout preserves the

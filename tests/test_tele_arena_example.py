@@ -31,6 +31,7 @@ def test_tele_arena_example_defaults_to_bbs_door_line_with_lf_enter():
     assert _option(argv, "--provider") == "codex"
     assert _option(argv, "--model") == "gpt-5.5"
     assert _option(argv, "--run-objective") == DEFAULT_RUN_OBJECTIVE
+    assert _option(argv, "--disable-action") == "hangup"
 
 
 def test_tele_arena_example_can_select_safe_activity():

@@ -6,7 +6,8 @@ activity = "bbs-door-line"
 prompt_layout = "cache_friendly"
 recent_steps_to_keep = 5
 log_path = "runtime/logs/tele-arena-melee.jsonl"
-run_objective = "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agents: {opponents}. Explore, survive, gain equipment, find opponents, and battle opponents if you encounter them."
+disabled_actions = ["hangup"]
+run_objective = "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Stay connected; do not hang up or quit. Other active agents: {opponents}. Survive, gain experience and gold, buy and equip useful supplies, spend gold wisely, recover when hurt, find opponents, and defeat them when prepared."
 
 [scheduler]
 mode = "sequential"

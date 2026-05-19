@@ -183,6 +183,18 @@ class ActivityRunState:
     completed: bool = False
 
 
+@dataclass
+class PreparedActivityStep:
+    observation: Observation | None = None
+    active_profile: ActivityProfile | None = None
+    route_events: list[dict[str, Any]] = field(default_factory=list)
+    prompt: DecisionPrompt | None = None
+    prompt_module_results: list[PromptModuleResult] = field(default_factory=list)
+    action: Action | None = None
+    validation: dict[str, Any] = field(default_factory=dict)
+    terminal_step: StepRecord | None = None
+
+
 class ActivityRunner:
     def __init__(
             self,
@@ -222,6 +234,20 @@ class ActivityRunner:
             | None = None,
             stop_on_completion: bool = True,
     ) -> StepRecord | None:
+        prepared = self.prepare_step(
+            state,
+            profile_selector=profile_selector,
+            stop_on_completion=stop_on_completion,
+        )
+        return self.commit_prepared_step(state, prepared, stop_on_completion=stop_on_completion)
+
+    def prepare_step(
+            self,
+            state: ActivityRunState,
+            profile_selector: Callable[[Observation, ActivityProfile], tuple[ActivityProfile, list[dict[str, Any]]]]
+            | None = None,
+            stop_on_completion: bool = True,
+    ) -> PreparedActivityStep | None:
         if state.completed:
             return None
         if not state.budget.remaining():
@@ -254,35 +280,29 @@ class ActivityRunner:
 
         if stop_on_completion and active_profile.should_exit(observation, None, state.budget):
             state.stop_reason = "profile_complete"
-            step = self._terminal_step_record(
-                step_number=len(state.all_steps) + 1,
-                observation=observation,
-                budget=state.budget,
-                stop_reason=state.stop_reason,
-                active_profile=active_profile,
-                events=route_events,
-            )
-            state.all_steps.append(step)
-            state.recent_steps.append(step)
-            self._write_step(step)
             state.completed = True
-            return step
+            return PreparedActivityStep(
+                terminal_step=self._record_terminal_step(
+                    state,
+                    observation=observation,
+                    stop_reason=state.stop_reason,
+                    active_profile=active_profile,
+                    events=route_events,
+                )
+            )
 
         if not state.budget.remaining():
             state.stop_reason = "budget"
-            step = self._terminal_step_record(
-                step_number=len(state.all_steps) + 1,
-                observation=observation,
-                budget=state.budget,
-                stop_reason=state.stop_reason,
-                active_profile=active_profile,
-                events=route_events,
-            )
-            state.all_steps.append(step)
-            state.recent_steps.append(step)
-            self._write_step(step)
             state.completed = True
-            return step
+            return PreparedActivityStep(
+                terminal_step=self._record_terminal_step(
+                    state,
+                    observation=observation,
+                    stop_reason=state.stop_reason,
+                    active_profile=active_profile,
+                    events=route_events,
+                )
+            )
 
         if self._should_compact(state.all_steps, state.recent_steps):
             state.session_summary = self._compact(
@@ -322,6 +342,37 @@ class ActivityRunner:
 
         action, validation = self._decide_with_retry(state.model, prompt)
         state.decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
+        return PreparedActivityStep(
+            observation=observation,
+            active_profile=active_profile,
+            route_events=route_events,
+            prompt=prompt,
+            prompt_module_results=prompt_module_results,
+            action=action,
+            validation=validation,
+        )
+
+    def commit_prepared_step(
+            self,
+            state: ActivityRunState,
+            prepared: PreparedActivityStep | None,
+            stop_on_completion: bool = True,
+    ) -> StepRecord | None:
+        if prepared is None:
+            return None
+        if prepared.terminal_step is not None:
+            return prepared.terminal_step
+        if prepared.observation is None or prepared.active_profile is None or prepared.prompt is None:
+            return None
+
+        observation = prepared.observation
+        active_profile = prepared.active_profile
+        prompt = prepared.prompt
+        action = prepared.action
+        validation = prepared.validation
+        route_events = prepared.route_events
+        prompt_module_results = prepared.prompt_module_results
+        self.profile = active_profile
         executed_action = action
         execution: dict[str, Any] = {}
         if action is None:
@@ -739,6 +790,27 @@ class ActivityRunner:
             run_objective=self.run_objective,
             events=list(events or []),
         )
+
+    def _record_terminal_step(
+            self,
+            state: ActivityRunState,
+            observation: Observation,
+            stop_reason: str,
+            active_profile: ActivityProfile | None = None,
+            events: list[dict[str, Any]] | None = None,
+    ) -> StepRecord:
+        step = self._terminal_step_record(
+            step_number=len(state.all_steps) + 1,
+            observation=observation,
+            budget=state.budget,
+            stop_reason=stop_reason,
+            active_profile=active_profile,
+            events=events,
+        )
+        state.all_steps.append(step)
+        state.recent_steps.append(step)
+        self._write_step(step)
+        return step
 
     def _execution_record(self, result: ActionExecution) -> dict[str, Any]:
         return result.to_dict()

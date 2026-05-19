@@ -279,8 +279,10 @@ validation failures.
 
 ## 10. Let Two Agents Play A Match
 
-`run-match` opens one telnet session per participant and alternates one
-decision tick per active agent. Inline participant specs use
+`run-match` opens one telnet session per participant. The default `sequential`
+scheduler alternates one decision tick per active agent. `parallel_barrier`
+collects decisions concurrently and commits them in the scheduled order;
+`parallel_race` commits actions as model decisions finish. Inline participant specs use
 `agent_id:provider:model`; each participant still gets its own per-agent JSONL
 trace and model state.
 
@@ -298,7 +300,8 @@ uv run bbs-gym run-match \
   --claude-stateful \
   --prompt-layout cache_friendly \
   --log-path runtime/logs/tele-arena-match.jsonl \
-  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agent: {opponents}. Explore, survive, gain equipment, and battle opponents if you encounter them." \
+  --disable-action hangup \
+  --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Stay connected; do not hang up or quit. Other active agents: {opponents}. Survive, gain experience and gold, buy and equip useful supplies, spend gold wisely, recover when hurt, find opponents, and defeat them when prepared." \
   --max-rounds 100 \
   --max-decision-ticks 100
 ```
@@ -316,5 +319,6 @@ use the same stem, for example `tele-arena-match.arena-codex.jsonl` and
   before Enter.
 - The wrapper is intentionally thin; pass any extra `bbs-gym run-activity`
   arguments after the wrapper arguments and they will be forwarded.
-- The current objective is conservative. For more exploratory runs, override
-  `--run-objective`.
+- Match-specific objectives should carry game strategy. Add
+  `--disable-action hangup` for competitive runs so agents cannot leave the
+  match with the harness-level hangup action.
