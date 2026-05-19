@@ -251,10 +251,13 @@ Ether/Tele-Arena where normal commands are submitted with Enter. It keeps
 `submit_line` available while preserving `press_key` and `type_text` for
 single-key or partial-input prompts.
 
-`run-match` runs several agents against the same BBS or door server in
-round-robin order. Each participant gets its own terminal session, model
-adapter, stateful provider session, recent-step context, campaign memory, and
-per-agent trace; the match trace records the schedule. For example, a
+`run-match` runs several agents against the same BBS or door server. Each
+participant gets its own terminal session, model adapter, stateful provider
+session, recent-step context, campaign memory, and per-agent trace; the match
+trace records per-round order, actions, disconnects, and reconnects. The
+current scheduler mode is `sequential`: agents act one at a time in the chosen
+per-round order. The default order is fixed CLI order, but competitive runs can
+use seeded shuffle or rotating first-player order. For example, a
 Claude-vs-Codex Tele-Arena smoke can use:
 
 ```bash
@@ -269,10 +272,28 @@ uv run bbs-gym run-match \
   --participant arena-claude:claude:sonnet \
   --codex-stateful \
   --claude-stateful \
+  --scheduler-mode sequential \
+  --match-order shuffle \
+  --match-seed 20260519 \
+  --disconnect-policy reconnect \
   --run-objective "Play Tele-Arena as {agent_id}. If asked for a character name, create or log in as {agent_id}. Other active agent: {opponents}. Explore, survive, gain equipment, and battle opponents if you encounter them." \
   --max-rounds 100 \
   --max-decision-ticks 100
 ```
+
+For larger melees, put the participant roster and scheduler settings in a
+TOML or JSON file:
+
+```bash
+uv run bbs-gym run-match --match-config examples/tele_arena_melee.toml
+```
+
+`examples/tele_arena_melee.toml` shows a Codex, Claude, and local
+OpenAI-compatible model sharing one Tele-Arena server. Config files can set the
+activity, transport, budgets, objective template, scheduler mode/order/seed,
+disconnect policy, and per-participant provider settings. Config values are
+treated as the match definition when `--match-config` is used. Parallel
+scheduler modes are reserved for the next runner phase-splitting pass.
 
 Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
 servers with prefix caching. The default `timeline_first` layout preserves the

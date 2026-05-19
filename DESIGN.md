@@ -439,15 +439,26 @@ enabled for line-oriented doors such as Ether/Tele-Arena. It is appropriate
 when most commands are text lines submitted with Enter and the two-step
 `type_text` plus `press_key enter` pattern is just decision overhead.
 
-`run-match` composes multiple activity states into a fair round-robin schedule.
-Each participant has a separate terminal session, model adapter, stateful
-provider session, recent-step context, campaign memory, and per-agent trace.
-The scheduler writes a small match trace that records which agent acted in each
-round, while the normal activity traces remain the source of detailed prompts,
-actions, observations, and memory updates.
+`run-match` composes multiple activity states into one shared environment. Each
+participant has a separate terminal session, model adapter, stateful provider
+session, recent-step context, campaign memory, and per-agent trace. The
+scheduler is policy-driven: sequential mode is implemented first, with fixed,
+seeded shuffle, and rotate order policies. Fixed order preserves
+reproducibility, seeded shuffle reduces first-mover bias, and rotate alternates
+first position without randomness. The scheduler writes match events for the
+per-round order, each agent action, disconnects, reconnect attempts, and final
+stop reasons, while the normal activity traces remain the source of detailed
+prompts, actions, observations, and memory updates.
 
-A future campaign runner should compose activities into longer fair
-model-vs-model schedules instead of replacing these activity and match runners.
+Melee runs are the same match abstraction with more participants and richer
+configuration. A TOML or JSON match config should own the roster, scheduler
+policy, reconnect policy, objective template, budgets, and per-participant
+provider settings. Parallel scheduler modes (`parallel_race`,
+`parallel_barrier`, and `continuous`) require the runner phase split described
+in the scheduler notes so model decisions and environment commits can be timed
+and traced separately. A future campaign runner should compose activities into
+longer fair model-vs-model schedules instead of replacing these activity and
+match runners.
 
 Memory is harness-owned:
 
