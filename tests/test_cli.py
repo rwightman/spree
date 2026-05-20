@@ -601,7 +601,6 @@ def test_handle_match_disconnect_reconnects_and_logs(tmp_path):
     state = argparse.Namespace(agent=old_agent, completed=True, stop_reason="disconnected")
     participant = MatchParticipantRuntime(
         spec=MatchParticipantSpec("arena-codex", "codex", "gpt-5.5"),
-        args=argparse.Namespace(),
         model=object(),
         model_metadata={"provider": "codex"},
         runner=object(),

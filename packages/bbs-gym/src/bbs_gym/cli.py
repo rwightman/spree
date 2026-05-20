@@ -224,7 +224,7 @@ def run_match(args: argparse.Namespace) -> int:
         for _, result in match_result.results
     )
     print(
-        f"match participants={len(match_result.results)} rounds={match_result.rounds} "
+        f"match participants={len(match_result.results)} commit_count={match_result.commit_count} "
         f"scheduler={scheduler.mode} {summary} log={match_log_path}"
     )
     return 0
@@ -349,6 +349,12 @@ def _validate_match_args(args: argparse.Namespace) -> None:
         raise ValueError("reconnect_delay must be >= 0")
     if args.max_workers is not None and args.max_workers < 1:
         raise ValueError("max_workers must be >= 1")
+    if args.max_rounds < 1:
+        raise ValueError("max_rounds must be >= 1")
+    if args.max_decision_ticks < 1:
+        raise ValueError("max_decision_ticks must be >= 1")
+    if args.max_wall_seconds <= 0:
+        raise ValueError("max_wall_seconds must be > 0")
 
 
 def build_match_scheduler_config(args: argparse.Namespace) -> MatchSchedulerConfig:
@@ -407,7 +413,9 @@ def _profile_with_action_overrides(profile: ActivityProfile, args: argparse.Name
     if not disabled_actions:
         return profile
     allowed_actions = frozenset(
-        action for action in profile.action_policy.allowed_actions if action not in disabled_actions
+        action
+        for action in profile.action_policy.allowed_actions
+        if action not in disabled_actions
     )
     return replace(profile, action_policy=replace(profile.action_policy, allowed_actions=allowed_actions))
 
@@ -460,7 +468,6 @@ def build_match_participants(
         participants.append(
             MatchParticipantRuntime(
                 spec=spec,
-                args=participant_args,
                 model=build_model(participant_args, registry),
                 model_metadata=build_model_metadata(participant_args, registry),
                 runner=runner,
@@ -1087,9 +1094,24 @@ def main(argv: list[str] | None = None) -> int:
         "--run-objective",
         help="match objective template; supports {agent_id} and {opponents}",
     )
-    match_parser.add_argument("--max-rounds", type=int, default=50)
-    match_parser.add_argument("--max-decision-ticks", type=int, default=50)
-    match_parser.add_argument("--max-wall-seconds", type=float, default=600.0)
+    match_parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=50,
+        help="maximum scheduled rounds; in continuous mode this is the maximum queued action count",
+    )
+    match_parser.add_argument(
+        "--max-decision-ticks",
+        type=int,
+        default=50,
+        help="maximum committed decision ticks per participant",
+    )
+    match_parser.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        default=600.0,
+        help="match-level wall-clock budget shared by all participants",
+    )
     match_parser.add_argument(
         "--scheduler-mode",
         choices=["sequential", "parallel_race", "parallel_barrier", "continuous"],

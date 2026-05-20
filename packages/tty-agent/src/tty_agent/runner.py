@@ -256,7 +256,6 @@ class ActivityRunner:
             return None
 
         active_profile = state.active_profile or self.profile
-        self.profile = active_profile
         try:
             observation = state.agent.observe_turn(
                 timeout=active_profile.observe_timeout,
@@ -274,7 +273,6 @@ class ActivityRunner:
         if profile_selector is not None:
             selected_profile, route_events = profile_selector(observation, active_profile)
             active_profile = selected_profile
-            self.profile = active_profile
         state.active_profile = active_profile
         state.last_observation = observation
 
@@ -304,22 +302,24 @@ class ActivityRunner:
                 )
             )
 
-        if self._should_compact(state.all_steps, state.recent_steps):
+        if self._should_compact(active_profile, state.all_steps, state.recent_steps):
             state.session_summary = self._compact(
+                active_profile,
                 state.model,
                 state.session_summary,
                 state.recent_steps,
                 observation,
             )
-            state.recent_steps = state.recent_steps[-self.profile.recent_steps_to_keep:]
+            state.recent_steps = state.recent_steps[-active_profile.recent_steps_to_keep:]
 
         hints = ObservationHints.from_observation(
             observation=observation,
             previous_observation=state.previous_observation,
             last_action=state.last_action_for_hints,
-            modality_profile=self.profile.input_modality_profile,
+            modality_profile=active_profile.input_modality_profile,
         )
         prompt_module_results = self._prompt_module_results(
+            active_profile,
             agent_id=state.agent_id,
             observation=observation,
             hints=hints,
@@ -329,8 +329,9 @@ class ActivityRunner:
             budget=state.budget,
         )
         profile_prompt_count = state.decision_prompts_sent.get(active_profile.name, 0)
-        prompt_stage = self._prompt_stage(profile_prompt_count)
+        prompt_stage = self._prompt_stage(active_profile, profile_prompt_count)
         prompt = self._build_decision_prompt(
+            active_profile,
             agent_id=state.agent_id,
             campaign_memory=state.campaign_memory,
             session_summary=state.session_summary,
@@ -340,7 +341,7 @@ class ActivityRunner:
             prompt_stage=prompt_stage,
         )
 
-        action, validation = self._decide_with_retry(state.model, prompt)
+        action, validation = self._decide_with_retry(active_profile, state.model, prompt)
         state.decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
         return PreparedActivityStep(
             observation=observation,
@@ -372,7 +373,6 @@ class ActivityRunner:
         validation = prepared.validation
         route_events = prepared.route_events
         prompt_module_results = prepared.prompt_module_results
-        self.profile = active_profile
         executed_action = action
         execution: dict[str, Any] = {}
         if action is None:
@@ -409,7 +409,7 @@ class ActivityRunner:
         )
         state.all_steps.append(step)
         state.recent_steps.append(step)
-        state.recent_steps = state.recent_steps[-self.profile.recent_steps_to_keep:]
+        state.recent_steps = state.recent_steps[-active_profile.recent_steps_to_keep:]
         self._write_step(step)
         state.previous_observation = observation
         state.last_action_for_hints = executed_action
@@ -430,7 +430,9 @@ class ActivityRunner:
 
     def finish_state(self, state: ActivityRunState) -> ActivityResult:
         if self._has_decision_steps(state.all_steps) and state.last_observation is not None:
+            active_profile = state.active_profile or self.profile
             patch = self._commit_memory(
+                active_profile,
                 state.model,
                 state.campaign_memory,
                 state.session_summary,
@@ -472,6 +474,7 @@ class ActivityRunner:
 
     def _build_decision_prompt(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
@@ -480,8 +483,9 @@ class ActivityRunner:
             prompt_module_results: list[PromptModuleResult],
             prompt_stage: PromptStage,
     ) -> DecisionPrompt:
-        if self.profile.prompt_mode == "stateful_delta" and prompt_stage == "delta":
+        if profile.prompt_mode == "stateful_delta" and prompt_stage == "delta":
             return self._build_stateful_delta_prompt(
+                profile,
                 agent_id=agent_id,
                 session_summary=session_summary,
                 recent_steps=recent_steps,
@@ -489,6 +493,7 @@ class ActivityRunner:
                 prompt_module_results=prompt_module_results,
             )
         return self._build_stateless_full_prompt(
+            profile,
             agent_id=agent_id,
             campaign_memory=campaign_memory,
             session_summary=session_summary,
@@ -500,6 +505,7 @@ class ActivityRunner:
 
     def _build_stateless_full_prompt(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
@@ -508,9 +514,10 @@ class ActivityRunner:
             prompt_module_results: list[PromptModuleResult],
             prompt_stage: PromptStage,
     ) -> DecisionPrompt:
-        system = self._build_full_system_prompt(prompt_stage)
-        if self.profile.prompt_layout == "cache_friendly":
+        system = self._build_full_system_prompt(profile, prompt_stage)
+        if profile.prompt_layout == "cache_friendly":
             user = self._build_cache_friendly_user_prompt(
+                profile,
                 agent_id=agent_id,
                 campaign_memory=campaign_memory,
                 session_summary=session_summary,
@@ -520,6 +527,7 @@ class ActivityRunner:
             )
         else:
             user = self._build_timeline_first_user_prompt(
+                profile,
                 agent_id=agent_id,
                 campaign_memory=campaign_memory,
                 session_summary=session_summary,
@@ -527,26 +535,27 @@ class ActivityRunner:
                 budget=budget,
                 prompt_module_results=prompt_module_results,
             )
-        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage=prompt_stage)
+        return DecisionPrompt(system=system, user=user, mode=profile.prompt_mode, stage=prompt_stage)
 
-    def _build_full_system_prompt(self, prompt_stage: PromptStage) -> str:
+    def _build_full_system_prompt(self, profile: ActivityProfile, prompt_stage: PromptStage) -> str:
         system_parts = [
             "You are controlling an interactive terminal session.",
             "You may make mistakes and recover from them.",
             "Return only a JSON action object.",
-            render_action_schema(self.profile.action_policy),
+            render_action_schema(profile.action_policy),
         ]
-        if self.profile.prompt_mode == "stateful_delta" and prompt_stage == "bootstrap":
+        if profile.prompt_mode == "stateful_delta" and prompt_stage == "bootstrap":
             system_parts.append(
                 "This is the stateful session bootstrap. Future prompts may omit stable instructions, campaign "
                 "memory, and full recent-step history; keep this context active across resumed calls."
             )
-        if self.profile.system_guidance:
-            system_parts.append(f"Activity-specific guidance:\n{self.profile.system_guidance}")
+        if profile.system_guidance:
+            system_parts.append(f"Activity-specific guidance:\n{profile.system_guidance}")
         return "\n".join(system_parts)
 
     def _build_timeline_first_user_prompt(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
@@ -556,14 +565,14 @@ class ActivityRunner:
     ) -> str:
         module_text = render_prompt_modules(prompt_module_results)
         return "\n\n".join(
-            self._objective_prompt_lines()
+            self._objective_prompt_lines(profile)
             + [
                 f"Agent: {agent_id}",
-                f"Activity: {self.profile.name}",
+                f"Activity: {profile.name}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                 f"Session summary: {self._summary_text(session_summary)}",
-                f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
+                f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
                 module_text,
@@ -573,6 +582,7 @@ class ActivityRunner:
 
     def _build_cache_friendly_user_prompt(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
@@ -582,13 +592,13 @@ class ActivityRunner:
     ) -> str:
         stable_module_text = render_prompt_modules(prompt_module_results, levels=STATIC_PROMPT_MODULE_LEVELS)
         tactical_module_text = render_prompt_modules(prompt_module_results, levels=TACTICAL_PROMPT_MODULE_LEVELS)
-        sections = self._objective_prompt_lines() + [
+        sections = self._objective_prompt_lines(profile) + [
             f"Agent: {agent_id}",
-            f"Activity: {self.profile.name}",
+            f"Activity: {profile.name}",
             stable_module_text,
             f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
             f"Session summary: {self._summary_text(session_summary)}",
-            f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
+            f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
             "---",
             f"Current step: {budget.decision_ticks + 1}",
             f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
@@ -599,6 +609,7 @@ class ActivityRunner:
 
     def _build_stateful_delta_prompt(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             session_summary: SessionSummary,
             recent_steps: list[StepRecord],
@@ -615,13 +626,13 @@ class ActivityRunner:
         )
         module_text = render_prompt_modules(prompt_module_results)
         user = "\n\n".join(
-            self._objective_prompt_lines(reminder=True)
+            self._objective_prompt_lines(profile, reminder=True)
             + [
                 f"Agent: {agent_id}",
-                f"Activity: {self.profile.name}",
+                f"Activity: {profile.name}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
                 f"Session summary update: {self._summary_text(session_summary)}",
-                f"Previous step:\n{self._previous_step_delta_text(recent_steps)}",
+                f"Previous step:\n{self._previous_step_delta_text(profile, recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
                 module_text,
@@ -629,23 +640,25 @@ class ActivityRunner:
                 "Return exactly one JSON action.",
             ]
         )
-        return DecisionPrompt(system=system, user=user, mode=self.profile.prompt_mode, stage="delta")
+        return DecisionPrompt(system=system, user=user, mode=profile.prompt_mode, stage="delta")
 
-    def _objective_prompt_lines(self, *, reminder: bool = False) -> list[str]:
+    def _objective_prompt_lines(self, profile: ActivityProfile | None = None, *, reminder: bool = False) -> list[str]:
+        profile = profile or self.profile
         suffix = " reminder" if reminder else ""
         lines: list[str] = []
         if self.run_objective:
             lines.append(f"Run objective{suffix}: {self.run_objective}")
-        lines.append(f"Profile objective{suffix}: {self.profile.objective}")
+        lines.append(f"Profile objective{suffix}: {profile.objective}")
         return lines
 
-    def _prompt_stage(self, decision_prompts_sent: int) -> PromptStage:
-        if self.profile.prompt_mode == "stateful_delta":
+    def _prompt_stage(self, profile: ActivityProfile, decision_prompts_sent: int) -> PromptStage:
+        if profile.prompt_mode == "stateful_delta":
             return "bootstrap" if decision_prompts_sent == 0 else "delta"
         return "full"
 
     def _prompt_module_results(
             self,
+            profile: ActivityProfile,
             agent_id: str,
             observation: Observation,
             hints: ObservationHints,
@@ -656,8 +669,8 @@ class ActivityRunner:
     ) -> list[PromptModuleResult]:
         context = PromptRenderContext(
             agent_id=agent_id,
-            activity_name=self.profile.name,
-            objective=self.profile.objective,
+            activity_name=profile.name,
+            objective=profile.objective,
             observation=observation,
             hints=hints,
             recent_steps=tuple(recent_steps),
@@ -666,13 +679,18 @@ class ActivityRunner:
             budget=budget,
             run_objective=self.run_objective,
         )
-        return collect_prompt_module_results(self.profile.prompt_modules, context)
+        return collect_prompt_module_results(profile.prompt_modules, context)
 
-    def _decide_with_retry(self, model: ModelAdapter, prompt: DecisionPrompt) -> tuple[Action | None, dict[str, Any]]:
+    def _decide_with_retry(
+            self,
+            profile: ActivityProfile,
+            model: ModelAdapter,
+            prompt: DecisionPrompt,
+    ) -> tuple[Action | None, dict[str, Any]]:
         invalid_responses: list[dict[str, str]] = []
         model_errors: list[dict[str, Any]] = []
 
-        action, first_error, attempt_errors = self._try_model_decision(model, prompt, "initial")
+        action, first_error, attempt_errors = self._try_model_decision(profile, model, prompt, "initial")
         model_errors.extend(attempt_errors)
         if action is not None:
             return action, self._accepted_validation(model, model_errors=model_errors)
@@ -681,9 +699,14 @@ class ActivityRunner:
         invalid_responses.append(self._invalid_response_record(model, "initial", first_error))
 
         retry_prompt = prompt
-        for retry in range(1, self.profile.invalid_json_retries + 1):
+        for retry in range(1, profile.invalid_json_retries + 1):
             retry_prompt = self._build_retry_prompt(prompt, first_error, retry)
-            action, retry_error, attempt_errors = self._try_model_decision(model, retry_prompt, f"repair-{retry}")
+            action, retry_error, attempt_errors = self._try_model_decision(
+                profile,
+                model,
+                retry_prompt,
+                f"repair-{retry}",
+            )
             model_errors.extend(attempt_errors)
             if action is not None:
                 return action, self._accepted_validation(
@@ -708,14 +731,15 @@ class ActivityRunner:
 
     def _try_model_decision(
             self,
+            profile: ActivityProfile,
             model: ModelAdapter,
             prompt: DecisionPrompt,
             stage: str,
     ) -> tuple[Action | None, str | None, list[dict[str, Any]]]:
         model_errors: list[dict[str, Any]] = []
-        for provider_attempt in range(0, self.profile.model_error_retries + 1):
+        for provider_attempt in range(0, profile.model_error_retries + 1):
             try:
-                return model.decide(prompt, self.profile.action_policy), None, model_errors
+                return model.decide(prompt, profile.action_policy), None, model_errors
             except ModelError as exc:
                 model_errors.append(self._model_error_record(exc, stage, provider_attempt))
             except ActionError as exc:
@@ -836,6 +860,7 @@ class ActivityRunner:
 
     def _compact(
             self,
+            profile: ActivityProfile,
             model: ModelAdapter,
             session_summary: SessionSummary,
             recent_steps: list[StepRecord],
@@ -849,10 +874,10 @@ class ActivityRunner:
                 "be a list of strings."
             ),
             user="\n\n".join(
-                self._objective_prompt_lines()
+                self._objective_prompt_lines(profile)
                 + [
                     f"Previous summary:\n{self._summary_text(session_summary)}",
-                    f"Steps to summarize:\n{self._recent_steps_text(recent_steps)}",
+                    f"Steps to summarize:\n{self._recent_steps_text(profile, recent_steps)}",
                     f"Current screen:\n{observation.model_text}",
                     "Preserve observed facts, failed commands, exact error messages, and unresolved goals.",
                 ]
@@ -872,6 +897,7 @@ class ActivityRunner:
 
     def _commit_memory(
             self,
+            profile: ActivityProfile,
             model: ModelAdapter,
             campaign_memory: dict[str, Any],
             session_summary: SessionSummary,
@@ -881,11 +907,11 @@ class ActivityRunner:
         prompt = MemoryCommitPrompt(
             system="Return a JSON memory patch for durable campaign memory.",
             user="\n\n".join(
-                self._objective_prompt_lines()
+                self._objective_prompt_lines(profile)
                 + [
                     f"Existing campaign memory:\n{json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                     f"Session summary:\n{self._summary_text(session_summary)}",
-                    f"Recent steps:\n{self._recent_steps_text(recent_steps)}",
+                    f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
                     f"Final screen:\n{observation.model_text}",
                     "Return JSON with durable_facts, strategy_notes, open_tasks, and errors_to_avoid when applicable.",
                 ]
@@ -937,13 +963,18 @@ class ActivityRunner:
             return text
         return text[:limit] + f"...[truncated {len(text) - limit} chars]"
 
-    def _should_compact(self, all_steps: list[StepRecord], recent_steps: list[StepRecord]) -> bool:
-        every = self.profile.compact_every_steps
+    def _should_compact(
+            self,
+            profile: ActivityProfile,
+            all_steps: list[StepRecord],
+            recent_steps: list[StepRecord],
+    ) -> bool:
+        every = profile.compact_every_steps
         if every > 0 and len(all_steps) > 0 and len(all_steps) % every == 0:
             return True
-        return self._steps_char_count(recent_steps) >= self.profile.compact_recent_chars
+        return self._steps_char_count(profile, recent_steps) >= profile.compact_recent_chars
 
-    def _steps_char_count(self, steps: list[StepRecord]) -> int:
+    def _steps_char_count(self, profile: ActivityProfile, steps: list[StepRecord]) -> int:
         total = 0
         for step in steps:
             obs = step.observation
@@ -954,53 +985,53 @@ class ActivityRunner:
                 if isinstance(value, str):
                     total += len(value)
             action = json.dumps(step.action or {}, sort_keys=True)
-            validation = json.dumps(self._validation_for_context(step.validation), sort_keys=True)
+            validation = json.dumps(self._validation_for_context(profile, step.validation), sort_keys=True)
             total += len(action) + len(validation)
         return total
 
-    def _recent_steps_text(self, steps: list[StepRecord]) -> str:
+    def _recent_steps_text(self, profile: ActivityProfile, steps: list[StepRecord]) -> str:
         if not steps:
             return "(none)"
         lines = []
         for index, step in enumerate(steps):
             after_text = "Current terminal observation below."
             if index + 1 < len(steps):
-                after_text = self._observation_effect_text(steps[index + 1].observation)
-            lines.append(self._step_context_text(step, after_text))
+                after_text = self._observation_effect_text(profile, steps[index + 1].observation)
+            lines.append(self._step_context_text(profile, step, after_text))
         return "\n\n".join(lines)
 
-    def _previous_step_delta_text(self, steps: list[StepRecord]) -> str:
+    def _previous_step_delta_text(self, profile: ActivityProfile, steps: list[StepRecord]) -> str:
         if not steps:
             return "(none)"
         step = steps[-1]
-        return self._step_context_text(step, "Current terminal observation below.")
+        return self._step_context_text(profile, step, "Current terminal observation below.")
 
-    def _step_context_text(self, step: StepRecord, after_text: str) -> str:
+    def _step_context_text(self, profile: ActivityProfile, step: StepRecord, after_text: str) -> str:
         action = step.action or {"action": "terminal_observation" if self._is_terminal_step(step) else "invalid"}
-        validation = self._validation_for_context(step.validation)
+        validation = self._validation_for_context(profile, step.validation)
         return "\n".join(
             [
                 f"Step {step.step}",
-                f"Observed before action:\n{self._screen_tail(step.observation.get('model_text', ''))}",
+                f"Observed before action:\n{self._screen_tail(profile, step.observation.get('model_text', ''))}",
                 f"Action chosen:\n{json.dumps(action, sort_keys=True)}",
                 f"Validation: {json.dumps(validation, sort_keys=True)}",
                 f"Observed after action:\n{after_text}",
             ]
         )
 
-    def _screen_tail(self, screen: Any) -> str:
-        if not isinstance(screen, str) or self.profile.screen_tail_chars <= 0:
+    def _screen_tail(self, profile: ActivityProfile, screen: Any) -> str:
+        if not isinstance(screen, str) or profile.screen_tail_chars <= 0:
             return ""
-        return screen[-self.profile.screen_tail_chars:]
+        return screen[-profile.screen_tail_chars:]
 
-    def _observation_effect_text(self, observation: dict[str, Any]) -> str:
-        new_text = self._screen_tail(observation.get("new_text", ""))
+    def _observation_effect_text(self, profile: ActivityProfile, observation: dict[str, Any]) -> str:
+        new_text = self._screen_tail(profile, observation.get("new_text", ""))
         if new_text:
             return new_text
-        return self._screen_tail(observation.get("model_text", ""))
+        return self._screen_tail(profile, observation.get("model_text", ""))
 
-    def _validation_for_context(self, validation: dict[str, Any]) -> dict[str, Any]:
-        if self.profile.include_model_responses_in_context:
+    def _validation_for_context(self, profile: ActivityProfile, validation: dict[str, Any]) -> dict[str, Any]:
+        if profile.include_model_responses_in_context:
             return validation
 
         context: dict[str, Any] = {}

@@ -442,27 +442,37 @@ when most commands are text lines submitted with Enter and the two-step
 `run-match` composes multiple activity states into one shared environment. Each
 participant has a separate terminal session, model adapter, stateful provider
 session, recent-step context, campaign memory, and per-agent trace. The
-scheduler is policy-driven: `sequential`, `parallel_barrier`, and
-`parallel_race` share fixed, seeded shuffle, and rotate order policies. Fixed
+scheduler is policy-driven: `sequential`, `parallel_barrier`, `parallel_race`,
+and `continuous` share fixed, seeded shuffle, and rotate order policies. Fixed
 order preserves reproducibility, seeded shuffle reduces first-mover bias, and
 rotate alternates first position without randomness. `parallel_barrier` splits
 each step into a decision phase and a commit phase: active agents decide
 concurrently, then actions are committed in the scheduled order. `parallel_race`
 uses the scheduled order as launch order but commits actions as soon as model
-decisions complete, making latency part of the competition. The scheduler writes
-match events for the per-round order, decision completion, each committed
-action, disconnects, reconnect attempts, and final stop reasons, while the
-normal activity traces remain the source of detailed prompts, actions,
-observations, and memory updates.
+decisions complete, making latency part of the competition. `continuous` keeps
+one decision in flight per active agent and immediately requeues an agent after
+its action commits, so faster models can take more initiative within the same
+match wall-clock budget. Choose `parallel_barrier` when fairness matters more
+than latency. The scheduler writes match events for match start/completion,
+per-round or per-tick order, decision completion, each committed action,
+disconnects, reconnect attempts, and final stop reasons, while the normal
+activity traces remain the source of detailed prompts, actions, observations,
+and memory updates.
 
 Melee runs are the same match abstraction with more participants and richer
 configuration. A TOML or JSON match config should own the roster, scheduler
 policy, reconnect policy, objective template, disabled action set, budgets, and
-per-participant provider settings. The `continuous` scheduler mode remains reserved for a future
-always-running race scheduler where decision count and wall-clock limits matter
-more than rounds. A future campaign runner should compose activities into longer
-fair model-vs-model schedules instead of replacing these activity and match
-runners.
+per-participant provider settings. `max_wall_seconds` is a match-level budget
+shared by every participant; `max_decision_ticks` remains per participant. In
+`continuous` mode, `max_rounds` is interpreted as the maximum number of queued
+action decisions for the whole match rather than full all-agent rounds. A future
+campaign runner should compose activities into longer fair model-vs-model
+schedules instead of replacing these activity and match runners.
+
+Continuous mode does not emit `round_started` or `round_completed`, because
+there are no all-agent rounds. Continuous scheduler events use `tick` for the
+committed action count; `commit_order` also records `queued_tick` for the
+decision request that produced the action.
 
 Memory is harness-owned:
 
