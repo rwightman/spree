@@ -18,6 +18,7 @@ max_reconnects = 3
 reconnect_delay = 2.0
 
 [budget]
+# Match-level wall-clock cap; decision ticks remain per participant.
 max_rounds = 2000
 max_decision_ticks = 2000
 max_wall_seconds = 86400

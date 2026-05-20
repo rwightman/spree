@@ -282,7 +282,10 @@ validation failures.
 `run-match` opens one telnet session per participant. The default `sequential`
 scheduler alternates one decision tick per active agent. `parallel_barrier`
 collects decisions concurrently and commits them in the scheduled order;
-`parallel_race` commits actions as model decisions finish. Inline participant specs use
+`parallel_race` commits actions as model decisions finish. `continuous` keeps
+one decision in flight per active agent and immediately requeues that agent
+after each committed action, so faster models get more chances to act during the
+same match wall-clock budget. Inline participant specs use
 `agent_id:provider:model`; each participant still gets its own per-agent JSONL
 trace and model state.
 
@@ -309,6 +312,12 @@ uv run bbs-gym run-match \
 The match trace goes to `runtime/logs/tele-arena-match.jsonl`. Per-agent traces
 use the same stem, for example `tele-arena-match.arena-codex.jsonl` and
 `tele-arena-match.arena-claude.jsonl`.
+
+For match runs, `--max-wall-seconds` is match-level. `--max-decision-ticks`
+still applies per participant. In `continuous` mode, `--max-rounds` caps the
+total queued action decisions for the whole match rather than full all-agent
+rounds. Continuous traces use `tick` instead of `round` for scheduler events and
+do not emit `round_started` / `round_completed` lifecycle events.
 
 ## Notes
 

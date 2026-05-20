@@ -254,14 +254,16 @@ single-key or partial-input prompts.
 `run-match` runs several agents against the same BBS or door server. Each
 participant gets its own terminal session, model adapter, stateful provider
 session, recent-step context, campaign memory, and per-agent trace; the match
-trace records per-round order, actions, disconnects, and reconnects. The
-default scheduler mode is `sequential`: agents act one at a time in the chosen
-per-round order. `parallel_barrier` asks active agents for decisions
-concurrently, then commits actions in the chosen order. `parallel_race` also
-asks concurrently, but commits each action as soon as that agent's decision is
-ready. The default order is fixed CLI order, but competitive runs can use seeded
-shuffle or rotating first-player order. For example, a Claude-vs-Codex
-Tele-Arena smoke can use:
+trace records match start/completion, per-round or per-tick order, actions,
+disconnects, and reconnects. The default scheduler mode is `sequential`: agents
+act one at a time in the chosen per-round order. `parallel_barrier` asks active
+agents for decisions concurrently, then commits actions in the chosen order.
+`parallel_race` also asks concurrently, but commits each action as soon as that
+agent's decision is ready. `continuous` keeps one decision in flight per active
+agent and immediately requeues that agent after each committed action; faster
+models get more initiative by design. The default order is fixed CLI order, but
+competitive runs can use seeded shuffle or rotating first-player order. For
+example, a Claude-vs-Codex Tele-Arena smoke can use:
 
 ```bash
 uv run bbs-gym run-match \
@@ -297,7 +299,12 @@ OpenAI-compatible model sharing one Tele-Arena server. Config files can set the
 activity, transport, budgets, objective template, scheduler mode/order/seed,
 disconnect policy, disabled actions, and per-participant provider settings.
 Config values are treated as the match definition when `--match-config` is used.
-The `continuous` scheduler mode is reserved for a future always-running race scheduler.
+For match runs, `--max-wall-seconds` is a match-level wall-clock budget shared
+by all participants, while `--max-decision-ticks` is per participant. In
+`continuous` mode, `--max-rounds` caps the number of queued action decisions for
+the whole match instead of all-agent rounds. Continuous traces use `tick`
+instead of `round` for scheduler events and do not emit `round_started` /
+`round_completed` lifecycle events.
 
 Use `--prompt-layout cache_friendly` when comparing local OpenAI-compatible
 servers with prefix caching. The default `timeline_first` layout preserves the
