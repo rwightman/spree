@@ -1,9 +1,10 @@
-# Next Design: Model Runner, Turns, Actions, And Memory
+# NEXT: Current State And Near-Term Work
 
-This document captures the current intended design for moving from a terminal
-observation harness to real agent play: a local model, such as a Gemma-family
-model served through an OpenAI-compatible endpoint, playing against a remote
-Claude/GPT-style API model on a live BBS and door-game environment.
+This document tracks the current implementation state and the next practical
+work for Spree. The project has moved past a single terminal-observation
+harness: `tty-agent` now provides the reusable terminal-agent core, and
+`bbs-gym` layers BBS, door-game, activity, routing, and match orchestration on
+top.
 
 The central rule remains:
 
@@ -32,9 +33,10 @@ Already present:
   - `pretty_screen`,
   - cursor position,
   - `stable_ms`,
+  - `byte_quiet_ms`,
   - `matched_prompt`,
   - `ready_reason`,
-  - transcript path.
+  - transcript path and transcript byte offsets.
 - Generic observation hints for recent terminal output, likely active prompt,
   input mode, echoed-input/no-effect detection, and unchanged screens.
 - Prompt modules with assistance levels:
@@ -44,20 +46,27 @@ Already present:
   - `strategic`.
 - Prompt-module provenance in JSONL step traces with rendered `{name, level,
   text}` records.
-- Basic prompt profiles for Synchronet BBS and TW2.
+- Prompt profiles for Synchronet BBS, TW2, broad BBS door-safe input, and
+  line-oriented BBS doors.
 - BBS-specific `bbs_gym` shell for Synchronet CP437 defaults, profiles,
   activities, Docker config, and CLI commands.
 - Structured actions and validation, including CP437 checks and one JSON repair
   retry with malformed-response logging.
 - Model adapter interfaces.
 - OpenAI-compatible and Anthropic HTTP adapters.
+- Codex CLI and Claude CLI adapters, including stateful resume/session-id
+  support.
 - Raw/filtered response tracking so reasoning tags can be logged while action
   parsing sees cleaned JSON.
 - Model-family response filters, including Gemma 4 thought-channel filtering.
 - Anthropic prompt caching for stable system prompts.
 - Single-agent activity runner.
-- TW2 entry activity profile.
-- TW2 in-game activity profile.
+- Routed activity runner with profile switches on fresh observations.
+- TW2 entry, TW2 in-game, `bbs-door-safe`, and `bbs-door-line` activity
+  profiles.
+- Run-level objectives and profile-specific objectives.
+- Prompt modes: `stateless_full` and `stateful_delta`.
+- Prompt layouts: `timeline_first` and `cache_friendly`.
 - JSON-backed memory store with dedupe/caps.
 - JSONL step logging.
 - Trace pretty-printer for JSONL activity logs.
@@ -65,14 +74,25 @@ Already present:
 - Agent account registry with Synchronet provisioning through `jsexec`.
 - Rlogin activity runs using pre-provisioned account identity.
 - JS TW2 reset and one-player turn-grant scripts for development runs.
-- Live TW2 smoke/play runs against a local OpenAI-compatible vLLM/Qwen server.
+- Telnet activity and match runs against Ether/Tele-Arena.
+- `run-match` with sequential, parallel barrier, parallel race, and continuous
+  scheduler modes.
+- Match config files for multi-agent/melee experiments.
+- Live TW2 smoke/play runs against local OpenAI-compatible vLLM servers and
+  Codex CLI.
+- Live Tele-Arena runs against Codex CLI and Claude CLI, including stateful
+  match experiments.
 
 Missing:
 
 - Real Synchronet node discovery/allocation.
-- Campaign scheduling.
-- Scoring/extraction.
-- Actual model-vs-model run against a configured local/API model pair.
+- Long-horizon campaign scheduling that composes activities, matches, social
+  phases, maintenance, and scoring.
+- Scoring/extraction for TW2, Tele-Arena, DOS doors, and social workflows.
+- Snapshot/reset orchestration beyond individual door reset scripts.
+- Optional PNG/image observations for multimodal models.
+- Stronger memory consolidation for long matches and repeated coordination
+  failures.
 
 The `tty_agent` package is intentionally separate from `bbs_gym`.
 Terminal observation, action validation, model adapters, memory, and the
@@ -82,14 +102,24 @@ scheduling, reset, and scoring stay in `bbs_gym`.
 
 ## Model Adapter Strategy
 
-Treat all model calls as stateless:
+The harness owns memory, compaction, and persistence. Provider-side session
+state is an optimization, not the source of truth.
+
+The default mode is stateless:
 
 ```text
-prompt in -> response out
+full harness prompt in -> response out
 ```
 
-Do not rely on provider memory features. The harness owns all memory,
-compaction, and persistence.
+For providers that preserve context across calls, `stateful_delta` can reduce
+prompt size:
+
+```text
+bootstrap prompt in -> provider session id
+delta prompt + resume session id -> response out
+```
+
+Traces and JSON memory remain authoritative in both modes.
 
 Use a common internal model interface:
 
@@ -114,12 +144,13 @@ Adapters can implement this for:
 - OpenAI GPT API.
 - Anthropic Claude API.
 - Codex CLI through `codex exec`.
+- Claude CLI through `claude -p`.
 
-The local and OpenAI API paths can share most of an OpenAI-compatible adapter.
-Claude should get a separate Anthropic adapter with the same internal contract.
-Codex should use a subprocess adapter that formats the same stateless prompt,
-runs `codex exec`, captures the final message, and feeds that text through the
-normal parser.
+The local and OpenAI API paths share the OpenAI-compatible adapter surface.
+Anthropic HTTP uses a separate adapter with the same internal contract. Codex
+and Claude CLI adapters use subprocess calls, capture the final message, and
+feed that text through the same parser, compactor, and memory commit paths as
+HTTP providers.
 
 Use the smallest common model API surface first:
 
@@ -137,9 +168,9 @@ stateless_full   Send full harness context on every decision tick.
 stateful_delta   Send one full bootstrap prompt, then smaller delta prompts for resumed provider sessions.
 ```
 
-`stateful_delta` should only be used with a provider path that preserves prior
-context, such as a future Codex CLI resume mode. It is not a substitute for
-harness-owned memory; traces and JSON memory remain the authoritative record.
+`stateful_delta` is currently useful for Codex CLI and Claude CLI stateful
+runs. It should not be used with stateless HTTP endpoints unless the provider
+explicitly offers a comparable resumable session.
 
 Codex stateful mode:
 
@@ -148,9 +179,16 @@ first tick     codex exec --json ...
 later ticks    codex exec resume <session_id> ...
 ```
 
-The adapter captures the session id from Codex JSONL events. `--codex-stateful`
-automatically selects `stateful_delta` prompts unless the run explicitly sets a
-different prompt mode.
+Claude stateful mode:
+
+```text
+first tick     claude -p --output-format json ...
+later ticks    claude -p --resume <session_id> --output-format json ...
+```
+
+The adapters capture provider session ids and can persist them to session files.
+`--codex-stateful` and `--claude-stateful` automatically select
+`stateful_delta` prompts unless the run explicitly sets a different prompt mode.
 
 Model families can need different response filters. The harness should keep raw
 responses in traces but parse actions from filtered text. Current families:
@@ -295,7 +333,7 @@ wait for screen quiescence
 produce Observation
 ```
 
-This is what `observe_turn()` is becoming. It should not know about game rules,
+This is what `observe_turn()` implements. It should not know about game rules,
 daily turns, scoring, or model memory.
 
 ### 2. Decision Tick
@@ -319,6 +357,7 @@ one TW2 session
 one BRE daily turn
 one social/message-board window
 one match round
+one continuous match window
 ```
 
 Campaign turns enforce fairness and sane limits.
@@ -395,21 +434,65 @@ def run_activity(agent, model, phase, memory, budget):
     memory.save_patch(agent.id, patch)
 ```
 
-## Campaign Scheduling
+## Match Scheduling
 
-Start with a round-based scheduler.
+`run-match` is the implemented multi-agent scheduler. It composes several
+activity states against one shared BBS or door server. Each participant keeps
+its own terminal session, model adapter, provider session, recent-step context,
+campaign memory namespace, and per-agent JSONL trace.
+
+Scheduler modes:
+
+```text
+sequential        One agent decides and commits at a time.
+parallel_barrier  Active agents decide concurrently; commits happen in scheduled order.
+parallel_race     Active agents decide concurrently; commits happen as decisions finish.
+continuous        Keep one decision in flight per active agent and requeue after each commit.
+```
+
+Order policies:
+
+```text
+fixed    Use participant order from CLI/config.
+shuffle  Seeded per-round/per-start shuffle to reduce first-mover bias.
+rotate   Rotate first position without randomness.
+```
+
+`parallel_race` and `continuous` intentionally make model latency part of the
+competition. Use `parallel_barrier` when fairness matters more than speed.
+
+Budget semantics:
+
+```text
+max_wall_seconds     Match-level wall clock shared by every participant.
+max_decision_ticks   Per-participant decision cap.
+max_rounds           Round cap for round-based modes.
+max_rounds           Queued-action cap in continuous mode.
+```
+
+Continuous mode has no all-agent rounds. Its scheduler events use `tick`, and
+`commit_order` records both the committed `tick` and the original
+`queued_tick`. It does not emit `round_started` or `round_completed`.
+
+The model should see the relevant budget in every prompt. Match logs should
+record scheduler config, participant specs, disconnect/reconnect events,
+decision completion, commit order, stop reasons, and final match completion.
+
+## Future Campaign Scheduling
+
+A campaign runner should sit above `run-activity`, `run-routed`, and
+`run-match`. It should compose social phases, door-game sessions, maintenance,
+score extraction, and resets into longer experiments.
 
 Example campaign turn:
 
 ```text
 campaign round N
   social phase
-    agent A can read/post/reply for up to X decision ticks
-    agent B can read/post/reply for up to X decision ticks
+    agents can read/post/reply for bounded decision ticks
 
   game phase
-    agent A gets one door session or up to Y decision ticks
-    agent B gets one door session or up to Y decision ticks
+    one single-agent activity, routed activity, or match
 
   social phase
     agents can react to game results or messages
@@ -418,15 +501,6 @@ campaign round N
     save logs
     extract scores
     optionally snapshot or reset
-```
-
-For continuous games, define a "game turn" as a budget:
-
-```text
-max_decision_ticks = 100
-max_wall_time = 10 minutes
-max_inputs = 200
-must_exit_to_bbs = true
 ```
 
 For daily-turn games:
@@ -445,33 +519,9 @@ max_chat_lines = 20
 max_wall_time = 5 minutes
 ```
 
-The model should see the budget in every prompt.
-
-## Sequential Before Concurrent
-
-Start with sequential execution:
-
-```text
-agent A social
-agent B social
-agent A game
-agent B game
-agent A post-game social
-agent B post-game social
-```
-
-Only add true concurrency when a game/profile benefits from it and is verified
-to support it.
-
-Reasons:
-
-- classic doors may have node/dropfile locking issues,
-- sequential execution is much easier to debug,
-- campaign fairness can be implemented without async complexity,
-- many games are effectively turn/session based anyway.
-
-TW2/TW2002 can later support concurrent sessions. BRE should default to
-serialized sessions until locking behavior is verified.
+TW2/TW2002-style games can be tested with concurrent agents. BRE and other
+single-node or lock-sensitive DOS doors should default to serialized sessions
+until locking behavior is verified.
 
 ## Node Model
 
@@ -610,45 +660,53 @@ max_parse_failures
 max_validation_failures
 ```
 
-### Observed TW2 Failure: Stale Prompt Text
+### Observed TW2 Failure: Stale Prompts And Auto-Accepted Input
 
-Live TW2 play exposed a concrete failure mode around trading.
+Live TW2 play exposed two separate terminal-facing failure modes.
 
-Observed sequence:
-
-1. At `How many holds of ore do you want to sell [20]?`, the model pressed
-   Enter and accepted the default quantity.
-2. At `Your offer?`, the model pressed Enter again, submitting a blank offer.
-3. TW2 returned to `Command (?=Help)?` without an obvious failure message.
-4. The screen tail still contained the old `Your offer?` text.
-5. On later decision ticks, the model sent `269` or `300`, but those numbers
-   were now sent at the command prompt, not at the trade-offer prompt.
-6. The model repeated the pattern after docking again.
-
-This was not action queuing. The runner only permits one action per model call:
+The first was stale prompt text. The rendered screen tail could still contain an
+old `Your offer?` line even though the live input prompt had already returned to
+`Command (?=Help)?`. Models then sent numeric trade offers at the command
+prompt. This was not action queuing; the runner only permits one action per
+model call:
 
 ```text
 observe stable screen -> model returns one action -> send one action -> observe again
 ```
 
-The issue is that the model over-weighted stale scrollback and under-weighted
-the actual current prompt. The harness has an I/O phase boundary, but it does
-not yet expose a domain/input phase such as `tw2_trade_offer_prompt` versus
-`tw2_command_prompt`.
+The fix path is mostly implemented:
 
-Preferred improvements, keeping the terminal environment open-ended:
+- Extract likely active prompt/current line separately from the full screen.
+- Render recent terminal output, likely active prompt, input mode, and previous
+  action effects as prompt modules.
+- Keep full screen/scrollback for context, but label it as reference material.
+- Log prompt-module text in traces for replay and ablation.
 
-- Keep active prompt/current-line extraction in every model prompt.
-- Keep recent terminal output, likely active prompt, input mode, and previous
-  action effects above the full screen in the decision prompt.
+The second failure was TW2's auto-accepting `InputFunc`. Some prompts accept a
+numeric or command value as soon as it is an exact match that cannot be extended.
+If the harness sends `submit_line "4"`, TW2 may consume only `4`, leave the
+terminating Enter in the input buffer, and let the next prompt consume that
+leftover Enter as an empty response. In trade prompts this silently cancels the
+haggle and returns to `Command (?=Help)?`.
+
+Current mitigation:
+
+- `tw2-game` can use specific TW2 guidance and action policy.
+- `bbs-door-safe` removes `submit_line` so capable models use `press_key` for
+  hotkeys and `type_text` for values, then observe before deciding whether
+  Enter is needed.
+- `bbs-door-line` keeps `submit_line` for line-oriented doors such as
+  Ether/Tele-Arena where normal commands are submitted with Enter.
+
+Remaining improvements:
+
 - Extract visible, non-privileged state facts from screen text only, such as
   sector, turns left, credits, cargo, current port, and whether the current port
   buys or sells the carried cargo.
-- Record repeated no-effect patterns in session memory, for example "blank
-  offer returned to Command prompt and did not change credits/cargo."
-- Optionally add profile-level warnings, not hard rejections, when the model
-  proposes inputs that look mismatched to the detected prompt. Example: sending
-  a numeric trade offer while the live prompt is `Command (?=Help)?`.
+- Record repeated no-effect or cancelled-input patterns in session memory, for
+  example "offer prompt returned to Command without changing credits/cargo."
+- Consider a generic typed-buffer note when a previous `type_text` appears to
+  be sitting at the prompt waiting for Enter.
 
 Do not solve this by reading TW2 database state inside the agent loop or by
 blocking arbitrary TW2 commands. The benchmark should still allow mistakes,
@@ -658,6 +716,12 @@ state clearer to the model.
 ## Memory Layers
 
 Use layered memory. Do not commit every inner tick directly to long-term memory.
+The next big memory task is staleness management: durable facts need evidence,
+confidence, scope, and recency so models do not keep acting on obsolete beliefs
+from earlier sessions. Long-running agents should distinguish stable facts
+("`?` opens help"), tentative state ("last seen in sector 58"), failed
+assumptions, and superseded facts, then age or retire stale entries during
+compaction and campaign-memory commits.
 
 ### 1. Raw Logs
 
@@ -926,32 +990,42 @@ If compaction fails repeatedly:
 
 ## Event Logs
 
-Every decision tick should emit a structured log.
+Every decision tick emits a structured per-agent JSONL step record. Match runs
+also emit a separate match JSONL stream for scheduler events.
 
-Suggested JSONL event:
+Per-agent step records include:
 
 ```json
 {
-  "match_id": "match-0001",
-  "campaign_turn": 3,
-  "phase": "tw2-game",
-  "agent_id": "agent-001",
-  "node": 1,
+  "active_profile": "tw2-game",
   "step": 42,
   "observation": {
     "model_text": "...",
     "pretty_screen": "...",
     "cursor": [12, 4],
     "stable_ms": 350,
+    "byte_quiet_ms": 0,
     "matched_prompt": "tw2-command",
     "ready_reason": "stable",
-    "transcript_path": "runtime/transcripts/agent-001.raw"
+    "transcript_path": "runtime/transcripts/agent-001.raw",
+    "transcript_byte_start": 12000,
+    "transcript_byte_end": 12750
   },
-  "prompt_path": "runtime/logs/match-0001/agent-001/step-0042.prompt.txt",
-  "model_response_path": "runtime/logs/match-0001/agent-001/step-0042.response.txt",
-  "parsed_action": {
+  "prompt": {
+    "mode": "stateless_full",
+    "layout": "timeline_first",
+    "system": "...",
+    "user": "..."
+  },
+  "prompt_modules": [
+    {"name": "terminal.recent_output", "level": "generic_terminal", "text": "..."}
+  ],
+  "action": {
     "action": "submit_line",
     "arguments": {"text": "?"}
+  },
+  "execution": {
+    "sent_bytes": {"len": 2, "repr": "?\\r", "hex": "3f0d"}
   },
   "validation": {
     "accepted": true,
@@ -965,8 +1039,14 @@ Suggested JSONL event:
 }
 ```
 
-Large prompt/response bodies should be stored as separate files to keep JSONL
-easy to scan.
+Match records include `match_started`, `agent_step_started`,
+`agent_decision_completed`, `commit_order`, `agent_step`,
+`participant_disconnected`, `participant_reconnected`, and `match_completed`.
+Round-based modes use `round`; continuous mode uses `tick`.
+
+Large prompt/response bodies are currently stored inline because that makes
+traces self-contained. If traces become too large for long campaigns, add an
+optional external-body mode rather than changing the default schema.
 
 ## Social And Message-Board Phases
 
@@ -1060,44 +1140,61 @@ Non-determinism remains from:
 
 Record seeds and model parameters where possible.
 
-## First Implementation Vertical Slice
+## Completed Vertical Slice
 
-Build in this order:
+The original vertical slice is complete:
 
-1. `Action` dataclass/schema and JSON parser. Done.
-2. `ModelAdapter` interface. Done.
-3. OpenAI-compatible text adapter. Done.
-4. Anthropic text adapter. Done.
-5. `ActivityBudget`. Done.
-6. Single-agent `ActivityRunner`. Done.
-7. JSONL step logs. Done.
-8. Basic memory store with JSON files. Done.
-9. Intra-session compaction call. Done.
-10. End-of-session memory commit call. Done.
-11. BBS main-menu activity profile. Done.
-12. TW2 entry profile. Done.
-13. Account/rlogin provisioning. Done.
-14. Run and tune one real local/API model through TW2 entry. Done.
-15. Run one real model through a bounded TW2 play session to turn exhaustion.
-    Done.
-16. Add active prompt/current-line extraction and visible state deltas. Done
-    for generic prompt/current-line hints and basic action-effect notes.
-17. Add real Synchronet node discovery/allocation.
-18. Two-agent sequential campaign runner.
+1. `Action` dataclass/schema and JSON parser.
+2. `ModelAdapter` interface.
+3. OpenAI-compatible text adapter.
+4. Anthropic text adapter.
+5. Codex CLI and Claude CLI adapters.
+6. `ActivityBudget`.
+7. Single-agent `ActivityRunner`.
+8. Routed activity runner.
+9. JSONL step logs.
+10. Basic memory store with JSON files.
+11. Intra-session compaction call.
+12. End-of-session memory commit call.
+13. BBS main-menu, TW2 entry, TW2 game, BBS door-safe, and BBS door-line
+    profiles.
+14. Account/rlogin provisioning.
+15. Active prompt/current-line extraction and action-effect notes.
+16. Trace pretty-printing and ANSI/GIF replay.
+17. Live TW2 runs with local OpenAI-compatible models and Codex.
+18. Live Zork runs through local PTY/Frotz.
+19. Live Tele-Arena runs through Ether.
+20. Multi-agent `run-match` with sequential, parallel barrier, parallel race,
+    and continuous scheduling.
 
-Do not start with a full async multi-agent scheduler. First prove:
-
-```text
-one agent can observe -> decide -> act -> recover from mistakes -> summarize
-```
-
-Then prove:
+This proves the core loop:
 
 ```text
-two agents can take bounded sequential campaign turns
+observe -> decide -> act -> recover -> compact -> commit memory
 ```
 
-Then add concurrency for doors that need it.
+and the multi-agent loop:
+
+```text
+multiple terminal sessions -> scheduled model decisions -> committed actions -> per-agent traces
+```
+
+## Next Implementation Milestones
+
+Prioritize work that improves reproducibility, scoring, and long-run behavior:
+
+1. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
+2. Add snapshot/reset tooling for `runtime/sbbs` and standalone door servers.
+3. Add score and task-completion extractors for TW2, Tele-Arena, TW2002/BRE, and
+   BBS social workflows.
+4. Improve memory consolidation for long activities and matches, especially
+   repeated coordination failures, learned command procedures, and strategic
+   state.
+5. Add a campaign runner above `run-activity`, `run-routed`, and `run-match` to
+   compose social phases, game phases, maintenance, scoring, and resets.
+6. Add DOS-door setup verification for TW2002 and BRE.
+7. Add optional PNG observation rendering from the pyte screen buffer for
+   multimodal models.
 
 ## Open Questions
 

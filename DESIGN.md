@@ -30,6 +30,8 @@ model/harness
 - Agent transcripts: `runtime/transcripts`.
 - Initial game target: Synchronet's bundled JavaScript `tw2` door.
 - Original DOS door target: BRE and TW2002 via the optional DOSEMU image.
+- Optional standalone door target: Tele-Arena through the Ether telnet server,
+  with setup notes in `TELE_ARENA.md`.
 - Optional local model server: vLLM, Ollama, or llama.cpp through an
   OpenAI-compatible `/v1/chat/completions` endpoint.
 - Optional CLI providers: local `codex exec` and `claude -p` subprocess calls
@@ -64,7 +66,8 @@ shell.
 - BBS and TW2 activity profiles,
 - agent account registry and Synchronet user provisioning,
 - `BbsGym` connection wiring,
-- future campaign/match scheduling, door resets, and score extraction.
+- routed activity profiles, match scheduling, door resets, and future score
+  extraction.
 
 The split is intentional. The terminal boundary, action schema, quiescence
 observer, and model loop are useful for shells, SSH sessions, TUI applications,
@@ -578,12 +581,14 @@ keystrokes.
 
 ## Multi-Agent Runner
 
-For model-vs-model play:
+For model-vs-model play, `run-match` now composes several activity states
+against one shared environment:
 
 1. Create one BBS account per model.
 2. Open one terminal session per account.
-3. Drive sessions concurrently.
-4. Tick each session independently:
+3. Drive sessions sequentially, in a parallel barrier, in a latency-biased race,
+   or continuously with one in-flight decision per active participant.
+4. Tick each session through the same activity runner machinery:
    - read bytes,
    - update virtual terminal,
    - build model observation,
@@ -700,13 +705,13 @@ locking behavior is verified.
 
 ## Next Implementation Milestones
 
-1. Tune TW2 in-game profile/memory from live traces, especially repeated trade
-   offer mistakes and command-prompt phase confusion.
-2. Add a sequential two-agent campaign runner that composes existing
-   `ActivityRunner` sessions.
-3. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
-4. Add snapshot/reset tooling for `runtime/sbbs`.
-5. Add score and task-completion extractors for TW2, TW2002/BRE, and BBS social
-   workflows.
+1. Add real Synchronet node discovery/allocation for rlogin/telnet sessions.
+2. Add snapshot/reset tooling for `runtime/sbbs` and standalone door servers.
+3. Add score and task-completion extractors for TW2, Tele-Arena, TW2002/BRE, and
+   BBS social workflows.
+4. Improve campaign memory consolidation across long match runs, especially
+   repeated coordination failures and discovered command procedures.
+5. Add a campaign runner that composes activities, social phases, maintenance,
+   score extraction, and match runs into longer fair schedules.
 6. Add DOS-door setup verification for TW2002 and BRE.
 7. Add optional PNG observation rendering from the pyte screen buffer.
