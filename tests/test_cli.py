@@ -9,6 +9,7 @@ from bbs_gym.cli import (
     build_model,
     build_model_metadata,
     match_participant_specs,
+    smoke,
 )
 from bbs_gym.match import (
     MatchParticipantRuntime,
@@ -18,6 +19,7 @@ from bbs_gym.match import (
     match_round_order,
 )
 from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
+from tty_agent.transports.base import SessionDisconnected
 
 
 def test_build_model_uses_agent_registry_model_config():
@@ -621,3 +623,33 @@ def test_handle_match_disconnect_reconnects_and_logs(tmp_path):
     events = [line for line in match_log.read_text(encoding="utf-8").splitlines() if line]
     assert '"type": "participant_disconnected"' in events[0]
     assert '"type": "participant_reconnected"' in events[1]
+
+
+def test_smoke_reports_disconnect_instead_of_tracebacking(monkeypatch, capsys, tmp_path):
+    """SessionDisconnected is a RuntimeError, so the CLI must catch it explicitly."""
+
+    class DisconnectingSession:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _seconds):
+            raise SessionDisconnected("remote terminal connection closed: [Errno 104] reset by peer")
+
+    monkeypatch.setattr("bbs_gym.cli.TelnetSession", DisconnectingSession)
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=2323,
+        timeout=1.0,
+        seconds=0.1,
+        tail=100,
+        transcript=str(tmp_path / "smoke.raw"),
+    )
+
+    assert smoke(args) == 1
+    assert "connection failed" in capsys.readouterr().err

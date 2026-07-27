@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..actions import ActionError, is_printable_key
-from .base import SessionDisconnected
+from .base import SessionDisconnected, TranscriptWriter
 
 IAC = 255
 DONT = 254
@@ -41,6 +41,10 @@ TELNET_ENTER_SEQUENCES = {
     "crlf": b"\r\n",
 }
 
+# A negotiation held across reads is at most a few bytes, so anything larger
+# means the stream lost its framing; drop it instead of buffering forever.
+MAX_PENDING_NEGOTIATION_BYTES = 4096
+
 
 @dataclass
 class TelnetSession:
@@ -51,21 +55,24 @@ class TelnetSession:
     encoding: str = "utf-8"
     enter_sequence: str = "cr"
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
-    _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _transcript: TranscriptWriter = field(init=False, repr=False)
     _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
-    _closed_by_peer: bool = field(default=False, init=False, repr=False)
+    _pending_negotiation: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _discarding_subnegotiation: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._transcript = TranscriptWriter(self.transcript_path)
 
     def connect(self) -> None:
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
         self._sock.setblocking(False)
+        self._transcript.open()
 
     def close(self) -> None:
         if self._sock is not None:
             self._sock.close()
             self._sock = None
-        if self.transcript_path is not None:
-            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            self.transcript_path.write_bytes(bytes(self._transcript))
+        self._transcript.close()
 
     def __enter__(self) -> "TelnetSession":
         self.connect()
@@ -102,10 +109,18 @@ class TelnetSession:
             ) from exc
 
     def send_bytes(self, payload: bytes) -> None:
-        if self._sock is None:
-            raise RuntimeError("session is not connected")
-        self._sock.sendall(payload)
+        self._write(payload)
         self._sent_bytes.append(bytes(payload))
+
+    def _write(self, payload: bytes) -> None:
+        """Write to the socket without recording it in the agent action trace."""
+
+        if self._sock is None:
+            raise SessionDisconnected("session is not connected")
+        try:
+            self._sock.sendall(payload)
+        except OSError as exc:
+            raise SessionDisconnected(f"remote terminal connection closed while sending: {exc}") from exc
 
     def drain_sent_bytes(self) -> tuple[bytes, ...]:
         chunks = tuple(self._sent_bytes)
@@ -113,13 +128,13 @@ class TelnetSession:
         return chunks
 
     def transcript_position(self) -> int:
-        return len(self._transcript)
+        return self._transcript.position()
 
     def read(self, seconds: float = 1.0) -> bytes:
         """Read for up to ``seconds`` and return application bytes."""
 
         if self._sock is None:
-            raise RuntimeError("session is not connected")
+            raise SessionDisconnected("session is not connected")
 
         deadline = time.monotonic() + seconds
         out = bytearray()
@@ -129,15 +144,23 @@ class TelnetSession:
             ready, _, _ = select.select([self._sock], [], [], min(0.2, remaining))
             if not ready:
                 continue
-            chunk = self._sock.recv(4096)
+            try:
+                chunk = self._sock.recv(4096)
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                # A peer that resets the connection surfaces here rather than as a
+                # clean zero-length read.
+                if out:
+                    break
+                raise SessionDisconnected(f"remote terminal connection closed: {exc}") from exc
             if not chunk:
-                self._closed_by_peer = True
                 if not out:
                     raise SessionDisconnected("remote terminal connection closed")
                 break
             app_data = self._handle_telnet(chunk)
             out.extend(app_data)
-            self._transcript.extend(app_data)
+            self._transcript.record(app_data)
 
         return bytes(out)
 
@@ -151,44 +174,101 @@ class TelnetSession:
         return bytes(out)
 
     def _handle_telnet(self, data: bytes) -> bytes:
-        if self._sock is None:
-            raise RuntimeError("session is not connected")
+        """Strip telnet negotiation from ``data`` and return application bytes.
 
+        Negotiations can straddle a TCP read, so an incomplete trailing sequence
+        is held over and resumed with the next chunk. Dropping it instead would
+        leak the continuation bytes into the application stream and leave the
+        option unanswered.
+        """
+
+        if self._sock is None:
+            raise SessionDisconnected("session is not connected")
+
+        buffer = bytes(self._pending_negotiation) + data
+        self._pending_negotiation.clear()
         out = bytearray()
         i = 0
 
-        while i < len(data):
-            byte = data[i]
+        if self._discarding_subnegotiation:
+            end = _subnegotiation_end(buffer, 0)
+            if end is None:
+                self._hold_trailing_iac(buffer)
+                return b""
+            self._discarding_subnegotiation = False
+            i = end
+
+        while i < len(buffer):
+            byte = buffer[i]
             if byte != IAC:
                 out.append(byte)
                 i += 1
                 continue
 
-            i += 1
-            if i >= len(data):
-                break
+            if i + 1 >= len(buffer):
+                self._hold_negotiation(buffer[i:])
+                return bytes(out)
 
-            command = data[i]
-            i += 1
+            command = buffer[i + 1]
 
             if command == IAC:
                 out.append(IAC)
+                i += 2
                 continue
 
             if command in (DO, DONT, WILL, WONT):
-                if i >= len(data):
-                    break
-                option = data[i]
-                i += 1
+                if i + 2 >= len(buffer):
+                    self._hold_negotiation(buffer[i:])
+                    return bytes(out)
+                option = buffer[i + 2]
                 response = WONT if command in (DO, DONT) else DONT
-                self._sock.sendall(bytes([IAC, response, option]))
+                self._write(bytes([IAC, response, option]))
+                i += 3
                 continue
 
             if command == SB:
-                while i < len(data):
-                    if data[i] == IAC and i + 1 < len(data) and data[i + 1] == SE:
-                        i += 2
-                        break
-                    i += 1
+                end = _subnegotiation_end(buffer, i + 2)
+                if end is None:
+                    if not self._hold_negotiation(buffer[i:]):
+                        # Too large to buffer. Keep skipping the payload as it
+                        # streams in; forgetting the state here would emit the
+                        # rest of the subnegotiation as terminal content.
+                        self._discarding_subnegotiation = True
+                        self._hold_trailing_iac(buffer)
+                    return bytes(out)
+                i = end
+                continue
+
+            i += 2
 
         return bytes(out)
+
+    def _hold_negotiation(self, tail: bytes) -> bool:
+        """Buffer an incomplete negotiation for the next read, if it is small."""
+
+        if len(tail) > MAX_PENDING_NEGOTIATION_BYTES:
+            return False
+        self._pending_negotiation.extend(tail)
+        return True
+
+    def _hold_trailing_iac(self, buffer: bytes) -> None:
+        """Keep a trailing IAC so an ``IAC SE`` split across reads still matches."""
+
+        if buffer.endswith(bytes([IAC])):
+            self._pending_negotiation.append(IAC)
+
+
+def _subnegotiation_end(buffer: bytes, start: int) -> int | None:
+    """Return the index just past the ``IAC SE`` that ends a subnegotiation."""
+
+    i = start
+    while i < len(buffer):
+        if buffer[i] != IAC:
+            i += 1
+            continue
+        if i + 1 >= len(buffer):
+            return None
+        if buffer[i + 1] == SE:
+            return i + 2
+        i += 2
+    return None

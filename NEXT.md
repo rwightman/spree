@@ -152,6 +152,12 @@ and Claude CLI adapters use subprocess calls, capture the final message, and
 feed that text through the same parser, compactor, and memory commit paths as
 HTTP providers.
 
+Every provider failure surfaces as `ModelError` (or `ModelTimeoutError`), whether
+it comes from a subprocess or from HTTP: non-2xx responses, unreachable hosts,
+read timeouts, non-JSON bodies, and unexpected response shapes. That keeps HTTP
+adapters on the same `model_error_retries`, malformed-response logging, and
+graceful-stop paths as the CLI adapters instead of aborting a run.
+
 Use the smallest common model API surface first:
 
 ```text
@@ -477,6 +483,14 @@ Continuous mode has no all-agent rounds. Its scheduler events use `tick`, and
 The model should see the relevant budget in every prompt. Match logs should
 record scheduler config, participant specs, disconnect/reconnect events,
 decision completion, commit order, stop reasons, and final match completion.
+
+Participant failures are isolated in every scheduler mode. An unexpected error
+while one agent decides or commits retires only that agent with
+`stop_reason="scheduler_error"` and an `agent_step_failed` event; the remaining
+participants keep playing and still reach `finish_state`, so their results and
+campaign-memory commits survive. A peer that drops between observing and acting
+stops that agent with `stop_reason="disconnected"`, which the reconnect policy can
+still act on.
 
 ## Future Campaign Scheduling
 

@@ -119,6 +119,12 @@ The raw transcript is authoritative and should always be preserved. The rendered
 model text is what we pass to models most of the time. The pretty render is for
 debugging, replay, and screenshots.
 
+Transports append to the transcript as bytes arrive rather than writing it once at
+close, so a transcript survives a crash or a killed run. A session that reconnects
+with the same transcript path appends to the existing file, and transcript
+positions are absolute offsets into that file, so a reconnect does not discard the
+bytes recorded before the disconnect.
+
 Current trace tooling:
 
 - `scripts/trace_pretty.py` renders JSONL activity logs into a readable text

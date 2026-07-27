@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..actions import ActionError, is_printable_key
-from .base import SessionDisconnected
+from .base import SessionDisconnected, TranscriptWriter
 
 
 PTY_KEY_BYTES = {
@@ -43,8 +43,11 @@ class PtySession:
     lines: int = 24
     _master_fd: int | None = field(default=None, init=False, repr=False)
     _proc: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
-    _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _transcript: TranscriptWriter = field(init=False, repr=False)
     _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._transcript = TranscriptWriter(self.transcript_path)
 
     def connect(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -64,6 +67,7 @@ class PtySession:
             os.close(slave_fd)
         self._master_fd = master_fd
         os.set_blocking(master_fd, False)
+        self._transcript.open()
 
     def resize(self, columns: int, lines: int) -> None:
         if columns <= 0 or lines <= 0:
@@ -84,9 +88,7 @@ class PtySession:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait(timeout=1)
-        if self.transcript_path is not None:
-            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            self.transcript_path.write_bytes(bytes(self._transcript))
+        self._transcript.close()
 
     def __enter__(self) -> "PtySession":
         self.connect()
@@ -115,8 +117,11 @@ class PtySession:
 
     def send_bytes(self, payload: bytes) -> None:
         if self._master_fd is None:
-            raise RuntimeError("session is not connected")
-        os.write(self._master_fd, payload)
+            raise SessionDisconnected("session is not connected")
+        try:
+            os.write(self._master_fd, payload)
+        except OSError as exc:
+            raise SessionDisconnected(f"local PTY process exited while sending: {exc}") from exc
         self._sent_bytes.append(bytes(payload))
 
     def drain_sent_bytes(self) -> tuple[bytes, ...]:
@@ -125,11 +130,11 @@ class PtySession:
         return chunks
 
     def transcript_position(self) -> int:
-        return len(self._transcript)
+        return self._transcript.position()
 
     def read(self, seconds: float = 1.0) -> bytes:
         if self._master_fd is None:
-            raise RuntimeError("session is not connected")
+            raise SessionDisconnected("session is not connected")
 
         deadline = time.monotonic() + seconds
         out = bytearray()
@@ -143,6 +148,8 @@ class PtySession:
                 continue
             try:
                 chunk = os.read(self._master_fd, 4096)
+            except BlockingIOError:
+                continue
             except OSError as exc:
                 if exc.errno == errno.EIO:
                     if not out:
@@ -154,7 +161,7 @@ class PtySession:
                     raise SessionDisconnected("local PTY process exited")
                 break
             out.extend(chunk)
-            self._transcript.extend(chunk)
+            self._transcript.record(chunk)
 
         return bytes(out)
 

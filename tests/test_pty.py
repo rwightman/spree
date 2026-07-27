@@ -88,6 +88,6 @@ def test_pty_drains_sent_byte_chunks():
 
 def test_pty_reports_transcript_position():
     session = PtySession([sys.executable, "-c", ""])
-    session._transcript.extend(b"abc")
+    session._transcript.record(b"abc")
 
     assert session.transcript_position() == 3

@@ -10,6 +10,7 @@ from bbs_gym.match import (
 )
 from tty_agent.actions import Action
 from tty_agent.agent import ActionExecution
+from tty_agent.memory import JsonMemoryStore
 from tty_agent.models import ScriptedModelAdapter
 from tty_agent.runner import ActivityProfile, ActivityRunner
 from tty_agent.terminal import Observation
@@ -336,11 +337,104 @@ class DelayedScriptedModelAdapter(ScriptedModelAdapter):
         return super().decide(prompt, policy)
 
 
-def participant(agent_id: str, tmp_path: Path, delay: float = 0.0) -> MatchParticipantRuntime:
+class ProviderFailureModel(ScriptedModelAdapter):
+    """Model whose provider fails in a way the runner does not classify."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def decide(self, _prompt, _policy=None):
+        raise RuntimeError("HTTP 503 from http://localhost:11434/v1: server busy")
+
+
+def test_sequential_match_isolates_one_participant_failure(tmp_path):
+    participants = [
+        participant("alpha", tmp_path),
+        participant("boom", tmp_path, model=ProviderFailureModel()),
+    ]
+    match_log = tmp_path / "isolated.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        participants,
+        MatchSchedulerConfig(mode="sequential", max_rounds=2, max_decision_ticks=5, max_wall_seconds=60),
+        match_log,
+    )
+
+    stop_reasons = {activity.agent_id: activity.stop_reason for _, activity in result.results}
+    assert stop_reasons == {"alpha": "match_rounds", "boom": "scheduler_error"}
+    assert dict((activity.agent_id, len(activity.steps)) for _, activity in result.results)["alpha"] == 2
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    failures = [event for event in events if event["type"] == "agent_step_failed"]
+    assert [event["agent_id"] for event in failures] == ["boom"]
+    assert "HTTP 503" in failures[0]["error"]
+    assert events[-1]["type"] == "match_completed"
+    assert events[-1]["clean_exit"] is True
+
+
+def test_match_keeps_accounting_when_finalization_fails(tmp_path):
+    """A failed finish must not erase a participant's committed steps."""
+
+    participants = [participant("alpha", tmp_path), participant("bravo", tmp_path)]
+
+    def explode(_state):
+        raise OSError("disk full while saving campaign memory")
+
+    participants[1].runner.finish_state = explode
+    match_log = tmp_path / "finish-failed.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        participants,
+        MatchSchedulerConfig(mode="sequential", max_rounds=2, max_decision_ticks=5, max_wall_seconds=60),
+        match_log,
+    )
+
+    assert [activity.agent_id for _, activity in result.results] == ["alpha", "bravo"]
+    assert result.commit_count == 4
+    stop_reasons = {activity.agent_id: activity.stop_reason for _, activity in result.results}
+    assert stop_reasons["bravo"] == "finish_failed"
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    assert [event["agent_id"] for event in events if event["type"] == "agent_finish_failed"] == ["bravo"]
+    assert events[-1]["clean_exit"] is False
+    assert "bravo" in events[-1]["error"]
+    assert events[-1]["commit_count"] == 4
+
+
+def test_sequential_match_commits_memory_when_one_participant_fails(tmp_path):
+    participants = [
+        participant("alpha", tmp_path),
+        participant("boom", tmp_path, model=ProviderFailureModel()),
+    ]
+
+    run_scheduled_match(
+        FakeGym(),
+        participants,
+        MatchSchedulerConfig(mode="sequential", max_rounds=1, max_decision_ticks=5, max_wall_seconds=60),
+        tmp_path / "memory-commit.jsonl",
+    )
+
+    assert (tmp_path / "memory" / "alpha" / "campaign.json").exists()
+
+
+def participant(
+        agent_id: str,
+        tmp_path: Path,
+        delay: float = 0.0,
+        model: object | None = None,
+) -> MatchParticipantRuntime:
     return MatchParticipantRuntime(
         spec=MatchParticipantSpec(agent_id, "scripted", "unused"),
-        model=DelayedScriptedModelAdapter(['{"action": "wait", "arguments": {}}'], delay),
+        model=model or DelayedScriptedModelAdapter(['{"action": "wait", "arguments": {}}'], delay),
         model_metadata={"provider": "scripted"},
-        runner=ActivityRunner(ActivityProfile(name="test", objective="test"), log_path=tmp_path / f"{agent_id}.jsonl"),
+        runner=ActivityRunner(
+            ActivityProfile(name="test", objective="test"),
+            # Keep campaign commits inside the test's tmp_path; the default store
+            # writes into the shared runtime/memory tree used by live runs.
+            memory_store=JsonMemoryStore(tmp_path / "memory"),
+            log_path=tmp_path / f"{agent_id}.jsonl",
+        ),
         log_path=tmp_path / f"{agent_id}.jsonl",
     )

@@ -121,7 +121,7 @@ def run_scheduled_match(
                     state.stop_reason = _match_limit_stop_reason(scheduler)
                     state.completed = True
 
-        results = [(participant, participant.runner.finish_state(state)) for participant, state in states]
+        results, finish_failures = _finish_states(states, match_log_path)
     except Exception as exc:
         _write_match_completed(
             match_log_path,
@@ -143,6 +143,8 @@ def run_scheduled_match(
         results,
         scheduler,
         match_started_at,
+        clean_exit=not finish_failures,
+        error=(f"finalization failed for: {', '.join(finish_failures)}" if finish_failures else ""),
     )
     return MatchRunResult(
         commit_count=commit_count,
@@ -271,7 +273,11 @@ def _run_sequential_match(
                 break
             started_at = time.monotonic()
             _write_agent_step_started(match_log_path, round_number, participant, phase="started")
-            step = participant.runner.run_step(state)
+            try:
+                step = participant.runner.run_step(state)
+            except Exception as exc:
+                _fail_participant_step(participant, state, exc, match_log_path, round_number)
+                step = None
             _write_match_event(
                 match_log_path,
                 {
@@ -510,19 +516,36 @@ def _future_preparation(
     try:
         return future.result()
     except Exception as exc:
-        state.stop_reason = "scheduler_error"
-        state.completed = True
-        _write_match_event(
-            match_log_path,
-            {
-                "type": "agent_step_failed",
-                **_event_clock(round_number, tick),
-                "agent_id": participant.spec.agent_id,
-                "error": str(exc),
-                "timestamp": time.time(),
-            },
-        )
+        _fail_participant_step(participant, state, exc, match_log_path, round_number, tick=tick)
         return None
+
+
+def _fail_participant_step(
+        participant: MatchParticipantRuntime,
+        state: Any,
+        error: BaseException,
+        match_log_path: Path,
+        round_number: int | None,
+        tick: int | None = None,
+) -> None:
+    """Retire one participant on an unexpected error without ending the match.
+
+    Every other participant keeps playing and still reaches ``finish_state``, so
+    their results and campaign-memory commits survive one agent's failure.
+    """
+
+    state.stop_reason = "scheduler_error"
+    state.completed = True
+    _write_match_event(
+        match_log_path,
+        {
+            "type": "agent_step_failed",
+            **_event_clock(round_number, tick),
+            "agent_id": participant.spec.agent_id,
+            "error": str(error),
+            "timestamp": time.time(),
+        },
+    )
 
 
 def _commit_parallel_step(
@@ -536,7 +559,11 @@ def _commit_parallel_step(
         tick: int | None = None,
 ) -> None:
     started_at = time.monotonic()
-    step = participant.runner.commit_prepared_step(state, prepared)
+    try:
+        step = participant.runner.commit_prepared_step(state, prepared)
+    except Exception as exc:
+        _fail_participant_step(participant, state, exc, match_log_path, round_number, tick=tick)
+        step = None
     _write_match_event(
         match_log_path,
         {
@@ -550,6 +577,52 @@ def _commit_parallel_step(
     _write_agent_step_event(match_log_path, round_number, participant, state, step, tick=tick)
     if state.completed and state.stop_reason == "disconnected":
         handle_match_disconnect(gym, participant, state, scheduler, match_log_path, round_number, tick=tick)
+
+
+def _finish_states(
+        states: list[tuple[MatchParticipantRuntime, Any]],
+        match_log_path: Path,
+) -> tuple[list[tuple[MatchParticipantRuntime, ActivityResult]], list[str]]:
+    """Finish every participant, keeping results when one memory commit fails.
+
+    A participant whose finalization fails still gets a result built from the
+    steps it already committed, so match accounting stays complete. The returned
+    failure list marks the match as an unclean exit.
+    """
+
+    results: list[tuple[MatchParticipantRuntime, ActivityResult]] = []
+    failures: list[str] = []
+    for participant, state in states:
+        try:
+            results.append((participant, participant.runner.finish_state(state)))
+        except Exception as exc:
+            failures.append(participant.spec.agent_id)
+            _write_match_event(
+                match_log_path,
+                {
+                    "type": "agent_finish_failed",
+                    "agent_id": participant.spec.agent_id,
+                    "error": str(exc),
+                    "timestamp": time.time(),
+                },
+            )
+            results.append((participant, _partial_result(participant, state)))
+    return results, failures
+
+
+def _partial_result(participant: MatchParticipantRuntime, state: Any) -> ActivityResult:
+    """Build a result from committed steps when finalization failed."""
+
+    runner = participant.runner
+    active_profile = state.active_profile or runner.profile
+    return ActivityResult(
+        activity=active_profile.name,
+        agent_id=state.agent_id,
+        steps=state.all_steps,
+        session_summary=state.session_summary,
+        stop_reason="finish_failed",
+        run_objective=runner.run_objective,
+    )
 
 
 def _max_workers(scheduler: MatchSchedulerConfig, active_count: int) -> int:

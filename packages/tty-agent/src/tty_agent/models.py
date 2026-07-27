@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import urllib.error
@@ -180,9 +182,10 @@ class TextChatAdapter:
         return filtered
 
     def _fallback_output_text(self) -> str:
-        if self.last_parsed_response or self.last_parsed_response != self.last_response:
-            return self.last_parsed_response
-        return self.last_response
+        # Deliberately the filtered text, not the raw response: when filters strip
+        # a response down to nothing the model only emitted reasoning, and raw
+        # reasoning must not be stored as a summary or memory patch.
+        return self.last_parsed_response
 
 
 class OpenAICompatibleAdapter(TextChatAdapter):
@@ -226,10 +229,12 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         )
         try:
             message = response["choices"][0]["message"]
-            self.last_reasoning = _optional_string(message.get("reasoning") or message.get("reasoning_content"))
-            return _optional_string(message.get("content"))
         except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(f"unexpected OpenAI-compatible response: {response!r}") from exc
+            raise ModelError(f"unexpected OpenAI-compatible response: {response!r}") from exc
+        if not isinstance(message, dict):
+            raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
+        self.last_reasoning = _optional_string(message.get("reasoning") or message.get("reasoning_content"))
+        return _optional_string(message.get("content"))
 
 
 class AnthropicAdapter(TextChatAdapter):
@@ -246,6 +251,7 @@ class AnthropicAdapter(TextChatAdapter):
             temperature: float = 0.2,
             max_tokens: int = 512,
             cache_system_prompt: bool = True,
+            output_filters: tuple[OutputFilter, ...] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key if api_key is not None else os.getenv("ANTHROPIC_API_KEY", "")
@@ -256,6 +262,7 @@ class AnthropicAdapter(TextChatAdapter):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.cache_system_prompt = cache_system_prompt
+        self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
         system = "\n\n".join(message.content for message in messages if message.role == "system")
@@ -292,12 +299,41 @@ class AnthropicAdapter(TextChatAdapter):
         )
         try:
             parts = response["content"]
-            return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
         except (KeyError, TypeError) as exc:
-            raise RuntimeError(f"unexpected Anthropic response: {response!r}") from exc
+            raise ModelError(f"unexpected Anthropic response: {response!r}") from exc
+        if not isinstance(parts, list):
+            raise ModelError(f"unexpected Anthropic response: {response!r}")
+        return "".join(
+            _optional_string(part.get("text"))
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
 
 
-class CodexCliAdapter(TextChatAdapter):
+class SubprocessCliAdapter(TextChatAdapter):
+    """Base for adapters that shell out to a local coding-agent CLI.
+
+    Subclasses supply the command to run; this base owns the session-id file used
+    to resume stateful conversations across calls.
+    """
+
+    session_id: str | None = None
+    session_file: Path | None = None
+
+    def _read_session_file(self) -> str | None:
+        if self.session_file is None or not self.session_file.exists():
+            return None
+        session_id = self.session_file.read_text(encoding="utf-8").strip()
+        return session_id or None
+
+    def _write_session_file(self) -> None:
+        if self.session_file is None or self.session_id is None:
+            return
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
+
+
+class CodexCliAdapter(SubprocessCliAdapter):
     """Adapter that invokes the local ``codex exec`` CLI for each model call."""
 
     def __init__(
@@ -331,7 +367,7 @@ class CodexCliAdapter(TextChatAdapter):
             self.session_id = self._read_session_file()
 
     def chat(self, messages: list[ModelMessage]) -> str:
-        prompt_text = _codex_prompt_text(messages)
+        prompt_text = _cli_prompt_text(messages)
         with tempfile.TemporaryDirectory(prefix="tty-agent-codex-") as temp_dir:
             output_path = Path(temp_dir) / "last-message.txt"
             command = self._command(output_path)
@@ -427,20 +463,8 @@ class CodexCliAdapter(TextChatAdapter):
         command.append("-")
         return command
 
-    def _read_session_file(self) -> str | None:
-        if self.session_file is None or not self.session_file.exists():
-            return None
-        session_id = self.session_file.read_text(encoding="utf-8").strip()
-        return session_id or None
 
-    def _write_session_file(self) -> None:
-        if self.session_file is None or self.session_id is None:
-            return
-        self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
-
-
-class ClaudeCliAdapter(TextChatAdapter):
+class ClaudeCliAdapter(SubprocessCliAdapter):
     """Adapter that invokes the local ``claude -p`` CLI for each model call."""
 
     def __init__(
@@ -476,7 +500,7 @@ class ClaudeCliAdapter(TextChatAdapter):
             self.session_id = self._read_session_file()
 
     def chat(self, messages: list[ModelMessage]) -> str:
-        prompt_text = _claude_prompt_text(messages)
+        prompt_text = _cli_prompt_text(messages)
         command = self._command()
         if self.cwd is not None:
             self.cwd.mkdir(parents=True, exist_ok=True)
@@ -547,18 +571,6 @@ class ClaudeCliAdapter(TextChatAdapter):
             command.extend(["--tools", self.tools])
         command.extend(self.extra_args)
         return command
-
-    def _read_session_file(self) -> str | None:
-        if self.session_file is None or not self.session_file.exists():
-            return None
-        session_id = self.session_file.read_text(encoding="utf-8").strip()
-        return session_id or None
-
-    def _write_session_file(self) -> None:
-        if self.session_file is None or self.session_id is None:
-            return
-        self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
 
 
 class ScriptedModelAdapter(TextChatAdapter):
@@ -645,20 +657,9 @@ def _claude_adapter_name(model: str | None) -> str:
     return "claude"
 
 
-def _codex_prompt_text(messages: list[ModelMessage]) -> str:
-    lines = [
-        "You are being invoked non-interactively as a decision model for a tty-agent harness.",
-        "Do not run shell commands, inspect files, or modify the workspace.",
-        "Return only the final text requested by the harness.",
-        "",
-    ]
-    for message in messages:
-        role = message.role.upper()
-        lines.extend([f"{role} MESSAGE:", message.content.strip(), ""])
-    return "\n".join(lines).rstrip() + "\n"
+def _cli_prompt_text(messages: list[ModelMessage]) -> str:
+    """Flatten chat messages into one prompt for a coding-agent CLI."""
 
-
-def _claude_prompt_text(messages: list[ModelMessage]) -> str:
     lines = [
         "You are being invoked non-interactively as a decision model for a tty-agent harness.",
         "Do not run shell commands, inspect files, or modify the workspace.",
@@ -823,6 +824,12 @@ def _post_json(
         headers: dict[str, str] | None = None,
         timeout: float = 120.0,
 ) -> dict[str, object]:
+    """POST JSON and return the decoded response.
+
+    Every provider-side failure is raised as ``ModelError`` so HTTP adapters get
+    the same retry, logging, and graceful-stop handling as the CLI adapters.
+    """
+
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -835,10 +842,39 @@ def _post_json(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            # Decode defensively: an error page from a proxy in front of the
+            # provider need not be valid UTF-8, and a decode failure here would
+            # otherwise escape as a bare UnicodeDecodeError.
+            raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} from {url}: {detail}") from exc
+        detail = _read_error_body(exc)
+        raise ModelError(f"HTTP {exc.code} from {url}: {detail}", stderr=detail) from exc
+    except socket.timeout as exc:
+        raise ModelTimeoutError(f"request to {url} timed out after {timeout:g}s", stderr=str(exc)) from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, socket.timeout):
+            raise ModelTimeoutError(f"request to {url} timed out after {timeout:g}s", stderr=str(exc)) from exc
+        raise ModelError(f"could not reach {url}: {exc.reason}", stderr=str(exc)) from exc
+    except http.client.HTTPException as exc:
+        # Truncated or malformed HTTP framing, e.g. IncompleteRead when a
+        # provider drops the connection partway through the body.
+        raise ModelError(f"malformed HTTP response from {url}: {exc!r}", stderr=str(exc)) from exc
+    except OSError as exc:
+        raise ModelError(f"could not reach {url}: {exc}", stderr=str(exc)) from exc
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelError(f"non-JSON response from {url}: {exc}", stdout=raw[:2_000]) from exc
+
+
+def _read_error_body(error: urllib.error.HTTPError) -> str:
+    """Read an HTTP error body without letting a second failure escape."""
+
+    try:
+        return error.read().decode("utf-8", errors="replace")
+    except (OSError, http.client.HTTPException, ValueError):
+        return "(error body unavailable)"
 
 
 def _string_field(data: dict[str, object], key: str) -> str:

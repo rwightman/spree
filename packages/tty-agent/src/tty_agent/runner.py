@@ -22,8 +22,11 @@ from .models import (
     SessionSummary,
 )
 from .prompt_modules import (
+    DEFAULT_STABLE_LEVELS,
+    DEFAULT_TACTICAL_LEVELS,
     GENERIC_TERMINAL_MODULES,
     PROMPT_MODULES_SCHEMA_VERSION,
+    AssistanceLevel,
     PromptModule,
     PromptModuleResult,
     PromptRenderContext,
@@ -37,8 +40,6 @@ from .terminal import Observation
 PromptMode = Literal["stateless_full", "stateful_delta"]
 PromptLayout = Literal["timeline_first", "cache_friendly"]
 PromptStage = Literal["full", "bootstrap", "delta"]
-STATIC_PROMPT_MODULE_LEVELS = ("bbs_conventions", "game_interface", "strategic")
-TACTICAL_PROMPT_MODULE_LEVELS = ("generic_terminal",)
 
 
 @dataclass
@@ -102,6 +103,8 @@ class ActivityProfile:
     prompt_layout: PromptLayout = "timeline_first"
     input_modality_profile: InputModalityProfile = field(default_factory=InputModalityProfile)
     prompt_modules: tuple[PromptModule, ...] = field(default=GENERIC_TERMINAL_MODULES, repr=False, compare=False)
+    stable_prompt_module_levels: tuple[AssistanceLevel, ...] = DEFAULT_STABLE_LEVELS
+    tactical_prompt_module_levels: tuple[AssistanceLevel, ...] = DEFAULT_TACTICAL_LEVELS
     completion_check: Callable[[Observation], bool] | None = field(default=None, repr=False, compare=False)
 
     def should_exit(self, observation: Observation, action: Action | None, budget: ActivityBudget) -> bool:
@@ -380,12 +383,20 @@ class ActivityRunner:
 
         state.budget.consume_tick()
 
+        disconnected = False
         if action is not None:
             try:
                 execution = self._execution_record(state.agent.act_action(action))
             except ActionError as exc:
                 executed_action = None
                 state.budget.record_validation_failure()
+                validation = self._execution_error_validation(validation, str(exc))
+            except SessionDisconnected as exc:
+                # A peer can drop between observing and acting. Record the step and
+                # stop the same way a read-side disconnect does so a match
+                # scheduler can still reconnect this agent.
+                executed_action = None
+                disconnected = True
                 validation = self._execution_error_validation(validation, str(exc))
 
         step = StepRecord(
@@ -414,7 +425,10 @@ class ActivityRunner:
         state.previous_observation = observation
         state.last_action_for_hints = executed_action
 
-        if state.budget.too_many_validation_failures():
+        if disconnected:
+            state.stop_reason = "disconnected"
+            state.completed = True
+        elif state.budget.too_many_validation_failures():
             state.stop_reason = "validation_failures"
             state.completed = True
         elif executed_action and executed_action.action == "hangup":
@@ -590,8 +604,11 @@ class ActivityRunner:
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
     ) -> str:
-        stable_module_text = render_prompt_modules(prompt_module_results, levels=STATIC_PROMPT_MODULE_LEVELS)
-        tactical_module_text = render_prompt_modules(prompt_module_results, levels=TACTICAL_PROMPT_MODULE_LEVELS)
+        stable_module_text = render_prompt_modules(prompt_module_results, levels=profile.stable_prompt_module_levels)
+        tactical_module_text = render_prompt_modules(
+            prompt_module_results,
+            levels=profile.tactical_prompt_module_levels,
+        )
         sections = self._objective_prompt_lines(profile) + [
             f"Agent: {agent_id}",
             f"Activity: {profile.name}",

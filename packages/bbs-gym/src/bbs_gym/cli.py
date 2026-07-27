@@ -10,7 +10,7 @@ import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from tty_agent.ansi import strip_ansi
 from tty_agent.actions import DEFAULT_ALLOWED_ACTIONS
@@ -24,15 +24,19 @@ from tty_agent.models import (
 from tty_agent.models import output_filters_for_model
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
 from tty_agent.terminal import TerminalScreen, TurnObserver
+from tty_agent.transports.base import SessionDisconnected
 from tty_agent.transports.telnet import TelnetSession
 
 from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile
 from .env import BbsGym
 from .match import (
+    DisconnectPolicy,
+    MatchOrder,
     MatchParticipantRuntime,
     MatchParticipantSpec,
     MatchSchedulerConfig,
+    MatchSchedulerMode,
     run_scheduled_match,
 )
 from .profiles import BBS_PROFILE, TW2_PROFILE
@@ -52,7 +56,7 @@ def smoke(args: argparse.Namespace) -> int:
     try:
         with TelnetSession(args.host, args.port, args.timeout, transcript, encoding="cp437") as session:
             data = session.read(args.seconds)
-    except OSError as exc:
+    except (OSError, SessionDisconnected) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
@@ -85,7 +89,7 @@ def observe_turn(args: argparse.Namespace) -> int:
                 poll_interval=args.poll_interval,
                 prompt_fast_path=args.prompt_fast_path,
             )
-    except OSError as exc:
+    except (OSError, SessionDisconnected) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
@@ -135,7 +139,7 @@ def run_activity(args: argparse.Namespace) -> int:
                     max_wall_seconds=args.max_wall_seconds,
                 ),
             )
-    except (OSError, AccountConfigError, ValueError) as exc:
+    except (OSError, SessionDisconnected, AccountConfigError, ValueError) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
@@ -180,7 +184,7 @@ def run_routed(args: argparse.Namespace) -> int:
                     max_wall_seconds=args.max_wall_seconds,
                 ),
             )
-    except (OSError, AccountConfigError, ValueError) as exc:
+    except (OSError, SessionDisconnected, AccountConfigError, ValueError) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
@@ -215,7 +219,7 @@ def run_match(args: argparse.Namespace) -> int:
             agent_registry=registry,
         ) as gym:
             match_result = run_scheduled_match(gym, participants, scheduler, match_log_path)
-    except (OSError, AccountConfigError, ValueError) as exc:
+    except (OSError, SessionDisconnected, AccountConfigError, ValueError) as exc:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
@@ -289,7 +293,6 @@ def _apply_match_config(args: argparse.Namespace) -> None:
     )
     if "participants" in config:
         args._match_participants_config = _match_participant_specs_from_config(config["participants"])
-    _validate_match_args(args)
 
 
 def _load_match_config(path: Path) -> dict[str, Any]:
@@ -336,13 +339,15 @@ def _match_participant_specs_from_config(value: object) -> list[MatchParticipant
     return specs
 
 
+def _validate_choice(value: object, name: str, allowed: tuple[str, ...]) -> None:
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
+
+
 def _validate_match_args(args: argparse.Namespace) -> None:
-    if args.scheduler_mode not in {"sequential", "parallel_race", "parallel_barrier", "continuous"}:
-        raise ValueError("scheduler_mode must be one of: sequential, parallel_race, parallel_barrier, continuous")
-    if args.match_order not in {"fixed", "shuffle", "rotate"}:
-        raise ValueError("match_order must be one of: fixed, shuffle, rotate")
-    if args.disconnect_policy not in {"stop", "reconnect"}:
-        raise ValueError("disconnect_policy must be one of: stop, reconnect")
+    _validate_choice(args.scheduler_mode, "scheduler_mode", get_args(MatchSchedulerMode))
+    _validate_choice(args.match_order, "match_order", get_args(MatchOrder))
+    _validate_choice(args.disconnect_policy, "disconnect_policy", get_args(DisconnectPolicy))
     if args.max_reconnects < 0:
         raise ValueError("max_reconnects must be >= 0")
     if args.reconnect_delay < 0:
@@ -558,7 +563,6 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
     elif provider == "anthropic":
         model_name = args.model or _config_str(model_config, "model")
         if not model_name:
-            print("--model is required for anthropic provider", file=sys.stderr)
             raise ValueError("--model is required for anthropic provider")
         model = AnthropicAdapter(
             model=model_name,
@@ -567,6 +571,10 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             temperature=_config_float(args.temperature, model_config, "temperature", 0.2),
             max_tokens=_config_int(args.max_tokens, model_config, "max_tokens", 512),
             cache_system_prompt=not args.no_anthropic_cache,
+            output_filters=output_filters_for_model(
+                model_name,
+                args.response_filter or _config_str(model_config, "response_filter"),
+            ),
         )
     elif provider == "codex":
         model = CodexCliAdapter(
@@ -645,6 +653,7 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
             "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
             "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
             "cache_system_prompt": not args.no_anthropic_cache,
+            "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
         }
     if provider == "codex":
         model_name = args.model or _config_str(model_config, "model") or ""
@@ -863,6 +872,88 @@ def _config_int(value: int | None, config: dict[str, Any], key: str, default: in
     return int(config_value) if isinstance(config_value, int) else default
 
 
+def _add_connection_args(parser: argparse.ArgumentParser) -> None:
+    """Transport and account-registry options shared by every session command."""
+
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=2323)
+    parser.add_argument("--rlogin-port", type=int, default=2513)
+    parser.add_argument("--rlogin-terminal", default="ansi")
+    parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
+    parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
+    parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+
+
+def _add_model_args(parser: argparse.ArgumentParser) -> None:
+    """Model provider options shared by every session command."""
+
+    parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
+    parser.add_argument("--base-url")
+    parser.add_argument("--api-key")
+    parser.add_argument("--no-anthropic-cache", action="store_true")
+    parser.add_argument("--model")
+    parser.add_argument("--scripted-response", action="append", default=[])
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
+    parser.add_argument("--codex-profile")
+    parser.add_argument("--codex-executable")
+    parser.add_argument("--codex-timeout", type=float)
+    parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
+    parser.add_argument("--codex-cwd")
+    parser.add_argument("--codex-arg", action="append", default=[])
+    parser.add_argument("--codex-stateful", action="store_true")
+    parser.add_argument("--codex-session-id")
+    parser.add_argument("--codex-session-file")
+    parser.add_argument("--claude-executable")
+    parser.add_argument("--claude-timeout", type=float)
+    parser.add_argument("--claude-cwd")
+    parser.add_argument("--claude-arg", action="append", default=[])
+    parser.add_argument("--claude-stateful", action="store_true")
+    parser.add_argument("--claude-session-id")
+    parser.add_argument("--claude-session-file")
+    parser.add_argument(
+        "--claude-permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
+    )
+    parser.add_argument("--claude-tools")
+    parser.add_argument("--claude-bare", action="store_true")
+
+
+def _add_runner_args(
+        parser: argparse.ArgumentParser,
+        profile_objective_help: str,
+        run_objective_help: str,
+        max_decision_ticks: int,
+        max_wall_seconds: float,
+        log_path: str,
+        disabled_actions_help: str,
+        decision_ticks_help: str | None = None,
+        wall_seconds_help: str | None = None,
+) -> None:
+    """Budget, prompt-shaping, and logging options shared by every session command."""
+
+    parser.add_argument("--profile-objective", help=profile_objective_help)
+    parser.add_argument("--run-objective", help=run_objective_help)
+    parser.add_argument("--max-decision-ticks", type=int, default=max_decision_ticks, help=decision_ticks_help)
+    parser.add_argument("--max-wall-seconds", type=float, default=max_wall_seconds, help=wall_seconds_help)
+    parser.add_argument("--observe-timeout", type=float)
+    parser.add_argument("--stable-ms", type=int)
+    parser.add_argument("--byte-quiet-ms", type=int)
+    parser.add_argument("--recent-steps-to-keep", type=int)
+    parser.add_argument("--model-error-retries", type=int)
+    parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
+    parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
+    parser.add_argument(
+        "--disable-action",
+        dest="disabled_actions",
+        action="append",
+        default=[],
+        help=disabled_actions_help,
+    )
+    parser.add_argument("--log-path", default=log_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bbs-gym")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -891,152 +982,46 @@ def main(argv: list[str] | None = None) -> int:
     turn_parser.set_defaults(func=observe_turn)
 
     run_parser = subparsers.add_parser("run-activity", help="run a bounded model-driven BBS activity")
-    run_parser.add_argument("--host", default="127.0.0.1")
-    run_parser.add_argument("--port", type=int, default=2323)
-    run_parser.add_argument("--rlogin-port", type=int, default=2513)
-    run_parser.add_argument("--rlogin-terminal", default="ansi")
-    run_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
-    run_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
-    run_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    _add_connection_args(run_parser)
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument("--node", type=int)
-    run_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
-    run_parser.add_argument("--base-url")
-    run_parser.add_argument("--api-key")
-    run_parser.add_argument("--no-anthropic-cache", action="store_true")
-    run_parser.add_argument("--model")
-    run_parser.add_argument("--scripted-response", action="append", default=[])
-    run_parser.add_argument("--temperature", type=float)
-    run_parser.add_argument("--max-tokens", type=int)
-    run_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
-    run_parser.add_argument("--codex-profile")
-    run_parser.add_argument("--codex-executable")
-    run_parser.add_argument("--codex-timeout", type=float)
-    run_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
-    run_parser.add_argument("--codex-cwd")
-    run_parser.add_argument("--codex-arg", action="append", default=[])
-    run_parser.add_argument("--codex-stateful", action="store_true")
-    run_parser.add_argument("--codex-session-id")
-    run_parser.add_argument("--codex-session-file")
-    run_parser.add_argument("--claude-executable")
-    run_parser.add_argument("--claude-timeout", type=float)
-    run_parser.add_argument("--claude-cwd")
-    run_parser.add_argument("--claude-arg", action="append", default=[])
-    run_parser.add_argument("--claude-stateful", action="store_true")
-    run_parser.add_argument("--claude-session-id")
-    run_parser.add_argument("--claude-session-file")
-    run_parser.add_argument(
-        "--claude-permission-mode",
-        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
-    )
-    run_parser.add_argument("--claude-tools")
-    run_parser.add_argument("--claude-bare", action="store_true")
+    _add_model_args(run_parser)
     run_parser.add_argument("--activity", default="bbs-main-menu")
-    run_parser.add_argument(
-        "--profile-objective",
-        help="override the selected profile's built-in objective",
+    _add_runner_args(
+        run_parser,
+        profile_objective_help="override the selected profile's built-in objective",
+        run_objective_help="stable session goal included in prompts without replacing profile-specific guidance",
+        max_decision_ticks=20,
+        max_wall_seconds=300.0,
+        log_path="runtime/logs/activity.jsonl",
+        disabled_actions_help=(
+            "remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup"
+        ),
     )
-    run_parser.add_argument(
-        "--run-objective",
-        help="stable session goal included in prompts without replacing profile-specific guidance",
-    )
-    run_parser.add_argument("--max-decision-ticks", type=int, default=20)
-    run_parser.add_argument("--max-wall-seconds", type=float, default=300.0)
-    run_parser.add_argument("--observe-timeout", type=float)
-    run_parser.add_argument("--stable-ms", type=int)
-    run_parser.add_argument("--byte-quiet-ms", type=int)
-    run_parser.add_argument("--recent-steps-to-keep", type=int)
-    run_parser.add_argument("--model-error-retries", type=int)
-    run_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
-    run_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
-    run_parser.add_argument(
-        "--disable-action",
-        dest="disabled_actions",
-        action="append",
-        default=[],
-        help="remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup",
-    )
-    run_parser.add_argument("--log-path", default="runtime/logs/activity.jsonl")
     run_parser.set_defaults(func=run_activity)
 
     routed_parser = subparsers.add_parser("run-routed", help="run a model-driven BBS activity with profile routing")
-    routed_parser.add_argument("--host", default="127.0.0.1")
-    routed_parser.add_argument("--port", type=int, default=2323)
-    routed_parser.add_argument("--rlogin-port", type=int, default=2513)
-    routed_parser.add_argument("--rlogin-terminal", default="ansi")
-    routed_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
-    routed_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
-    routed_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    _add_connection_args(routed_parser)
     routed_parser.add_argument("--agent-id", default="agent-001")
     routed_parser.add_argument("--node", type=int)
-    routed_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
-    routed_parser.add_argument("--base-url")
-    routed_parser.add_argument("--api-key")
-    routed_parser.add_argument("--no-anthropic-cache", action="store_true")
-    routed_parser.add_argument("--model")
-    routed_parser.add_argument("--scripted-response", action="append", default=[])
-    routed_parser.add_argument("--temperature", type=float)
-    routed_parser.add_argument("--max-tokens", type=int)
-    routed_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
-    routed_parser.add_argument("--codex-profile")
-    routed_parser.add_argument("--codex-executable")
-    routed_parser.add_argument("--codex-timeout", type=float)
-    routed_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
-    routed_parser.add_argument("--codex-cwd")
-    routed_parser.add_argument("--codex-arg", action="append", default=[])
-    routed_parser.add_argument("--codex-stateful", action="store_true")
-    routed_parser.add_argument("--codex-session-id")
-    routed_parser.add_argument("--codex-session-file")
-    routed_parser.add_argument("--claude-executable")
-    routed_parser.add_argument("--claude-timeout", type=float)
-    routed_parser.add_argument("--claude-cwd")
-    routed_parser.add_argument("--claude-arg", action="append", default=[])
-    routed_parser.add_argument("--claude-stateful", action="store_true")
-    routed_parser.add_argument("--claude-session-id")
-    routed_parser.add_argument("--claude-session-file")
-    routed_parser.add_argument(
-        "--claude-permission-mode",
-        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
-    )
-    routed_parser.add_argument("--claude-tools")
-    routed_parser.add_argument("--claude-bare", action="store_true")
+    _add_model_args(routed_parser)
     routed_parser.add_argument("--route-set", choices=activity_route_set_names(), default="tw2-auto")
-    routed_parser.add_argument(
-        "--profile-objective",
-        help="override the default profile's built-in objective",
+    _add_runner_args(
+        routed_parser,
+        profile_objective_help="override the default profile's built-in objective",
+        run_objective_help="stable session goal included across routed profile switches",
+        max_decision_ticks=50,
+        max_wall_seconds=600.0,
+        log_path="runtime/logs/routed-activity.jsonl",
+        disabled_actions_help=(
+            "remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup"
+        ),
     )
-    routed_parser.add_argument(
-        "--run-objective",
-        help="stable session goal included across routed profile switches",
-    )
-    routed_parser.add_argument("--max-decision-ticks", type=int, default=50)
-    routed_parser.add_argument("--max-wall-seconds", type=float, default=600.0)
-    routed_parser.add_argument("--observe-timeout", type=float)
-    routed_parser.add_argument("--stable-ms", type=int)
-    routed_parser.add_argument("--byte-quiet-ms", type=int)
-    routed_parser.add_argument("--recent-steps-to-keep", type=int)
-    routed_parser.add_argument("--model-error-retries", type=int)
-    routed_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
-    routed_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
-    routed_parser.add_argument(
-        "--disable-action",
-        dest="disabled_actions",
-        action="append",
-        default=[],
-        help="remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup",
-    )
-    routed_parser.add_argument("--log-path", default="runtime/logs/routed-activity.jsonl")
     routed_parser.set_defaults(func=run_routed)
 
     match_parser = subparsers.add_parser("run-match", help="run a scheduled multi-agent BBS activity")
-    match_parser.add_argument("--host", default="127.0.0.1")
     match_parser.add_argument("--match-config", help="TOML or JSON file describing a multi-agent match")
-    match_parser.add_argument("--port", type=int, default=2323)
-    match_parser.add_argument("--rlogin-port", type=int, default=2513)
-    match_parser.add_argument("--rlogin-terminal", default="ansi")
-    match_parser.add_argument("--transport", choices=["telnet", "rlogin"], default="telnet")
-    match_parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="cr")
-    match_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    _add_connection_args(match_parser)
     match_parser.add_argument(
         "--no-agents-config",
         action="store_true",
@@ -1054,90 +1039,34 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="agent id loaded from --agents-config; repeat for each player",
     )
-    match_parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
-    match_parser.add_argument("--base-url")
-    match_parser.add_argument("--api-key")
-    match_parser.add_argument("--no-anthropic-cache", action="store_true")
-    match_parser.add_argument("--model")
-    match_parser.add_argument("--scripted-response", action="append", default=[])
-    match_parser.add_argument("--temperature", type=float)
-    match_parser.add_argument("--max-tokens", type=int)
-    match_parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
-    match_parser.add_argument("--codex-profile")
-    match_parser.add_argument("--codex-executable")
-    match_parser.add_argument("--codex-timeout", type=float)
-    match_parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
-    match_parser.add_argument("--codex-cwd")
-    match_parser.add_argument("--codex-arg", action="append", default=[])
-    match_parser.add_argument("--codex-stateful", action="store_true")
-    match_parser.add_argument("--codex-session-id")
-    match_parser.add_argument("--codex-session-file")
-    match_parser.add_argument("--claude-executable")
-    match_parser.add_argument("--claude-timeout", type=float)
-    match_parser.add_argument("--claude-cwd")
-    match_parser.add_argument("--claude-arg", action="append", default=[])
-    match_parser.add_argument("--claude-stateful", action="store_true")
-    match_parser.add_argument("--claude-session-id")
-    match_parser.add_argument("--claude-session-file")
-    match_parser.add_argument(
-        "--claude-permission-mode",
-        choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
-    )
-    match_parser.add_argument("--claude-tools")
-    match_parser.add_argument("--claude-bare", action="store_true")
+    _add_model_args(match_parser)
     match_parser.add_argument("--activity", default="bbs-door-line")
-    match_parser.add_argument(
-        "--profile-objective",
-        help="override the selected profile's built-in objective",
-    )
-    match_parser.add_argument(
-        "--run-objective",
-        help="match objective template; supports {agent_id} and {opponents}",
-    )
     match_parser.add_argument(
         "--max-rounds",
         type=int,
         default=50,
         help="maximum scheduled rounds; in continuous mode this is the maximum queued action count",
     )
-    match_parser.add_argument(
-        "--max-decision-ticks",
-        type=int,
-        default=50,
-        help="maximum committed decision ticks per participant",
-    )
-    match_parser.add_argument(
-        "--max-wall-seconds",
-        type=float,
-        default=600.0,
-        help="match-level wall-clock budget shared by all participants",
-    )
-    match_parser.add_argument(
-        "--scheduler-mode",
-        choices=["sequential", "parallel_race", "parallel_barrier", "continuous"],
-        default="sequential",
-    )
-    match_parser.add_argument("--match-order", choices=["fixed", "shuffle", "rotate"], default="fixed")
+    match_parser.add_argument("--scheduler-mode", choices=sorted(get_args(MatchSchedulerMode)), default="sequential")
+    match_parser.add_argument("--match-order", choices=sorted(get_args(MatchOrder)), default="fixed")
     match_parser.add_argument("--match-seed", type=int)
-    match_parser.add_argument("--disconnect-policy", choices=["stop", "reconnect"], default="stop")
+    match_parser.add_argument("--disconnect-policy", choices=sorted(get_args(DisconnectPolicy)), default="stop")
     match_parser.add_argument("--max-reconnects", type=int, default=3)
     match_parser.add_argument("--reconnect-delay", type=float, default=2.0)
     match_parser.add_argument("--max-workers", type=int)
-    match_parser.add_argument("--observe-timeout", type=float)
-    match_parser.add_argument("--stable-ms", type=int)
-    match_parser.add_argument("--byte-quiet-ms", type=int)
-    match_parser.add_argument("--recent-steps-to-keep", type=int)
-    match_parser.add_argument("--model-error-retries", type=int)
-    match_parser.add_argument("--prompt-mode", choices=["stateless_full", "stateful_delta"])
-    match_parser.add_argument("--prompt-layout", choices=["timeline_first", "cache_friendly"])
-    match_parser.add_argument(
-        "--disable-action",
-        dest="disabled_actions",
-        action="append",
-        default=[],
-        help="remove an action from every participant's activity schema; repeatable, e.g. --disable-action hangup",
+    _add_runner_args(
+        match_parser,
+        profile_objective_help="override the selected profile's built-in objective",
+        run_objective_help="match objective template; supports {agent_id} and {opponents}",
+        max_decision_ticks=50,
+        max_wall_seconds=600.0,
+        log_path="runtime/logs/match.jsonl",
+        disabled_actions_help=(
+            "remove an action from every participant's activity schema; repeatable, e.g. --disable-action hangup"
+        ),
+        decision_ticks_help="maximum committed decision ticks per participant",
+        wall_seconds_help="match-level wall-clock budget shared by all participants",
     )
-    match_parser.add_argument("--log-path", default="runtime/logs/match.jsonl")
     match_parser.set_defaults(func=run_match)
 
     accounts_parser = subparsers.add_parser("accounts", help="manage BBS agent account registry")

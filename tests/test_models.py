@@ -1,17 +1,24 @@
+import io
 import subprocess
+import urllib.error
+
+import pytest
 
 from tty_agent.models import (
+    GEMMA4_OUTPUT_FILTERS,
     AnthropicAdapter,
     ClaudeCliAdapter,
     CodexCliAdapter,
     CompactionPrompt,
     DecisionPrompt,
     MemoryCommitPrompt,
+    ModelError,
     ModelMessage,
     ModelTimeoutError,
     OpenAICompatibleAdapter,
     SessionSummary,
     TextChatAdapter,
+    _post_json,
     output_filters_for_model,
     strip_gemma4_channel_reasoning,
 )
@@ -241,6 +248,76 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
             "cache_control": {"type": "ephemeral"},
         }
     ]
+
+
+def test_anthropic_adapter_infers_gemma4_response_filter():
+    adapter = AnthropicAdapter(model="google/gemma-4-31B-it", api_key="key")
+
+    assert adapter.output_filters == GEMMA4_OUTPUT_FILTERS
+
+
+def test_anthropic_adapter_can_disable_response_filters():
+    adapter = AnthropicAdapter(model="google/gemma-4-31B-it", api_key="key", output_filters=())
+
+    assert adapter.output_filters == ()
+
+
+def test_post_json_wraps_http_error_as_model_error(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 503, "overloaded", {}, io.BytesIO(b"server busy"))
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ModelError) as excinfo:
+        _post_json("http://localhost:11434/v1/chat/completions", {})
+
+    assert "HTTP 503" in str(excinfo.value)
+    assert "server busy" in str(excinfo.value)
+
+
+def test_post_json_wraps_unreachable_host_as_model_error(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ModelError):
+        _post_json("http://localhost:11434/v1/chat/completions", {})
+
+
+def test_post_json_wraps_read_timeout_as_model_timeout(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ModelTimeoutError):
+        _post_json("http://localhost:11434/v1/chat/completions", {}, timeout=5.0)
+
+
+def test_post_json_wraps_non_json_body_as_model_error(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return b"<html>502 Bad Gateway</html>"
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", lambda request, timeout: FakeResponse())
+
+    with pytest.raises(ModelError):
+        _post_json("http://localhost:11434/v1/chat/completions", {})
+
+
+def test_openai_compatible_adapter_wraps_malformed_response_as_model_error(monkeypatch):
+    monkeypatch.setattr("tty_agent.models._post_json", lambda *a, **k: {"unexpected": True})
+    adapter = OpenAICompatibleAdapter(model="test-model")
+
+    with pytest.raises(ModelError):
+        adapter.chat([ModelMessage("user", "screen")])
 
 
 def test_codex_cli_adapter_invokes_codex_exec(monkeypatch):

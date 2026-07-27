@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..actions import ActionError, is_printable_key
-from .base import SessionDisconnected
+from .base import SessionDisconnected, TranscriptWriter
 
 
 RLOGIN_KEY_BYTES = {
@@ -44,22 +44,24 @@ class RLoginSession:
     speed: int = 38400
     reversed_login: bool = False
     _sock: socket.socket | None = field(default=None, init=False, repr=False)
-    _transcript: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _transcript: TranscriptWriter = field(init=False, repr=False)
     _sent_bytes: list[bytes] = field(default_factory=list, init=False, repr=False)
     _ack_pending: bool = field(default=True, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._transcript = TranscriptWriter(self.transcript_path)
 
     def connect(self) -> None:
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
         self._sock.setblocking(False)
-        self._sock.sendall(self._handshake())
+        self._transcript.open()
+        self._write(self._handshake())
 
     def close(self) -> None:
         if self._sock is not None:
             self._sock.close()
             self._sock = None
-        if self.transcript_path is not None:
-            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            self.transcript_path.write_bytes(bytes(self._transcript))
+        self._transcript.close()
 
     def __enter__(self) -> "RLoginSession":
         self.connect()
@@ -87,10 +89,18 @@ class RLoginSession:
         self.send_bytes(payload)
 
     def send_bytes(self, payload: bytes) -> None:
-        if self._sock is None:
-            raise RuntimeError("session is not connected")
-        self._sock.sendall(payload)
+        self._write(payload)
         self._sent_bytes.append(bytes(payload))
+
+    def _write(self, payload: bytes) -> None:
+        """Write to the socket without recording it in the agent action trace."""
+
+        if self._sock is None:
+            raise SessionDisconnected("session is not connected")
+        try:
+            self._sock.sendall(payload)
+        except OSError as exc:
+            raise SessionDisconnected(f"remote rlogin connection closed while sending: {exc}") from exc
 
     def drain_sent_bytes(self) -> tuple[bytes, ...]:
         chunks = tuple(self._sent_bytes)
@@ -98,11 +108,11 @@ class RLoginSession:
         return chunks
 
     def transcript_position(self) -> int:
-        return len(self._transcript)
+        return self._transcript.position()
 
     def read(self, seconds: float = 1.0) -> bytes:
         if self._sock is None:
-            raise RuntimeError("session is not connected")
+            raise SessionDisconnected("session is not connected")
 
         deadline = time.monotonic() + seconds
         out = bytearray()
@@ -112,14 +122,23 @@ class RLoginSession:
             ready, _, _ = select.select([self._sock], [], [], min(0.2, remaining))
             if not ready:
                 continue
-            chunk = self._sock.recv(4096)
+            try:
+                chunk = self._sock.recv(4096)
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                # A peer that resets the connection surfaces here rather than as a
+                # clean zero-length read.
+                if out:
+                    break
+                raise SessionDisconnected(f"remote rlogin connection closed: {exc}") from exc
             if not chunk:
                 if not out:
                     raise SessionDisconnected("remote rlogin connection closed")
                 break
             chunk = self._strip_initial_ack(chunk)
             out.extend(chunk)
-            self._transcript.extend(chunk)
+            self._transcript.record(chunk)
 
         return bytes(out)
 

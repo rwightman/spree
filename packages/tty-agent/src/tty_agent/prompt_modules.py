@@ -21,6 +21,17 @@ ASSISTANCE_LEVEL_ORDER: tuple[AssistanceLevel, ...] = (
 )
 PROMPT_MODULES_SCHEMA_VERSION = 1
 
+# The ``cache_friendly`` prompt layout splits modules into a stable prefix that
+# can be cached across ticks and a tactical suffix that changes every tick.
+# Activities override these through ``ActivityProfile`` when their own levels
+# belong on the other side of the split.
+DEFAULT_TACTICAL_LEVELS: tuple[AssistanceLevel, ...] = ("generic_terminal",)
+DEFAULT_STABLE_LEVELS: tuple[AssistanceLevel, ...] = tuple(
+    level
+    for level in ASSISTANCE_LEVEL_ORDER
+    if level not in DEFAULT_TACTICAL_LEVELS
+)
+
 
 @dataclass(frozen=True)
 class PromptRenderContext:

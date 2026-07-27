@@ -6,7 +6,7 @@ from bbs_gym.activities import TW2_ENTRY_PROFILE
 from tty_agent.actions import Action, ActionError, ActionPolicy
 from tty_agent.agent import ActionExecution
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import ModelTimeoutError, ScriptedModelAdapter
+from tty_agent.models import ModelError, ModelTimeoutError, ScriptedModelAdapter
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from tty_agent.terminal import Observation
@@ -60,6 +60,11 @@ class RejectingAgent(FakeAgent):
 class DisconnectingAgent(FakeAgent):
     def observe_turn(self, **_kwargs):
         raise SessionDisconnected("closed")
+
+
+class SendDisconnectingAgent(FakeAgent):
+    def act_action(self, action):
+        raise SessionDisconnected("remote terminal connection closed while sending")
 
 
 class LongScreenAgent(FakeAgent):
@@ -648,6 +653,56 @@ def test_activity_runner_records_model_timeout_failure_without_crashing(tmp_path
     assert result.steps[0].validation["model_errors"][0]["stdout"] == "partial stdout"
     assert result.steps[0].validation["model_errors"][1]["stderr"] == "partial stderr"
     assert "model_error:" in result.steps[0].validation["notes"][0]
+
+
+def test_activity_runner_stops_cleanly_when_send_disconnects(tmp_path):
+    """A peer that drops between observing and acting must stop like a read-side drop."""
+
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test send disconnect"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+    model = ScriptedModelAdapter(['{"action": "submit_line", "arguments": {"text": "look"}}', "{}"])
+
+    result = runner.run(SendDisconnectingAgent(), model, ActivityBudget(max_decision_ticks=5))
+
+    assert result.stop_reason == "disconnected"
+    assert len(result.steps) == 1
+    assert "action_error:" in result.steps[0].validation["notes"][-1]
+
+
+def test_activity_runner_retries_http_provider_failure(tmp_path):
+    """An HTTP adapter failure must reach the same retry path as a CLI failure."""
+
+    class HttpErrorThenWaitModel(ScriptedModelAdapter):
+        def __init__(self):
+            super().__init__(
+                [
+                    '{"action": "wait", "arguments": {}}',
+                    '{"action": "hangup", "arguments": {}}',
+                    "{}",
+                ]
+            )
+            self.calls = 0
+
+        def decide(self, prompt, policy=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelError("HTTP 503 from http://localhost:11434/v1: server busy")
+            return super().decide(prompt, policy)
+
+    agent = FakeAgent()
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test http retry", model_error_retries=1),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, HttpErrorThenWaitModel(), ActivityBudget(max_decision_ticks=5))
+
+    assert result.stop_reason == "hangup"
+    assert result.steps[0].validation["accepted"] is True
+    assert "recovered_after_model_error" in result.steps[0].validation["notes"]
+    assert result.steps[0].validation["model_errors"][0]["type"] == "ModelError"
 
 
 def test_activity_runner_logs_raw_and_filtered_model_responses(tmp_path):

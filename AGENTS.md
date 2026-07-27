@@ -1,4 +1,6 @@
-# AGENTS.md
+# Repository Guidelines For Coding Agents
+
+`CLAUDE.md` is a symlink to this file; edit this one.
 
 ## Build/Test Commands
 - Install: `uv sync`
@@ -13,7 +15,7 @@
 - Format after code/docs edits: run `wruff format .` if `wruff` is installed; if unavailable, leave formatting consistent with nearby files
 
 ## Code Style Guidelines
-- Line length: 120 chars
+- Line length: 120 chars (configured under `[tool.wruff]` in the root `pyproject.toml`)
 - Indentation: 4-space hanging indents, arguments should have an extra level of indent, use 'sadface' (closing parenthesis and colon on a separate line)
 - Typing: Use PEP484 type annotations in function signatures
 - Docstrings: Google style (do not duplicate type annotations and defaults)

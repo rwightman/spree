@@ -252,7 +252,7 @@ def write_gif(
         font_size: int,
 ) -> None:
     try:
-        from PIL import Image
+        import PIL.Image  # noqa: F401  # availability probe; frames are built in render_frame_image
     except ImportError as exc:
         raise SystemExit("animated GIF output requires Pillow: python -m pip install pillow") from exc
 
@@ -324,7 +324,7 @@ def render_frame(
         font_path: Path | None,
         font_size: int,
 ) -> Any:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     font = load_font(font_path, font_size)
     left, top, right, bottom = font.getbbox("M")
