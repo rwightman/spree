@@ -91,3 +91,87 @@ def test_pty_reports_transcript_position():
     session._transcript.record(b"abc")
 
     assert session.transcript_position() == 3
+
+
+def test_pty_send_retries_partial_writes(monkeypatch):
+    import types
+
+    chunks: list[bytes] = []
+    behavior = iter([2, None, 3])  # short write, EAGAIN, remainder
+
+    def fake_write(_fd, view):
+        step = next(behavior)
+        if step is None:
+            raise BlockingIOError
+        chunks.append(bytes(view[:step]))
+        return step
+
+    session = PtySession([sys.executable, "-c", ""], timeout=1.0)
+    session._master_fd = 99
+    monkeypatch.setattr("tty_agent.transports.pty.os", types.SimpleNamespace(write=fake_write))
+    monkeypatch.setattr(
+        "tty_agent.transports.pty.select",
+        types.SimpleNamespace(select=lambda *_args: ([], [99], [])),
+    )
+
+    session.send_bytes(b"hello")
+
+    assert chunks == [b"he", b"llo"]
+    assert session.drain_sent_bytes() == (b"hello",)
+
+
+def test_pty_send_reports_stalled_input_queue(monkeypatch):
+    import types
+
+    import pytest
+
+    from tty_agent.transports.base import SessionDisconnected
+
+    def always_blocked(_fd, _view):
+        raise BlockingIOError
+
+    session = PtySession([sys.executable, "-c", ""], timeout=0.05)
+    session._master_fd = 99
+    monkeypatch.setattr("tty_agent.transports.pty.os", types.SimpleNamespace(write=always_blocked))
+    monkeypatch.setattr(
+        "tty_agent.transports.pty.select",
+        types.SimpleNamespace(select=lambda *_args: ([], [], [])),
+    )
+
+    with pytest.raises(SessionDisconnected) as excinfo:
+        session.send_bytes(b"hello")
+
+    assert "stayed full" in str(excinfo.value)
+    assert session.drain_sent_bytes() == ()
+
+
+def test_pty_connect_failure_does_not_leak_fds():
+    import pytest
+
+    session = PtySession(["/nonexistent-binary-for-fd-leak-test"])
+    before = len(os.listdir("/proc/self/fd"))
+
+    for _ in range(3):
+        with pytest.raises(FileNotFoundError):
+            session.connect()
+
+    assert len(os.listdir("/proc/self/fd")) == before
+    assert session._master_fd is None
+
+
+def test_pty_connect_reaps_process_when_transcript_setup_fails(monkeypatch):
+    import pytest
+
+    session = PtySession([sys.executable, "-c", "import time; time.sleep(10)"])
+
+    def fail_open():
+        raise OSError("transcript setup failed")
+
+    monkeypatch.setattr(session._transcript, "open", fail_open)
+
+    with pytest.raises(OSError, match="transcript setup failed"):
+        session.connect()
+
+    assert session._master_fd is None
+    assert session._proc is not None
+    assert session._proc.poll() is not None

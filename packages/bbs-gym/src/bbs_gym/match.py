@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from tty_agent.runner import ActivityBudget, ActivityResult, ActivityRunner, PreparedActivityStep
+from tty_agent.transports.base import SessionDisconnected
 
 from .accounts import AccountConfigError
 from .env import BbsGym
@@ -53,6 +54,14 @@ class MatchSchedulerConfig:
     ``parallel_race`` and ``continuous`` intentionally turn model decision
     latency into initiative. Use ``parallel_barrier`` when all models should
     decide concurrently but commit in a fair scheduled order.
+
+    ``max_wall_seconds`` is a soft admission budget: it is checked before
+    starting a round, decision tick, or reconnect, but work already admitted
+    (an in-flight observation, model decision, or its commit) runs to
+    completion, and memory finalization happens after it expires. The maximum
+    overrun is roughly one step per participant, bounded by the model and
+    transport timeouts; ``match_completed`` records it as
+    ``wall_overrun_seconds``. Strict termination needs an outside supervisor.
     """
 
     mode: MatchSchedulerMode = "sequential"
@@ -198,11 +207,23 @@ def handle_match_disconnect(
 
     _close_agent(state.agent)
     for attempt in range(participant.reconnects + 1, scheduler.max_reconnects + 1):
+        if _stop_reconnect_when_budget_exhausted(state):
+            _write_match_event(
+                match_log_path,
+                {
+                    "type": "participant_reconnect_skipped",
+                    **_event_clock(round_number, tick),
+                    "agent_id": participant.spec.agent_id,
+                    "reason": state.stop_reason,
+                    "timestamp": time.time(),
+                },
+            )
+            return
         if scheduler.reconnect_delay:
             time.sleep(scheduler.reconnect_delay)
         try:
             state.agent = gym.connect(participant.spec.agent_id, model_metadata=participant.model_metadata)
-        except (OSError, AccountConfigError, ValueError) as exc:
+        except (OSError, AccountConfigError, ValueError, SessionDisconnected) as exc:
             participant.reconnects = attempt
             _write_match_event(
                 match_log_path,
@@ -234,6 +255,16 @@ def handle_match_disconnect(
 
     state.stop_reason = "disconnect_reconnect_failed"
     state.completed = True
+
+
+def _stop_reconnect_when_budget_exhausted(state: Any) -> bool:
+    """Apply the activity budget before admitting another reconnect attempt."""
+
+    if state.budget.remaining():
+        return False
+    state.stop_reason = "match_wall_seconds" if state.budget.wall_seconds_remaining() <= 0 else "budget"
+    state.completed = True
+    return True
 
 
 def write_match_event(path: Path, event: dict[str, Any]) -> None:
@@ -351,7 +382,8 @@ def _run_parallel_race_match(
         _write_round_started(match_log_path, round_number, scheduled_states, scheduler)
         commit_order: list[str] = []
         futures: dict[Future[PreparedActivityStep | None], tuple[MatchParticipantRuntime, Any, float]] = {}
-        with ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(scheduled_states))) as executor:
+        executor = ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(scheduled_states)))
+        try:
             for participant, state in scheduled_states:
                 _write_agent_step_started(match_log_path, round_number, participant, phase="queued")
                 futures[executor.submit(participant.runner.prepare_step, state)] = (
@@ -359,8 +391,8 @@ def _run_parallel_race_match(
                     state,
                     time.monotonic(),
                 )
-            for future in as_completed(futures):
-                participant, state, started_at = futures[future]
+            for future in as_completed(list(futures)):
+                participant, state, started_at = futures.pop(future)
                 prepared = _future_preparation(future, participant, state, match_log_path, round_number)
                 _write_agent_decision_completed(
                     match_log_path,
@@ -370,6 +402,8 @@ def _run_parallel_race_match(
                 )
                 commit_order.append(participant.spec.agent_id)
                 _commit_parallel_step(gym, participant, state, prepared, scheduler, match_log_path, round_number)
+        finally:
+            _abandon_pending_futures(executor, futures, match_log_path, round_number)
         _write_match_event(
             match_log_path,
             {
@@ -414,19 +448,16 @@ def _run_continuous_match(
             queued_ticks,
         )
 
-    with ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(initial_order))) as executor:
+    executor = ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(initial_order)))
+    try:
         for participant, state in initial_order:
             if queued_ticks < scheduler.max_rounds and not _match_time_exhausted(scheduler, match_started_at):
                 queue_step(executor, participant, state)
 
-        while futures and not _match_time_exhausted(scheduler, match_started_at):
-            done, _ = wait(
-                futures,
-                timeout=_match_wall_seconds_remaining(scheduler, match_started_at),
-                return_when=FIRST_COMPLETED,
-            )
-            if not done:
-                break
+        # The wall budget gates admission (queue_step); decisions already in
+        # flight always finish and commit.
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in done:
                 participant, state, started_at, queued_tick = futures.pop(future)
                 prepared = _future_preparation(future, participant, state, match_log_path, None, tick=queued_tick)
@@ -468,6 +499,8 @@ def _run_continuous_match(
                     and not _match_time_exhausted(scheduler, match_started_at)
                 ):
                     queue_step(executor, participant, state)
+    finally:
+        _abandon_pending_futures(executor, futures, match_log_path, None)
     return committed_ticks
 
 
@@ -479,7 +512,8 @@ def _prepare_parallel_steps(
 ) -> dict[str, PreparedActivityStep | None]:
     preparations: dict[str, PreparedActivityStep | None] = {}
     futures: dict[Future[PreparedActivityStep | None], tuple[MatchParticipantRuntime, Any, float]] = {}
-    with ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(scheduled_states))) as executor:
+    executor = ThreadPoolExecutor(max_workers=_max_workers(scheduler, len(scheduled_states)))
+    try:
         for participant, state in scheduled_states:
             _write_agent_step_started(match_log_path, round_number, participant, phase="queued")
             futures[executor.submit(participant.runner.prepare_step, state)] = (
@@ -487,8 +521,8 @@ def _prepare_parallel_steps(
                 state,
                 time.monotonic(),
             )
-        for future in as_completed(futures):
-            participant, state, started_at = futures[future]
+        for future in as_completed(list(futures)):
+            participant, state, started_at = futures.pop(future)
             preparations[participant.spec.agent_id] = _future_preparation(
                 future,
                 participant,
@@ -502,7 +536,57 @@ def _prepare_parallel_steps(
                 participant,
                 elapsed_seconds=time.monotonic() - started_at,
             )
+    finally:
+        _abandon_pending_futures(executor, futures, match_log_path, round_number)
     return preparations
+
+
+def _abandon_pending_futures(
+        executor: ThreadPoolExecutor,
+        futures: dict[Future[PreparedActivityStep | None], tuple[Any, ...]],
+        match_log_path: Path,
+        round_number: int | None,
+) -> None:
+    """Wait out abandoned decision work and surface its outcome in the match log.
+
+    Normal completion consumes every future, so this only fires when the
+    scheduler itself failed mid-round. A thread already running a model decision
+    cannot be interrupted, so the shutdown still waits for in-flight work, but
+    queued work is cancelled, the wait itself is logged, and an abandoned
+    future's exception retires that participant instead of vanishing unconsumed.
+    """
+
+    if futures:
+        _write_match_event(
+            match_log_path,
+            {
+                "type": "scheduler_draining",
+                **_event_clock(round_number),
+                "agent_ids": sorted(context[0].spec.agent_id for context in futures.values()),
+                "timestamp": time.time(),
+            },
+        )
+    executor.shutdown(wait=True, cancel_futures=True)
+    for future, context in futures.items():
+        participant, state = context[0], context[1]
+        tick = context[3] if len(context) > 3 else None
+        if future.cancelled():
+            reason = "cancelled_before_start"
+        elif future.exception() is not None:
+            _fail_participant_step(participant, state, future.exception(), match_log_path, round_number, tick=tick)
+            continue
+        else:
+            reason = "completed_after_stop"
+        _write_match_event(
+            match_log_path,
+            {
+                "type": "agent_step_abandoned",
+                **_event_clock(round_number, tick),
+                "agent_id": participant.spec.agent_id,
+                "reason": reason,
+                "timestamp": time.time(),
+            },
+        )
 
 
 def _future_preparation(
@@ -728,6 +812,12 @@ def _write_match_completed(
             "clean_exit": clean_exit,
             "commit_count": commit_count,
             "elapsed_seconds": time.monotonic() - match_started_at,
+            # The wall budget is a soft admission bound; record how far the
+            # already-admitted work ran past it.
+            "wall_overrun_seconds": max(
+                0.0,
+                (time.monotonic() - match_started_at) - scheduler.max_wall_seconds,
+            ),
             "error": error,
             "scheduler": _scheduler_event_dict(scheduler),
             "scheduler_count": scheduler_count,

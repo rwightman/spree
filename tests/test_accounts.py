@@ -50,3 +50,42 @@ def test_agent_registry_rejects_duplicate_aliases(tmp_path):
 
     with pytest.raises(AccountConfigError):
         AgentRegistry.from_file(path)
+
+
+def test_agent_registry_rejects_unsafe_agent_ids(tmp_path):
+    path = tmp_path / "agents.json"
+    path.write_text(
+        json.dumps({"agents": [{"agent_id": "../escape", "bbs_alias": "Escape"}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AccountConfigError, match="path separators"):
+        AgentRegistry.from_file(path)
+
+
+def test_public_dict_redacts_provider_credentials():
+    from bbs_gym.accounts import AgentRecord, redacted_model_config
+
+    record = AgentRecord(
+        agent_id="agent-001",
+        bbs_alias="AgentOne",
+        model={
+            "provider": "openai-compatible",
+            "model": "some-model",
+            "api_key": "sk-live-do-not-leak",
+            "max_tokens": 512,
+            "extra": {"auth_token": "also-secret"},
+            "providers": [{"name": "fallback", "api_key": "nested-list-secret"}],
+        },
+    )
+
+    public = record.public_dict()
+
+    assert public["model"]["api_key"] == "[redacted]"
+    assert public["model"]["extra"]["auth_token"] == "[redacted]"
+    assert public["model"]["providers"][0]["api_key"] == "[redacted]"
+    assert public["model"]["model"] == "some-model"
+    assert public["model"]["max_tokens"] == 512
+    # The record itself is untouched; only the public view is redacted.
+    assert record.model["api_key"] == "sk-live-do-not-leak"
+    assert redacted_model_config({"password": {"value": "x"}}) == {"password": "[redacted]"}

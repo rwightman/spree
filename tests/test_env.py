@@ -23,13 +23,26 @@ def test_bbs_gym_connect_uses_effective_model_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr("bbs_gym.env.TelnetSession", FakeSession)
     gym = BbsGym(transcript_dir=tmp_path, transport="telnet")
 
+    model_metadata = {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "fallbacks": [{"api_key": "do-not-log"}],
+    }
     agent = gym.connect(
         "codex-smoke",
-        model_metadata={"provider": "codex", "model": "gpt-5.5", "sandbox": "read-only"},
+        model_metadata=model_metadata,
     )
 
-    assert agent.metadata["model"] == {"provider": "codex", "model": "gpt-5.5", "sandbox": "read-only"}
-    assert agent.observer.metadata["model"] == {"provider": "codex", "model": "gpt-5.5", "sandbox": "read-only"}
+    expected = {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "sandbox": "read-only",
+        "fallbacks": [{"api_key": "[redacted]"}],
+    }
+    assert agent.metadata["model"] == expected
+    assert agent.observer.metadata["model"] == expected
+    assert model_metadata["fallbacks"][0]["api_key"] == "do-not-log"
 
 
 def test_bbs_gym_telnet_enter_sequence_is_forwarded(monkeypatch, tmp_path):
@@ -120,7 +133,7 @@ def test_bbs_gym_telnet_uses_agent_registry_for_login(monkeypatch, tmp_path):
                 agent_id="agent-001",
                 bbs_alias="RLoginSmoke",
                 bbs_password="rlogin-smoke-pass",
-                model={"provider": "scripted"},
+                model={"provider": "scripted", "api_key": "sk-inline-secret"},
             )
         }
     )
@@ -131,6 +144,8 @@ def test_bbs_gym_telnet_uses_agent_registry_for_login(monkeypatch, tmp_path):
     assert agent.metadata["authenticated"] is True
     assert agent.metadata["login_method"] == "telnet"
     assert agent.metadata["bbs_alias"] == "RLoginSmoke"
+    # Registry model config flows into observation metadata; credentials must not.
+    assert agent.metadata["model"] == {"provider": "scripted", "api_key": "[redacted]"}
     assert "[Hit a key]" in agent.metadata["login_outcome"]["model_text_tail"]
     assert "[Hit a key]" in agent.observer.terminal.model_text()
     assert agent.session.drain_sent_bytes() == ()
@@ -202,3 +217,136 @@ def test_bbs_gym_telnet_login_handles_initial_password_prompt(monkeypatch, tmp_p
     assert agent.metadata["authenticated"] is True
     assert "[Hit a key]" in agent.metadata["login_outcome"]["model_text_tail"]
     assert "[Hit a key]" in agent.observer.terminal.model_text()
+
+
+def test_bbs_gym_closes_session_when_login_fails(monkeypatch, tmp_path):
+    from tty_agent.transports.base import SessionDisconnected
+
+    import pytest
+
+    class FakeSession:
+        encoding = "cp437"
+        instances: list["FakeSession"] = []
+
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
+            self.host = host
+            self.port = port
+            self.transcript_path = transcript_path
+            self.encoding = encoding
+            self.enter_sequence = enter_sequence
+            self.closed = False
+            FakeSession.instances.append(self)
+
+        def connect(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+        def read(self, _seconds):
+            raise SessionDisconnected("remote terminal connection closed")
+
+        def send_text(self, text):
+            return None
+
+        def send_line(self, text=""):
+            return None
+
+        def send_key(self, key):
+            return None
+
+        def send_bytes(self, payload):
+            return None
+
+        def drain_sent_bytes(self):
+            return ()
+
+        def transcript_position(self):
+            return 0
+
+    monkeypatch.setattr("bbs_gym.env.TelnetSession", FakeSession)
+    registry = AgentRegistry(
+        {
+            "agent-001": AgentRecord(
+                agent_id="agent-001",
+                bbs_alias="RLoginSmoke",
+                bbs_password="rlogin-smoke-pass",
+                model={"provider": "scripted"},
+            )
+        }
+    )
+    gym = BbsGym(transcript_dir=tmp_path, transport="telnet", agent_registry=registry)
+
+    with pytest.raises(SessionDisconnected):
+        gym.connect("agent-001")
+
+    assert len(FakeSession.instances) == 1
+    assert FakeSession.instances[0].closed is True
+    assert gym.agents == {}
+
+
+def _leakcheck_session_class():
+    class FakeSession:
+        encoding = "cp437"
+        instances: list = []
+
+        def __init__(self, host, port, transcript_path=None, encoding="cp437", enter_sequence="cr"):
+            self.host = host
+            self.port = port
+            self.transcript_path = transcript_path
+            self.encoding = encoding
+            self.enter_sequence = enter_sequence
+            self.closed = False
+            type(self).instances.append(self)
+
+        def connect(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    return FakeSession
+
+
+def test_bbs_gym_rejects_path_traversal_agent_id(monkeypatch, tmp_path):
+    import pytest
+
+    monkeypatch.setattr("bbs_gym.env.TelnetSession", _leakcheck_session_class())
+    gym = BbsGym(transcript_dir=tmp_path, transport="telnet")
+
+    with pytest.raises(ValueError):
+        gym.connect("../escape")
+
+    assert gym.agents == {}
+
+
+def test_bbs_gym_closes_session_when_connect_fails(monkeypatch, tmp_path):
+    import pytest
+
+    session_class = _leakcheck_session_class()
+
+    def failing_connect(self):
+        raise RuntimeError("transcript open failed")
+
+    session_class.connect = failing_connect
+    monkeypatch.setattr("bbs_gym.env.TelnetSession", session_class)
+    gym = BbsGym(transcript_dir=tmp_path, transport="telnet")
+
+    with pytest.raises(RuntimeError):
+        gym.connect("agent-001")
+
+    assert session_class.instances[0].closed is True
+    assert gym.agents == {}
+
+
+def test_bbs_gym_reconnect_closes_previous_registration(monkeypatch, tmp_path):
+    session_class = _leakcheck_session_class()
+    monkeypatch.setattr("bbs_gym.env.TelnetSession", session_class)
+    gym = BbsGym(transcript_dir=tmp_path, transport="telnet")
+
+    first = gym.connect("agent-001")
+    second = gym.connect("agent-001")
+
+    assert first.session.closed is True
+    assert second.session.closed is False
+    assert gym.agents["agent-001"] is second

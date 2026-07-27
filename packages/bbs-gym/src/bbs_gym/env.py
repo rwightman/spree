@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from tty_agent.agent import TerminalSessionAgent
+from tty_agent.ids import validate_agent_id
 from tty_agent.terminal import Observation, TerminalScreen, TurnObserver
 from tty_agent.transports.rlogin import RLoginSession
 from tty_agent.transports.telnet import TelnetSession
 
-from .accounts import AgentRegistry, AccountConfigError, load_agent_registry
+from .accounts import AgentRegistry, AccountConfigError, load_agent_registry, redacted_model_config
 from .profiles import DEFAULT_PROFILE, PromptProfile
 
 _TELNET_LOGIN_TIMEOUT = 8.0
@@ -53,6 +55,12 @@ class BbsGym:
             transport: str | None = None,
             model_metadata: dict[str, object] | None = None,
     ) -> TerminalSessionAgent:
+        validate_agent_id(agent_id)
+        # One BBS account maps to one live session; a stale registration for the
+        # same id would otherwise leak its socket when overwritten.
+        previous = self.agents.pop(agent_id, None)
+        if previous is not None:
+            previous.close()
         active_transport = transport or self.transport
         transcript = self.transcript_dir / f"{agent_id}.raw"
         record = self.agent_registry.maybe_get(agent_id) if self.agent_registry is not None else None
@@ -86,7 +94,25 @@ class BbsGym:
             )
         else:
             raise ValueError(f"unsupported BBS transport: {active_transport}")
-        session.connect()
+        try:
+            session.connect()
+            return self._build_agent(agent_id, session, active_transport, node, record, telnet_password, model_metadata)
+        except BaseException:
+            # A connect or login that fails before the agent is registered would
+            # otherwise leak the socket and its open transcript handle.
+            session.close()
+            raise
+
+    def _build_agent(
+            self,
+            agent_id: str,
+            session: TelnetSession | RLoginSession,
+            active_transport: str,
+            node: int | None,
+            record: Any,
+            telnet_password: str | None,
+            model_metadata: dict[str, object] | None,
+    ) -> TerminalSessionAgent:
         terminal = TerminalScreen(columns=self.columns, lines=self.lines, encoding=session.encoding)
         metadata = {
             "requested_node": node,
@@ -107,9 +133,11 @@ class BbsGym:
                 }
             )
         if model_metadata is not None:
-            metadata["model"] = model_metadata
+            metadata["model"] = redacted_model_config(dict(model_metadata))
         elif record is not None:
-            metadata["model"] = record.model
+            # Metadata flows into observations and step logs; never copy inline
+            # provider credentials there.
+            metadata["model"] = redacted_model_config(record.model)
         observer = TurnObserver(agent_id, session, terminal=terminal, profile=self.profile, metadata=metadata)
         if active_transport == "telnet" and record is not None:
             if telnet_password is None:

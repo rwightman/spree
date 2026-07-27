@@ -64,9 +64,18 @@ class TelnetSession:
         self._transcript = TranscriptWriter(self.transcript_path)
 
     def connect(self) -> None:
+        # A reused session object must not carry protocol state from a previous
+        # connection into a new one.
+        self._pending_negotiation.clear()
+        self._discarding_subnegotiation = False
+        # create_connection leaves the socket in timeout mode, so sendall retries
+        # partial sends itself instead of failing on a full send buffer.
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
-        self._sock.setblocking(False)
-        self._transcript.open()
+        try:
+            self._transcript.open()
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._sock is not None:
@@ -109,7 +118,9 @@ class TelnetSession:
             ) from exc
 
     def send_bytes(self, payload: bytes) -> None:
-        self._write(payload)
+        # RFC 854: a 0xFF data byte must be doubled so the server does not read
+        # it as IAC (reachable via e.g. U+00A0 in cp437).
+        self._write(payload.replace(bytes([IAC]), bytes([IAC, IAC])))
         self._sent_bytes.append(bytes(payload))
 
     def _write(self, payload: bytes) -> None:
@@ -119,6 +130,10 @@ class TelnetSession:
             raise SessionDisconnected("session is not connected")
         try:
             self._sock.sendall(payload)
+        except TimeoutError as exc:
+            raise SessionDisconnected(
+                f"remote terminal stopped accepting data for {self.timeout:g}s while sending"
+            ) from exc
         except OSError as exc:
             raise SessionDisconnected(f"remote terminal connection closed while sending: {exc}") from exc
 
@@ -146,7 +161,7 @@ class TelnetSession:
                 continue
             try:
                 chunk = self._sock.recv(4096)
-            except BlockingIOError:
+            except (BlockingIOError, TimeoutError):
                 continue
             except OSError as exc:
                 # A peer that resets the connection surfaces here rather than as a
@@ -191,9 +206,10 @@ class TelnetSession:
         i = 0
 
         if self._discarding_subnegotiation:
-            end = _subnegotiation_end(buffer, 0)
+            end, dangling_iac = _subnegotiation_end(buffer, 0)
             if end is None:
-                self._hold_trailing_iac(buffer)
+                if dangling_iac:
+                    self._pending_negotiation.append(IAC)
                 return b""
             self._discarding_subnegotiation = False
             i = end
@@ -227,14 +243,15 @@ class TelnetSession:
                 continue
 
             if command == SB:
-                end = _subnegotiation_end(buffer, i + 2)
+                end, dangling_iac = _subnegotiation_end(buffer, i + 2)
                 if end is None:
                     if not self._hold_negotiation(buffer[i:]):
                         # Too large to buffer. Keep skipping the payload as it
                         # streams in; forgetting the state here would emit the
                         # rest of the subnegotiation as terminal content.
                         self._discarding_subnegotiation = True
-                        self._hold_trailing_iac(buffer)
+                        if dangling_iac:
+                            self._pending_negotiation.append(IAC)
                     return bytes(out)
                 i = end
                 continue
@@ -251,15 +268,16 @@ class TelnetSession:
         self._pending_negotiation.extend(tail)
         return True
 
-    def _hold_trailing_iac(self, buffer: bytes) -> None:
-        """Keep a trailing IAC so an ``IAC SE`` split across reads still matches."""
 
-        if buffer.endswith(bytes([IAC])):
-            self._pending_negotiation.append(IAC)
+def _subnegotiation_end(buffer: bytes, start: int) -> tuple[int | None, bool]:
+    """Locate the ``IAC SE`` that ends a subnegotiation.
 
-
-def _subnegotiation_end(buffer: bytes, start: int) -> int | None:
-    """Return the index just past the ``IAC SE`` that ends a subnegotiation."""
+    Returns the index just past ``IAC SE`` (or ``None`` if the terminator has
+    not arrived) plus whether the scan ended on an unpaired trailing ``IAC``.
+    Only an unpaired ``IAC`` may be held for the next read: re-holding the
+    second byte of a consumed ``IAC IAC`` escape would let a following data
+    byte of 0xF0 falsely terminate the subnegotiation.
+    """
 
     i = start
     while i < len(buffer):
@@ -267,8 +285,8 @@ def _subnegotiation_end(buffer: bytes, start: int) -> int | None:
             i += 1
             continue
         if i + 1 >= len(buffer):
-            return None
+            return None, True
         if buffer[i + 1] == SE:
-            return i + 2
+            return i + 2, False
         i += 2
-    return None
+    return None, False

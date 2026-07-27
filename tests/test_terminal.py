@@ -125,3 +125,13 @@ def test_observe_turn_can_require_byte_quiet_after_invisible_bytes():
     assert observation.model_text == "Command:"
     assert observation.byte_quiet_ms >= 50
     assert observation.bytes_read == len(b"Command:\x1b[0m")
+
+
+def test_terminal_screen_decodes_multibyte_split_across_feeds():
+    screen = TerminalScreen(columns=10, lines=2, encoding="utf-8")
+
+    screen.feed(b"\xe2\x94")
+    screen.feed(b"\x80A")
+
+    assert "─A" in screen.model_text()
+    assert "�" not in screen.model_text()

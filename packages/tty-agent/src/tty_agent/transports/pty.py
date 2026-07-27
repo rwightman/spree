@@ -61,13 +61,21 @@ class PtySession:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 close_fds=True,
-                preexec_fn=lambda: self._prepare_child_terminal(slave_fd),
+                start_new_session=True,
+                preexec_fn=_acquire_controlling_terminal,
             )
+        except BaseException:
+            os.close(master_fd)
+            raise
         finally:
             os.close(slave_fd)
         self._master_fd = master_fd
-        os.set_blocking(master_fd, False)
-        self._transcript.open()
+        try:
+            os.set_blocking(master_fd, False)
+            self._transcript.open()
+        except BaseException:
+            self.close()
+            raise
 
     def resize(self, columns: int, lines: int) -> None:
         if columns <= 0 or lines <= 0:
@@ -78,17 +86,24 @@ class PtySession:
             self._set_window_size(self._master_fd)
 
     def close(self) -> None:
-        if self._master_fd is not None:
-            os.close(self._master_fd)
-            self._master_fd = None
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait(timeout=1)
-        self._transcript.close()
+        try:
+            if self._master_fd is not None:
+                os.close(self._master_fd)
+                self._master_fd = None
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    try:
+                        self._proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        # Unreapable (e.g. blocked in uninterruptible sleep);
+                        # a later poll() will reap it if it ever exits.
+                        pass
+        finally:
+            self._transcript.close()
 
     def __enter__(self) -> "PtySession":
         self.connect()
@@ -118,10 +133,26 @@ class PtySession:
     def send_bytes(self, payload: bytes) -> None:
         if self._master_fd is None:
             raise SessionDisconnected("session is not connected")
-        try:
-            os.write(self._master_fd, payload)
-        except OSError as exc:
-            raise SessionDisconnected(f"local PTY process exited while sending: {exc}") from exc
+        # The PTY input queue is small (~4KB), so a stalled child can accept only
+        # part of a write; retry the remainder until the deadline instead of
+        # silently truncating it.
+        view = memoryview(payload)
+        deadline = time.monotonic() + self.timeout
+        while view:
+            try:
+                view = view[os.write(self._master_fd, view) :]
+            except BlockingIOError:
+                pass
+            except OSError as exc:
+                raise SessionDisconnected(f"local PTY process exited while sending: {exc}") from exc
+            if not view:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SessionDisconnected(
+                    f"local PTY input queue stayed full for {self.timeout:g}s while sending"
+                )
+            select.select([], [self._master_fd], [], min(0.2, remaining))
         self._sent_bytes.append(bytes(payload))
 
     def drain_sent_bytes(self) -> tuple[bytes, ...]:
@@ -176,6 +207,13 @@ class PtySession:
         payload = struct.pack("HHHH", self.lines, self.columns, 0, 0)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, payload)
 
-    def _prepare_child_terminal(self, slave_fd: int) -> None:
-        os.setsid()
-        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+def _acquire_controlling_terminal() -> None:
+    """Adopt the PTY slave as the controlling terminal.
+
+    Runs in the forked child, after ``start_new_session`` has called ``setsid``
+    and stdin has been redirected to the slave; kept to a single ioctl because
+    ``preexec_fn`` must not do real work in a child of a threaded parent.
+    """
+
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)

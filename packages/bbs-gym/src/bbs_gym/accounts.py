@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tty_agent.ids import validate_agent_id
+
 
 class AccountConfigError(ValueError):
     """Raised when the agent registry is missing or invalid."""
@@ -22,6 +24,12 @@ class AgentRecord:
     security_level: int | None = None
     model: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        try:
+            validate_agent_id(self.agent_id)
+        except ValueError as exc:
+            raise AccountConfigError(str(exc)) from exc
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AgentRecord":
@@ -50,7 +58,7 @@ class AgentRecord:
             "agent_id": self.agent_id,
             "bbs_alias": self.bbs_alias,
             "security_level": self.security_level,
-            "model": self.model,
+            "model": redacted_model_config(self.model),
             "metadata": self.metadata,
         }
         if self.bbs_password_env is not None:
@@ -128,6 +136,38 @@ class AgentRegistry:
 
     def provision_payload(self) -> dict[str, Any]:
         return {"agents": [record.provision_dict() for record in self.agents.values()]}
+
+
+_SENSITIVE_KEY_MARKERS = ("api_key", "apikey", "secret", "password")
+
+
+def redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Copy a model config with provider credentials replaced by a placeholder.
+
+    Model configs can hold inline API keys; anything shown to users, logged, or
+    attached to observation metadata must go through this first.
+    """
+
+    redacted: dict[str, Any] = {}
+    for key, value in config.items():
+        key_fold = key.casefold()
+        if any(marker in key_fold for marker in _SENSITIVE_KEY_MARKERS) or (
+            key_fold == "token" or key_fold.endswith("_token")
+        ):
+            redacted[key] = "[redacted]"
+        else:
+            redacted[key] = _redacted_model_value(value)
+    return redacted
+
+
+def _redacted_model_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return redacted_model_config(value)
+    if isinstance(value, list):
+        return [_redacted_model_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redacted_model_value(item) for item in value)
+    return value
 
 
 def load_agent_registry(path: str | Path | None, required: bool = False) -> AgentRegistry | None:

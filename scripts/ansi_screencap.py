@@ -263,17 +263,20 @@ def write_gif(
     if not frame_slices:
         raise SystemExit("no trace steps matched the requested GIF range")
 
-    transcript = frame_slices[-1].transcript_path.read_bytes()
-    frames = [
-        render_frame(
-            render_screen(transcript[:frame.byte_count], columns, lines, frame.encoding),
-            columns,
-            lines,
-            font_path,
-            font_size,
+    transcripts: dict[Path, bytes] = {}
+    frames = []
+    for frame in frame_slices:
+        if frame.transcript_path not in transcripts:
+            transcripts[frame.transcript_path] = frame.transcript_path.read_bytes()
+        frames.append(
+            render_frame(
+                render_screen(transcripts[frame.transcript_path][:frame.byte_count], columns, lines, frame.encoding),
+                columns,
+                lines,
+                font_path,
+                font_size,
+            )
         )
-        for frame in frame_slices
-    ]
 
     out.parent.mkdir(parents=True, exist_ok=True)
     first, rest = frames[0], frames[1:]
@@ -395,10 +398,11 @@ def cell_style(cell: Any) -> str:
     styles = [f"color:{fg}", f"background-color:{bg}"]
     if cell.italics:
         styles.append("font-style:italic")
-    if cell.underscore:
-        styles.append("text-decoration:underline")
-    if cell.strikethrough:
-        styles.append("text-decoration:line-through")
+    decorations = [
+        name for flag, name in ((cell.underscore, "underline"), (cell.strikethrough, "line-through")) if flag
+    ]
+    if decorations:
+        styles.append(f"text-decoration:{' '.join(decorations)}")
     if cell.blink:
         styles.append("opacity:0.75")
     return ";".join(styles)

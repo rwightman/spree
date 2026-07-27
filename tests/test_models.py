@@ -461,7 +461,8 @@ def test_claude_cli_adapter_invokes_claude_print(monkeypatch):
     assert "--bare" not in captured["command"]
     assert captured["command"][captured["command"].index("--model") + 1] == "claude-sonnet-4-6"
     assert captured["command"][captured["command"].index("--permission-mode") + 1] == "dontAsk"
-    assert "--tools" not in captured["command"]
+    # Tool isolation must be explicit: the default disables the CLI's own tools.
+    assert captured["command"][captured["command"].index("--tools") + 1] == ""
     assert captured["command"][-1] == "--debug"
     assert captured["timeout"] == 42.0
     assert "SYSTEM MESSAGE:\nsystem schema" in captured["input"]
@@ -564,3 +565,102 @@ def test_claude_cli_adapter_timeout_includes_stdout_and_stderr(monkeypatch):
         assert exc.stderr == "partial stderr"
     else:
         raise AssertionError("expected ModelTimeoutError")
+
+
+def test_claude_cli_adapter_returns_empty_result_as_empty(monkeypatch):
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = '{"type":"result","session_id":"11111111-2222-3333-4444-555555555555","result":"","usage":{}}'
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", lambda *_args, **_kwargs: Result())
+    adapter = ClaudeCliAdapter()
+
+    # An empty completion must not fall back to the raw JSON envelope, which
+    # would otherwise be merged into campaign memory by commit_memory.
+    assert adapter.chat([ModelMessage("user", "screen")]) == ""
+
+
+def test_codex_cli_adapter_stateful_missing_output_returns_empty(monkeypatch, tmp_path):
+    session_id = "11111111-2222-3333-4444-555555555555"
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = f'{{"type":"session_configured","session_id":"{session_id}"}}\n'
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        del command, input, text, capture_output, timeout, cwd, check
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = CodexCliAdapter(stateful=True, session_file=tmp_path / "codex.session")
+
+    # --json stdout is an event stream, never a chat message.
+    assert adapter.chat([ModelMessage("user", "screen")]) == ""
+
+
+def test_claude_cli_adapter_follows_forked_session_ids(monkeypatch, tmp_path):
+    session_ids = iter(
+        [
+            "11111111-2222-3333-4444-555555555555",
+            "66666666-7777-8888-9999-000000000000",
+        ]
+    )
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def fake_run(*_args, **_kwargs):
+        return Result(f'{{"session_id":"{next(session_ids)}","result":"ok"}}')
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    session_file = tmp_path / "claude.session"
+    adapter = ClaudeCliAdapter(stateful=True, session_file=session_file)
+
+    adapter.chat([ModelMessage("user", "one")])
+    adapter.chat([ModelMessage("user", "two")])
+
+    # A CLI that forks a session on resume reports the new id; resume that one.
+    assert adapter.session_id == "66666666-7777-8888-9999-000000000000"
+    assert session_file.read_text(encoding="utf-8").strip() == "66666666-7777-8888-9999-000000000000"
+
+
+def test_openai_compatible_adapter_rejects_non_string_content(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        del url, payload, headers, timeout
+        return {"choices": [{"message": {"content": [{"type": "text", "text": "hi"}]}}]}
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(model="test-model")
+
+    with pytest.raises(ModelError, match="unexpected OpenAI-compatible response"):
+        adapter.chat([ModelMessage("user", "screen")])
+
+
+def test_anthropic_adapter_rejects_response_without_text_blocks(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        del url, payload, headers, timeout
+        return {"content": [{"type": "thinking", "thinking": "hmm"}]}
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = AnthropicAdapter(model="claude-sonnet-5", api_key="test")
+
+    with pytest.raises(ModelError, match="no text blocks"):
+        adapter.chat([ModelMessage("user", "screen")])
+
+
+def test_anthropic_adapter_rejects_malformed_text_block(monkeypatch):
+    def fake_post_json(url, payload, headers, timeout):
+        del url, payload, headers, timeout
+        return {"content": [{"type": "text", "text": None}]}
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = AnthropicAdapter(model="claude-sonnet-5", api_key="test")
+
+    with pytest.raises(ModelError, match="unexpected Anthropic response"):
+        adapter.chat([ModelMessage("user", "screen")])

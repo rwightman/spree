@@ -492,6 +492,15 @@ campaign-memory commits survive. A peer that drops between observing and acting
 stops that agent with `stop_reason="disconnected"`, which the reconnect policy can
 still act on.
 
+Wall budgets are soft admission budgets, not hard deadlines. `max_wall_seconds`
+is checked before starting a round, decision tick, reconnect, or newly queued
+task; once a step is admitted, its observation, model call, and terminal action
+run to completion and commit, and memory finalization happens after expiry. The
+worst-case overrun is roughly one in-flight step per participant, bounded by the
+model and transport timeouts, and `match_completed` records the actual value as
+`wall_overrun_seconds`. Experiments that need strict termination should wrap the
+run in an outer supervisor with its own hard timeout.
+
 ## Future Campaign Scheduling
 
 A campaign runner should sit above `run-activity`, `run-routed`, and

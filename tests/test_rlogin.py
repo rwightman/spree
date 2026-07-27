@@ -1,12 +1,17 @@
+from tty_agent.transports.base import SessionDisconnected
 from tty_agent.transports.rlogin import RLoginSession
 
 
 class FakeSocket:
     def __init__(self):
         self.sent = bytearray()
+        self.closed = False
 
     def sendall(self, data):
         self.sent.extend(data)
+
+    def close(self):
+        self.closed = True
 
 
 def test_rlogin_handshake_uses_password_as_client_user_by_default():
@@ -70,3 +75,63 @@ def test_rlogin_reports_transcript_position():
     session._transcript.record(b"abc")
 
     assert session.transcript_position() == 3
+
+
+def test_rlogin_send_timeout_reports_stall_not_close():
+    import pytest
+
+    from tty_agent.transports.base import SessionDisconnected
+
+    class TimingOutSocket:
+        def sendall(self, _data):
+            raise TimeoutError("timed out")
+
+    session = RLoginSession(timeout=3.0)
+    session._sock = TimingOutSocket()
+
+    with pytest.raises(SessionDisconnected) as excinfo:
+        session.send_bytes(b"x")
+
+    assert "stopped accepting data" in str(excinfo.value)
+
+
+def test_rlogin_connect_resets_ack_state(monkeypatch):
+    class FakeConnectedSocket:
+        def sendall(self, _data):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "tty_agent.transports.rlogin.socket.create_connection",
+        lambda *_args, **_kwargs: FakeConnectedSocket(),
+    )
+    session = RLoginSession()
+    session._ack_pending = False
+
+    session.connect()
+
+    assert session._ack_pending is True
+    assert session._strip_initial_ack(b"\x00hello") == b"hello"
+
+
+def test_rlogin_connect_closes_socket_when_handshake_fails(monkeypatch):
+    import pytest
+
+    class FailingSocket(FakeSocket):
+        def sendall(self, _data):
+            raise OSError("handshake failed")
+
+    connected_socket = FailingSocket()
+    monkeypatch.setattr(
+        "tty_agent.transports.rlogin.socket.create_connection",
+        lambda *_args, **_kwargs: connected_socket,
+    )
+    session = RLoginSession()
+
+    with pytest.raises(SessionDisconnected, match="handshake failed"):
+        session.connect()
+
+    assert connected_socket.closed is True
+    assert session._sock is None

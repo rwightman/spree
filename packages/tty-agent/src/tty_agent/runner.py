@@ -42,6 +42,11 @@ PromptLayout = Literal["timeline_first", "cache_friendly"]
 PromptStage = Literal["full", "bootstrap", "delta"]
 
 
+def _recent_window(steps: list["StepRecord"], keep: int) -> list["StepRecord"]:
+    # steps[-0:] would return the whole list, silently unbounding the prompt.
+    return steps[-keep:] if keep > 0 else []
+
+
 @dataclass
 class ActivityBudget:
     max_decision_ticks: int = 50
@@ -176,12 +181,16 @@ class ActivityRunState:
     campaign_memory: dict[str, Any]
     session_summary: SessionSummary = field(default_factory=SessionSummary)
     recent_steps: list[StepRecord] = field(default_factory=list)
+    # Leading entries of recent_steps already folded into session_summary; they
+    # are kept only as prompt-continuity context and are not re-compacted.
+    summarized_recent_steps: int = 0
     all_steps: list[StepRecord] = field(default_factory=list)
     stop_reason: str = "budget"
     last_observation: Observation | None = None
     previous_observation: Observation | None = None
     last_action_for_hints: Action | None = None
     active_profile: ActivityProfile | None = None
+    active_route_name: str = "default"
     decision_prompts_sent: dict[str, int] = field(default_factory=dict)
     completed: bool = False
 
@@ -292,28 +301,17 @@ class ActivityRunner:
                 )
             )
 
-        if not state.budget.remaining():
-            state.stop_reason = "budget"
-            state.completed = True
-            return PreparedActivityStep(
-                terminal_step=self._record_terminal_step(
-                    state,
-                    observation=observation,
-                    stop_reason=state.stop_reason,
-                    active_profile=active_profile,
-                    events=route_events,
-                )
-            )
-
-        if self._should_compact(active_profile, state.all_steps, state.recent_steps):
+        unsummarized_steps = state.recent_steps[state.summarized_recent_steps:]
+        if unsummarized_steps and self._should_compact(active_profile, state.all_steps, unsummarized_steps):
             state.session_summary = self._compact(
                 active_profile,
                 state.model,
                 state.session_summary,
-                state.recent_steps,
+                unsummarized_steps,
                 observation,
             )
-            state.recent_steps = state.recent_steps[-active_profile.recent_steps_to_keep:]
+            state.recent_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
+            state.summarized_recent_steps = len(state.recent_steps)
 
         hints = ObservationHints.from_observation(
             observation=observation,
@@ -321,6 +319,9 @@ class ActivityRunner:
             last_action=state.last_action_for_hints,
             modality_profile=active_profile.input_modality_profile,
         )
+        # Decision prompts see a bounded window; the full recent_steps list is
+        # retained for compaction and the end-of-run memory commit.
+        prompt_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
         prompt_module_results = self._prompt_module_results(
             active_profile,
             agent_id=state.agent_id,
@@ -328,7 +329,7 @@ class ActivityRunner:
             hints=hints,
             campaign_memory=state.campaign_memory,
             session_summary=state.session_summary,
-            recent_steps=state.recent_steps,
+            recent_steps=prompt_steps,
             budget=state.budget,
         )
         profile_prompt_count = state.decision_prompts_sent.get(active_profile.name, 0)
@@ -338,14 +339,18 @@ class ActivityRunner:
             agent_id=state.agent_id,
             campaign_memory=state.campaign_memory,
             session_summary=state.session_summary,
-            recent_steps=state.recent_steps,
+            recent_steps=prompt_steps,
             budget=state.budget,
             prompt_module_results=prompt_module_results,
             prompt_stage=prompt_stage,
         )
 
         action, validation = self._decide_with_retry(active_profile, state.model, prompt)
-        state.decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
+        if action is not None or validation.get("invalid_responses"):
+            # Count only prompts the model actually received; otherwise a
+            # stateful_delta bootstrap that never reached the provider would
+            # permanently downgrade the run to delta prompts.
+            state.decision_prompts_sent[active_profile.name] = profile_prompt_count + 1
         return PreparedActivityStep(
             observation=observation,
             active_profile=active_profile,
@@ -387,7 +392,9 @@ class ActivityRunner:
         if action is not None:
             try:
                 execution = self._execution_record(state.agent.act_action(action))
-            except ActionError as exc:
+            except (ActionError, UnicodeEncodeError) as exc:
+                # A profile without require_encoding can validate text the
+                # session encoding cannot represent; fail the step, not the run.
                 executed_action = None
                 state.budget.record_validation_failure()
                 validation = self._execution_error_validation(validation, str(exc))
@@ -420,7 +427,6 @@ class ActivityRunner:
         )
         state.all_steps.append(step)
         state.recent_steps.append(step)
-        state.recent_steps = state.recent_steps[-active_profile.recent_steps_to_keep:]
         self._write_step(step)
         state.previous_observation = observation
         state.last_action_for_hints = executed_action
@@ -1091,30 +1097,39 @@ class RoutedActivityRunner(ActivityRunner):
         self.name = name
         self.default_profile = default_profile
         self.routes = tuple(sorted(enumerate(routes), key=lambda item: (-item[1].priority, item[0])))
-        self._active_route_name = "default"
 
     def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
-        self.profile = self.default_profile
-        self._active_route_name = "default"
-        result = self._run(
-            agent,
-            model,
-            budget,
-            profile_selector=self._select_profile,
-            stop_on_completion=False,
-        )
+        result = self._run(agent, model, budget, stop_on_completion=False)
         result.activity = self.name
         return result
 
+    def prepare_step(
+            self,
+            state: ActivityRunState,
+            profile_selector: Callable[[Observation, ActivityProfile], tuple[ActivityProfile, list[dict[str, Any]]]]
+            | None = None,
+            stop_on_completion: bool = True,
+    ) -> PreparedActivityStep | None:
+        # Route on every step, including through the external
+        # start_state/prepare_step/run_step API used by match schedulers; route
+        # tracking lives on the state so one runner can serve concurrent runs.
+        if profile_selector is None:
+
+            def profile_selector(observation: Observation, current_profile: ActivityProfile):
+                return self._select_profile(state, observation, current_profile)
+
+        return super().prepare_step(state, profile_selector=profile_selector, stop_on_completion=stop_on_completion)
+
     def _select_profile(
             self,
+            state: ActivityRunState,
             observation: Observation,
             current_profile: ActivityProfile,
     ) -> tuple[ActivityProfile, list[dict[str, Any]]]:
         route = self._matched_route(observation)
         route_name = route.name if route is not None else "default"
         selected_profile = route.profile if route is not None else self.default_profile
-        if route_name == self._active_route_name and selected_profile.name == current_profile.name:
+        if route_name == state.active_route_name and selected_profile.name == current_profile.name:
             return selected_profile, []
 
         event = {
@@ -1127,7 +1142,7 @@ class RoutedActivityRunner(ActivityRunner):
             event["reason"] = route.reason
         elif route is None:
             event["reason"] = "no route matched; using default profile"
-        self._active_route_name = route_name
+        state.active_route_name = route_name
         return selected_profile, [event]
 
     def _matched_route(self, observation: Observation) -> ActivityRoute | None:

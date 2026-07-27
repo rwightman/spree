@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 import time
 from dataclasses import dataclass
@@ -72,6 +73,9 @@ class TerminalScreen:
         self.encoding = encoding
         self.screen = _ProcessInputScreen(columns, lines)
         self.stream = pyte.Stream(self.screen)
+        # A multibyte character can straddle two reads; an incremental decoder
+        # holds the partial sequence instead of rendering replacement chars.
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
 
     @property
     def cursor(self) -> tuple[int, int]:
@@ -79,7 +83,7 @@ class TerminalScreen:
 
     def feed(self, data: bytes) -> bool:
         before = self.signature()
-        text = data.decode(self.encoding, errors="replace").replace("\ufeff", "")
+        text = self._decoder.decode(data).replace("\ufeff", "")
         self.stream.feed(text)
         return self.signature() != before
 

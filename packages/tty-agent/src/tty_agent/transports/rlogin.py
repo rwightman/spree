@@ -52,10 +52,17 @@ class RLoginSession:
         self._transcript = TranscriptWriter(self.transcript_path)
 
     def connect(self) -> None:
+        # A reused session object must strip the new connection's ack byte too.
+        self._ack_pending = True
+        # create_connection leaves the socket in timeout mode, so sendall retries
+        # partial sends itself instead of failing on a full send buffer.
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
-        self._sock.setblocking(False)
-        self._transcript.open()
-        self._write(self._handshake())
+        try:
+            self._transcript.open()
+            self._write(self._handshake())
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._sock is not None:
@@ -99,6 +106,10 @@ class RLoginSession:
             raise SessionDisconnected("session is not connected")
         try:
             self._sock.sendall(payload)
+        except TimeoutError as exc:
+            raise SessionDisconnected(
+                f"remote rlogin peer stopped accepting data for {self.timeout:g}s while sending"
+            ) from exc
         except OSError as exc:
             raise SessionDisconnected(f"remote rlogin connection closed while sending: {exc}") from exc
 
@@ -124,7 +135,7 @@ class RLoginSession:
                 continue
             try:
                 chunk = self._sock.recv(4096)
-            except BlockingIOError:
+            except (BlockingIOError, TimeoutError):
                 continue
             except OSError as exc:
                 # A peer that resets the connection surfaces here rather than as a

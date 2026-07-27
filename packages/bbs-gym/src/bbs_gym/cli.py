@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -113,11 +114,11 @@ def run_activity(args: argparse.Namespace) -> int:
         registry = load_agent_registry(args.agents_config, required=False)
         model = build_model(args, registry)
         model_metadata = build_model_metadata(args, registry)
+        profile = build_activity_profile(args, registry)
     except (AccountConfigError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    profile = build_activity_profile(args, registry)
     runner = ActivityRunner(profile, log_path=args.log_path, run_objective=args.run_objective or "")
 
     try:
@@ -243,7 +244,8 @@ def _apply_match_config(args: argparse.Namespace) -> None:
         return
 
     config = _load_match_config(Path(path))
-    _set_config_values(
+    changed: list[str] = []
+    changed += _set_config_values(
         args,
         config,
         {
@@ -269,7 +271,7 @@ def _apply_match_config(args: argparse.Namespace) -> None:
             "disabled_actions": "disabled_actions",
         },
     )
-    _set_config_values(
+    changed += _set_config_values(
         args,
         _config_mapping(config, "scheduler"),
         {
@@ -282,7 +284,7 @@ def _apply_match_config(args: argparse.Namespace) -> None:
             "max_workers": "max_workers",
         },
     )
-    _set_config_values(
+    changed += _set_config_values(
         args,
         _config_mapping(config, "budget"),
         {
@@ -291,6 +293,10 @@ def _apply_match_config(args: argparse.Namespace) -> None:
             "max_wall_seconds": "max_wall_seconds",
         },
     )
+    if changed:
+        # Config wins over command-line flags by design; say so instead of
+        # silently ignoring what the user typed.
+        print(f"match config {path} overrides: {', '.join(changed)}", file=sys.stderr)
     if "participants" in config:
         args._match_participants_config = _match_participant_specs_from_config(config["participants"])
 
@@ -310,10 +316,14 @@ def _load_match_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def _set_config_values(args: argparse.Namespace, config: dict[str, Any], mapping: dict[str, str]) -> None:
+def _set_config_values(args: argparse.Namespace, config: dict[str, Any], mapping: dict[str, str]) -> list[str]:
+    changed: list[str] = []
     for config_key, arg_key in mapping.items():
         if config_key in config:
+            if getattr(args, arg_key, None) != config[config_key]:
+                changed.append(arg_key)
             setattr(args, arg_key, config[config_key])
+    return changed
 
 
 def _config_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
@@ -348,18 +358,31 @@ def _validate_match_args(args: argparse.Namespace) -> None:
     _validate_choice(args.scheduler_mode, "scheduler_mode", get_args(MatchSchedulerMode))
     _validate_choice(args.match_order, "match_order", get_args(MatchOrder))
     _validate_choice(args.disconnect_policy, "disconnect_policy", get_args(DisconnectPolicy))
-    if args.max_reconnects < 0:
-        raise ValueError("max_reconnects must be >= 0")
-    if args.reconnect_delay < 0:
-        raise ValueError("reconnect_delay must be >= 0")
-    if args.max_workers is not None and args.max_workers < 1:
-        raise ValueError("max_workers must be >= 1")
-    if args.max_rounds < 1:
-        raise ValueError("max_rounds must be >= 1")
-    if args.max_decision_ticks < 1:
-        raise ValueError("max_decision_ticks must be >= 1")
-    if args.max_wall_seconds <= 0:
-        raise ValueError("max_wall_seconds must be > 0")
+    _require_int(args.max_reconnects, "max_reconnects", minimum=0)
+    _require_number(args.reconnect_delay, "reconnect_delay", minimum=0)
+    if args.max_workers is not None:
+        _require_int(args.max_workers, "max_workers", minimum=1)
+    _require_int(args.max_rounds, "max_rounds", minimum=1)
+    _require_int(args.max_decision_ticks, "max_decision_ticks", minimum=1)
+    _require_number(args.max_wall_seconds, "max_wall_seconds", minimum=0, exclusive=True)
+
+
+def _require_int(value: object, name: str, minimum: int) -> None:
+    # A config file can supply any type; comparing it blind would raise
+    # TypeError, which run-match does not translate into a config error.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+
+
+def _require_number(value: object, name: str, minimum: float, exclusive: bool = False) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if value <= minimum if exclusive else value < minimum:
+        raise ValueError(f"{name} must be {'>' if exclusive else '>='} {minimum}")
 
 
 def build_match_scheduler_config(args: argparse.Namespace) -> MatchSchedulerConfig:
@@ -463,11 +486,18 @@ def build_match_participants(
         registry: AgentRegistry | None,
 ) -> list[MatchParticipantRuntime]:
     participants: list[MatchParticipantRuntime] = []
+    log_paths: dict[Path, str] = {}
     for spec in specs:
-        participant_args = _participant_args(args, spec)
+        participant_args = _participant_args(args, spec, registry)
         opponents = [other.agent_id for other in specs if other.agent_id != spec.agent_id]
         profile = build_activity_profile(participant_args, registry)
         log_path = _agent_log_path(args.log_path, spec.agent_id)
+        if log_path in log_paths:
+            raise ValueError(
+                f"agent ids {log_paths[log_path]!r} and {spec.agent_id!r} sanitize to the same "
+                f"per-agent log path {log_path}; rename one of them"
+            )
+        log_paths[log_path] = spec.agent_id
         objective = _format_match_objective(args.run_objective or DEFAULT_MATCH_OBJECTIVE, spec.agent_id, opponents)
         runner = ActivityRunner(profile, log_path=log_path, run_objective=objective)
         participants.append(
@@ -488,14 +518,19 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
     provider = getattr(args, "provider", None) or _config_str(model_config, "provider") or "openai-compatible"
     overrides: dict[str, object] = {}
     if args.observe_timeout is not None:
+        _require_number(args.observe_timeout, "observe_timeout", minimum=0, exclusive=True)
         overrides["observe_timeout"] = args.observe_timeout
     if args.stable_ms is not None:
+        _require_int(args.stable_ms, "stable_ms", minimum=0)
         overrides["stable_ms"] = args.stable_ms
     if getattr(args, "byte_quiet_ms", None) is not None:
+        _require_int(args.byte_quiet_ms, "byte_quiet_ms", minimum=0)
         overrides["byte_quiet_ms"] = args.byte_quiet_ms
     if getattr(args, "recent_steps_to_keep", None) is not None:
+        _require_int(args.recent_steps_to_keep, "recent_steps_to_keep", minimum=0)
         overrides["recent_steps_to_keep"] = args.recent_steps_to_keep
     if getattr(args, "model_error_retries", None) is not None:
+        _require_int(args.model_error_retries, "model_error_retries", minimum=0)
         overrides["model_error_retries"] = args.model_error_retries
     if getattr(args, "prompt_mode", None) is not None:
         overrides["prompt_mode"] = args.prompt_mode
@@ -523,7 +558,11 @@ def _parse_match_participant(value: str) -> MatchParticipantSpec:
     return MatchParticipantSpec(agent_id=agent_id, provider=provider, model=model)
 
 
-def _participant_args(args: argparse.Namespace, spec: MatchParticipantSpec) -> argparse.Namespace:
+def _participant_args(
+        args: argparse.Namespace,
+        spec: MatchParticipantSpec,
+        registry: AgentRegistry | None = None,
+) -> argparse.Namespace:
     data = vars(args).copy()
     data["agent_id"] = spec.agent_id
     if spec.config is not None:
@@ -534,12 +573,19 @@ def _participant_args(args: argparse.Namespace, spec: MatchParticipantSpec) -> a
     if spec.model is not None:
         data["model"] = spec.model
     if "stateful" in data:
-        provider = data.get("provider")
+        provider = data.get("provider") or _registry_provider(registry, spec.agent_id)
         if provider == "codex":
             data["codex_stateful"] = bool(data["stateful"])
         elif provider == "claude":
             data["claude_stateful"] = bool(data["stateful"])
     return argparse.Namespace(**data)
+
+
+def _registry_provider(registry: AgentRegistry | None, agent_id: str) -> str | None:
+    record = registry.maybe_get(agent_id) if registry is not None else None
+    if record is None:
+        return None
+    return _config_str(record.model, "provider")
 
 
 def _format_match_objective(template: str, agent_id: str, opponents: list[str]) -> str:
@@ -763,7 +809,12 @@ def accounts_provision(args: argparse.Namespace) -> int:
     runtime_tmp = Path("runtime/tmp")
     runtime_tmp.mkdir(parents=True, exist_ok=True)
     payload_path = runtime_tmp / "sbbs_agents.resolved.json"
-    payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # The payload holds resolved plaintext BBS passwords, including ones the
+    # config deliberately kept off disk via *_env keys; owner-only access.
+    fd = os.open(payload_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    payload_path.chmod(0o600)
     script_path = Path("scripts/sbbs_provision_agents.js")
     commands = [
         ["docker", "compose", "cp", str(script_path), f"{args.compose_service}:/tmp/sbbs_provision_agents.js"],
@@ -845,13 +896,15 @@ def _claude_bare(args: argparse.Namespace, model_config: dict[str, Any]) -> bool
     return False
 
 
-def _claude_tools(args: argparse.Namespace, model_config: dict[str, Any]) -> str | None:
+def _claude_tools(args: argparse.Namespace, model_config: dict[str, Any]) -> str:
     value = getattr(args, "claude_tools", None)
     if value is not None:
-        return value or None
+        return value
     if "tools" in model_config:
-        return _config_str(model_config, "tools")
-    return None
+        return _config_str(model_config, "tools") or ""
+    # Claude's CLI enables its normal tool set when --tools is omitted. Keep
+    # terminal-game sessions isolated by explicitly passing an empty tool list.
+    return ""
 
 
 def _without_empty_values(data: dict[str, object | None]) -> dict[str, object]:
@@ -933,6 +986,8 @@ def _add_runner_args(
 ) -> None:
     """Budget, prompt-shaping, and logging options shared by every session command."""
 
+    if wall_seconds_help is None:
+        wall_seconds_help = "soft wall-clock admission budget; a decision already in flight finishes before stopping"
     parser.add_argument("--profile-objective", help=profile_objective_help)
     parser.add_argument("--run-objective", help=run_objective_help)
     parser.add_argument("--max-decision-ticks", type=int, default=max_decision_ticks, help=decision_ticks_help)
@@ -1065,7 +1120,9 @@ def main(argv: list[str] | None = None) -> int:
             "remove an action from every participant's activity schema; repeatable, e.g. --disable-action hangup"
         ),
         decision_ticks_help="maximum committed decision ticks per participant",
-        wall_seconds_help="match-level wall-clock budget shared by all participants",
+        wall_seconds_help=(
+            "soft match-level admission budget shared by all participants; in-flight decisions finish before stopping"
+        ),
     )
     match_parser.set_defaults(func=run_match)
 

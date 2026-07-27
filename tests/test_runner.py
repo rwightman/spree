@@ -841,7 +841,7 @@ def test_activity_runner_reports_disconnect(tmp_path):
     assert result.steps == []
 
 
-def test_activity_runner_reports_budget_when_wall_clock_expires_after_observe(tmp_path):
+def test_activity_runner_finishes_step_admitted_before_wall_clock_expires(tmp_path):
     agent = SlowObserveAgent()
     runner = ActivityRunner(
         ActivityProfile(name="bbs-menu", objective="test wall clock stop"),
@@ -855,12 +855,10 @@ def test_activity_runner_reports_budget_when_wall_clock_expires_after_observe(tm
         ActivityBudget(max_decision_ticks=5, max_wall_seconds=0.01),
     )
 
-    assert result.stop_reason == "budget"
+    assert result.stop_reason == "hangup"
     assert len(result.steps) == 1
-    assert result.steps[0].action is None
-    assert result.steps[0].validation["terminal"] is True
-    assert result.steps[0].validation["stop_reason"] == "budget"
-    assert agent.actions == []
+    assert result.steps[0].action == {"action": "hangup", "arguments": {}}
+    assert agent.actions == [Action(action="hangup")]
 
 
 def test_activity_runner_compacts_on_recent_context_size(tmp_path):
@@ -941,3 +939,179 @@ def test_activity_runner_logs_terminal_observation_after_profile_completion(tmp_
     assert len(log_lines) == 2
     assert json.loads(log_lines[1])["validation"]["stop_reason"] == "profile_complete"
     assert JsonMemoryStore(tmp_path / "memory").load("agent-001") == {"durable_facts": ["Reached TW2."]}
+
+
+class PromptRecordingModel(ScriptedModelAdapter):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.chats: list[str] = []
+
+    def chat(self, messages):
+        self.chats.append("\n".join(message.content for message in messages))
+        return super().chat(messages)
+
+
+def test_compaction_covers_steps_beyond_prompt_window(tmp_path):
+    agent = SequencedScreenAgent(["S1", "S2", "S3", "S4"])
+    model = PromptRecordingModel(
+        [
+            '{"action": "submit_line", "arguments": {"text": "one"}}',
+            '{"action": "submit_line", "arguments": {"text": "two"}}',
+            '{"action": "submit_line", "arguments": {"text": "three"}}',
+            '{"current_state": "Compacted", "last_error": "", "open_subgoals": [], "discovered_facts": [], "failed_actions": [], "strategy_notes": []}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Done."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test compaction coverage",
+            recent_steps_to_keep=1,
+            compact_every_steps=3,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=6))
+
+    assert result.stop_reason == "hangup"
+    assert result.session_summary.current_state == "Compacted"
+
+    compaction_chats = [chat for chat in model.chats if "Compact older terminal activity" in chat]
+    assert len(compaction_chats) == 1
+    # Every step since the last compaction is summarized, not just the prompt window.
+    for marker in ("Step 1", "Step 2", "Step 3", '"text": "one"', '"text": "three"'):
+        assert marker in compaction_chats[0]
+
+    # Decision prompts still see only the bounded recent-step window.
+    fourth_prompt = result.steps[3].prompt["user"]
+    assert "Step 3" in fourth_prompt
+    assert '"text": "one"' not in fourth_prompt
+    assert '"text": "two"' not in fourth_prompt
+
+    # The end-of-run memory commit sees the steps accumulated since compaction.
+    memory_chats = [chat for chat in model.chats if "memory patch" in chat]
+    assert len(memory_chats) == 1
+    assert "Step 4" in memory_chats[0]
+
+
+class FailFirstDecideModel(ScriptedModelAdapter):
+    def __init__(self, responses: list[str], failures: int = 1) -> None:
+        super().__init__(responses)
+        self.failures = failures
+
+    def decide(self, prompt, policy=None):
+        if self.failures:
+            self.failures -= 1
+            raise ModelError("provider unreachable")
+        return super().decide(prompt, policy)
+
+
+def test_stateful_delta_resends_bootstrap_after_model_error(tmp_path):
+    model = FailFirstDecideModel(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": []}',
+        ]
+    )
+    profile = ActivityProfile(
+        name="bbs-menu",
+        objective="test bootstrap retry",
+        prompt_mode="stateful_delta",
+        model_error_retries=0,
+    )
+
+    result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        FakeAgent(),
+        model,
+        ActivityBudget(max_decision_ticks=3),
+    )
+
+    # The bootstrap never reached the provider on tick 1, so tick 2 must send it again.
+    assert result.steps[0].action is None
+    assert result.steps[0].prompt["stage"] == "bootstrap"
+    assert result.steps[1].prompt["stage"] == "bootstrap"
+    assert result.steps[1].action is not None
+    assert result.steps[2].prompt["stage"] == "delta"
+
+
+class EncodeFailingAgent(FakeAgent):
+    def act_action(self, action):
+        if action.action == "submit_line":
+            raise UnicodeEncodeError("cp437", "→", 0, 1, "character maps to <undefined>")
+        return super().act_action(action)
+
+
+def test_runner_survives_unencodable_action_text(tmp_path):
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "submit_line", "arguments": {"text": "→"}}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": []}',
+        ]
+    )
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test encode failure"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(EncodeFailingAgent(), model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.stop_reason == "hangup"
+    assert "cp437" in json.dumps(result.steps[0].validation)
+    assert result.steps[0].budget["validation_failures"] == 1
+
+
+def test_routed_runner_routes_through_step_api(tmp_path):
+    agent = SequencedScreenAgent(["Command:", "TradeWars2 menu", "TradeWars2 menu"])
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "wait", "arguments": {}}',
+        ]
+    )
+    default_profile = ActivityProfile(name="bbs-safe", objective="default")
+    tw2_profile = ActivityProfile(name="tw2-game", objective="tw2")
+    runner = RoutedActivityRunner(
+        "auto",
+        default_profile,
+        (
+            ActivityRoute(
+                name="tw2",
+                profile=tw2_profile,
+                matches=lambda observation: "TradeWars2" in observation.model_text,
+                priority=10,
+            ),
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+    state = runner.start_state(agent, model, ActivityBudget(max_decision_ticks=2))
+
+    first = runner.run_step(state, stop_on_completion=False)
+    second = runner.run_step(state, stop_on_completion=False)
+
+    # Routing must work through the external stepping API, not only run().
+    assert first.active_profile == "bbs-safe"
+    assert second.active_profile == "tw2-game"
+    assert second.events[0]["type"] == "profile_switch"
+    assert state.active_route_name == "tw2"
+
+
+def test_zero_recent_steps_window_means_empty_not_unbounded(tmp_path):
+    agent = FakeAgent()
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": []}',
+        ]
+    )
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test zero window", recent_steps_to_keep=0),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(agent, model, ActivityBudget(max_decision_ticks=3))
+
+    # [-0:] would have leaked the entire history into the second prompt.
+    assert "Recent steps:\n(none)" in result.steps[1].prompt["user"]

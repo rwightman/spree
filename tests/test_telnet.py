@@ -11,11 +11,15 @@ class FakeSocket:
     def __init__(self, send_error=None):
         self.sent = bytearray()
         self.send_error = send_error
+        self.closed = False
 
     def sendall(self, data):
         if self.send_error is not None:
             raise self.send_error
         self.sent.extend(data)
+
+    def close(self):
+        self.closed = True
 
 
 def test_strip_ansi_decodes_cp437():
@@ -219,3 +223,98 @@ def test_telnet_transcript_appends_across_reconnects(tmp_path):
     second.close()
 
     assert transcript.read_bytes() == b"FIRSTSECOND"
+
+
+def test_telnet_escapes_iac_in_sent_application_bytes():
+    session = TelnetSession(encoding="cp437")
+    session._sock = FakeSocket()
+
+    session.send_text("\xa0")  # U+00A0 encodes to 0xFF in cp437
+
+    assert bytes(session._sock.sent) == bytes([IAC, IAC])
+    # The action trace records what the agent sent, not the wire escaping.
+    assert session.drain_sent_bytes() == (b"\xff",)
+
+
+def test_telnet_send_timeout_reports_stall_not_close():
+    session = TelnetSession(timeout=3.0)
+    session._sock = FakeSocket(send_error=TimeoutError("timed out"))
+
+    with pytest.raises(SessionDisconnected) as excinfo:
+        session.send_bytes(b"x")
+
+    assert "stopped accepting data" in str(excinfo.value)
+
+
+def test_telnet_discard_mode_handles_escaped_iac_at_chunk_boundary():
+    session = TelnetSession()
+    session._sock = FakeSocket()
+
+    # An oversized subnegotiation switches the parser into discard mode.
+    oversized = bytes([IAC, SB, 1]) + b"x" * 5000
+    assert session._handle_telnet(oversized) == b""
+    assert session._discarding_subnegotiation is True
+
+    # A chunk ending in an escaped IAC IAC pair must not re-hold the second
+    # byte: the following 0xF0 payload byte is data, not SE.
+    assert session._handle_telnet(b"y" * 10 + bytes([IAC, IAC])) == b""
+    assert session._handle_telnet(bytes([SE]) + b"still-subnegotiation") == b""
+
+    # Only the real IAC SE ends the discard.
+    assert session._handle_telnet(bytes([IAC, SE]) + b"APP") == b"APP"
+    assert session._discarding_subnegotiation is False
+
+
+def test_telnet_discard_mode_still_matches_split_terminator():
+    session = TelnetSession()
+    session._sock = FakeSocket()
+
+    oversized = bytes([IAC, SB, 1]) + b"x" * 5000
+    assert session._handle_telnet(oversized) == b""
+
+    # A lone trailing IAC is genuinely half of IAC SE and must be held.
+    assert session._handle_telnet(b"tail" + bytes([IAC])) == b""
+    assert session._handle_telnet(bytes([SE]) + b"APP") == b"APP"
+    assert session._discarding_subnegotiation is False
+
+
+def test_telnet_connect_resets_protocol_state(monkeypatch):
+    class FakeConnectedSocket:
+        def sendall(self, _data):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "tty_agent.transports.telnet.socket.create_connection",
+        lambda *_args, **_kwargs: FakeConnectedSocket(),
+    )
+    session = TelnetSession()
+    session._pending_negotiation.extend(bytes([IAC]))
+    session._discarding_subnegotiation = True
+
+    session.connect()
+
+    assert bytes(session._pending_negotiation) == b""
+    assert session._discarding_subnegotiation is False
+
+
+def test_telnet_connect_closes_socket_when_transcript_setup_fails(monkeypatch):
+    connected_socket = FakeSocket()
+    session = TelnetSession()
+
+    def fail_open():
+        raise OSError("transcript setup failed")
+
+    monkeypatch.setattr(
+        "tty_agent.transports.telnet.socket.create_connection",
+        lambda *_args, **_kwargs: connected_socket,
+    )
+    monkeypatch.setattr(session._transcript, "open", fail_open)
+
+    with pytest.raises(OSError, match="transcript setup failed"):
+        session.connect()
+
+    assert connected_socket.closed is True
+    assert session._sock is None

@@ -419,6 +419,50 @@ def test_sequential_match_commits_memory_when_one_participant_fails(tmp_path):
     assert (tmp_path / "memory" / "alpha" / "campaign.json").exists()
 
 
+def test_reconnect_retries_after_session_disconnected_during_login(tmp_path):
+    class LoginDropGym:
+        """Second connect attempt drops mid-login the way a recycling node does."""
+
+        def __init__(self) -> None:
+            self.connect_attempts: dict[str, int] = {}
+
+        def connect(self, agent_id: str, model_metadata=None):
+            del model_metadata
+            attempts = self.connect_attempts.get(agent_id, 0) + 1
+            self.connect_attempts[agent_id] = attempts
+            if attempts == 1:
+                return DisconnectingAgent(agent_id)
+            if attempts == 2:
+                raise SessionDisconnected("remote terminal connection closed")
+            return FakeAgent(agent_id)
+
+    match_log = tmp_path / "reconnect-login-drop.jsonl"
+
+    result = run_scheduled_match(
+        LoginDropGym(),
+        [participant("alpha", tmp_path)],
+        MatchSchedulerConfig(
+            mode="sequential",
+            max_rounds=2,
+            max_decision_ticks=5,
+            max_wall_seconds=60,
+            disconnect_policy="reconnect",
+            max_reconnects=2,
+            reconnect_delay=0.0,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    failed = [event for event in events if event["type"] == "participant_reconnect_failed"]
+    assert [event["attempt"] for event in failed] == [1]
+    assert "connection closed" in failed[0]["error"]
+    assert any(event["type"] == "participant_reconnected" for event in events)
+    assert events[-1]["type"] == "match_completed"
+    assert events[-1]["error"] == ""
+    assert result.results[0][1].stop_reason == "match_rounds"
+
+
 def participant(
         agent_id: str,
         tmp_path: Path,
@@ -438,3 +482,126 @@ def participant(
         ),
         log_path=tmp_path / f"{agent_id}.jsonl",
     )
+
+
+def test_continuous_match_finishes_admitted_work_after_wall_limit(tmp_path):
+    """The wall budget is a soft admission bound: in-flight work still commits."""
+
+    match_log = tmp_path / "wall-soft.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        [participant("alpha", tmp_path, delay=0.4)],
+        MatchSchedulerConfig(
+            mode="continuous",
+            max_rounds=10,
+            max_decision_ticks=10,
+            max_wall_seconds=0.15,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    types = [event["type"] for event in events]
+    # The admitted decision committed; nothing was abandoned and no new work started.
+    assert result.commit_count == 1
+    assert "scheduler_draining" not in types
+    assert "agent_step_abandoned" not in types
+    assert types[-1] == "match_completed"
+    assert events[-1]["wall_overrun_seconds"] > 0
+    assert result.results[0][1].stop_reason == "budget"
+
+
+def test_continuous_match_reports_late_decision_failure(tmp_path):
+    class DelayedFailingModel(ScriptedModelAdapter):
+        def __init__(self, delay: float) -> None:
+            super().__init__([])
+            self.delay = delay
+
+        def decide(self, _prompt, _policy=None):
+            time.sleep(self.delay)
+            raise RuntimeError("provider blew up mid-decision")
+
+    match_log = tmp_path / "wall-drain-error.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        [participant("alpha", tmp_path, model=DelayedFailingModel(0.3))],
+        MatchSchedulerConfig(
+            mode="continuous",
+            max_rounds=10,
+            max_decision_ticks=10,
+            max_wall_seconds=0.1,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    failed = _event(events, "agent_step_failed")
+    assert "provider blew up" in failed["error"]
+    assert result.results[0][1].stop_reason == "scheduler_error"
+
+
+def test_parallel_race_finishes_admitted_round_after_wall_limit(tmp_path):
+    match_log = tmp_path / "race-wall.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        [
+            participant("alpha", tmp_path, delay=0.5),
+            participant("bravo", tmp_path),
+        ],
+        MatchSchedulerConfig(
+            mode="parallel_race",
+            max_rounds=10,
+            max_decision_ticks=10,
+            max_wall_seconds=0.2,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    types = [event["type"] for event in events]
+    # The admitted round runs to completion: both decisions commit, then no new
+    # round starts.
+    assert _agent_step_order(events) == ["bravo", "alpha"]
+    assert "scheduler_draining" not in types
+    assert "agent_step_abandoned" not in types
+    assert types[-1] == "match_completed"
+    assert events[-1]["wall_overrun_seconds"] > 0
+    stops = {activity.agent_id: activity.stop_reason for _, activity in result.results}
+    # alpha committed after its own wall budget expired; bravo committed within
+    # budget and was retired when the match wall check ended the run.
+    assert stops["alpha"] == "budget"
+    assert stops["bravo"] == "match_wall_seconds"
+
+
+def test_parallel_barrier_finishes_admitted_round_after_wall_limit(tmp_path):
+    match_log = tmp_path / "barrier-wall.jsonl"
+
+    result = run_scheduled_match(
+        FakeGym(),
+        [
+            participant("alpha", tmp_path, delay=0.5),
+            participant("bravo", tmp_path),
+        ],
+        MatchSchedulerConfig(
+            mode="parallel_barrier",
+            max_rounds=10,
+            max_decision_ticks=10,
+            max_wall_seconds=0.2,
+        ),
+        match_log,
+    )
+
+    events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
+    types = [event["type"] for event in events]
+    # The barrier waits for every admitted decision and commits them all.
+    assert _agent_step_order(events) == ["alpha", "bravo"]
+    assert "scheduler_draining" not in types
+    assert "agent_step_abandoned" not in types
+    assert types[-1] == "match_completed"
+    stops = {activity.agent_id: activity.stop_reason for _, activity in result.results}
+    # Both commits land after the wall expired, so both stop on their own budget.
+    assert stops["alpha"] == "budget"
+    assert stops["bravo"] == "budget"

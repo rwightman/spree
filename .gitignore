@@ -9,7 +9,6 @@ build/
 dist/
 .codex
 .idea/
-uv.lock
 config/agents.local.json
 
 # Runtime state and generated transcripts.

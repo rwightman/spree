@@ -234,7 +234,12 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         if not isinstance(message, dict):
             raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
         self.last_reasoning = _optional_string(message.get("reasoning") or message.get("reasoning_content"))
-        return _optional_string(message.get("content"))
+        content = message.get("content")
+        if not isinstance(content, str):
+            # Silently coercing a malformed message to "" would surface later as
+            # an inexplicable invalid-action retry instead of a provider error.
+            raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
+        return content
 
 
 class AnthropicAdapter(TextChatAdapter):
@@ -303,11 +308,20 @@ class AnthropicAdapter(TextChatAdapter):
             raise ModelError(f"unexpected Anthropic response: {response!r}") from exc
         if not isinstance(parts, list):
             raise ModelError(f"unexpected Anthropic response: {response!r}")
-        return "".join(
-            _optional_string(part.get("text"))
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
+        texts: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                raise ModelError(f"unexpected Anthropic response: {response!r}")
+            if part.get("type") != "text":
+                continue
+            if not isinstance(part.get("text"), str):
+                raise ModelError(f"unexpected Anthropic response: {response!r}")
+            texts.append(part["text"])
+        if not texts:
+            # Thinking-only or empty content is a malformed completion for this
+            # API shape; do not coerce it to an empty reply.
+            raise ModelError(f"Anthropic response contained no text blocks: {response!r}")
+        return "".join(texts)
 
 
 class SubprocessCliAdapter(TextChatAdapter):
@@ -403,20 +417,25 @@ class CodexCliAdapter(SubprocessCliAdapter):
                     stdout=result.stdout,
                     stderr=result.stderr,
                 )
-            if self.stateful and self.session_id is None:
-                self.session_id = _extract_codex_session_id(result.stdout)
-                if self.session_id is None:
+            if self.stateful:
+                session_id = _extract_codex_session_id(result.stdout)
+                if session_id is None and self.session_id is None:
                     raise ModelError(
                         "codex exec did not report a session id in --json output",
                         command=command,
                         stdout=result.stdout,
                         stderr=result.stderr,
                     )
-                self._write_session_file()
+                # A CLI that forks a new session on resume saves the turn under
+                # the new id, so always resume the most recently reported one.
+                if session_id is not None and session_id != self.session_id:
+                    self.session_id = session_id
+                    self._write_session_file()
             if output_path.exists():
-                output = output_path.read_text(encoding="utf-8").strip()
-                if output:
-                    return output
+                return output_path.read_text(encoding="utf-8").strip()
+            if self.stateful:
+                # --json stdout is an event stream, never a chat message.
+                return ""
             return result.stdout.strip()
 
     def _command(self, output_path: Path) -> list[str]:
@@ -478,7 +497,7 @@ class ClaudeCliAdapter(SubprocessCliAdapter):
             session_id: str | None = None,
             session_file: str | Path | None = None,
             permission_mode: str | None = "dontAsk",
-            tools: str | None = None,
+            tools: str | None = "",
             bare: bool = False,
             name: str | None = None,
             output_filters: tuple[OutputFilter, ...] | None = None,
@@ -536,17 +555,23 @@ class ClaudeCliAdapter(SubprocessCliAdapter):
             )
 
         output, session_id = _parse_claude_json_result(result.stdout)
-        if self.stateful and self.session_id is None:
-            self.session_id = session_id
-            if self.session_id is None:
+        if self.stateful:
+            if session_id is None and self.session_id is None:
                 raise ModelError(
                     "claude -p did not report a session id in JSON output",
                     command=command,
                     stdout=result.stdout,
                     stderr=result.stderr,
                 )
-            self._write_session_file()
-        return output or result.stdout.strip()
+            # A CLI that forks a new session on resume saves the turn under the
+            # new id, so always resume the most recently reported one.
+            if session_id is not None and session_id != self.session_id:
+                self.session_id = session_id
+                self._write_session_file()
+        # A legitimately empty completion must stay empty; falling back to raw
+        # stdout would hand the JSON envelope to the action parser and memory
+        # commit paths.
+        return output
 
     def _command(self) -> list[str]:
         command = [
@@ -567,7 +592,9 @@ class ClaudeCliAdapter(SubprocessCliAdapter):
             command.extend(["--model", self.model])
         if self.permission_mode:
             command.extend(["--permission-mode", self.permission_mode])
-        if self.tools and self.tools.strip():
+        if self.tools is not None:
+            # The default empty string matters: omitting --tools would leave the
+            # CLI's own tools enabled for a model that drives a BBS terminal.
             command.extend(["--tools", self.tools])
         command.extend(self.extra_args)
         return command
