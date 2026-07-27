@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --locked --dev
+      - name: Run tests
+        run: uv run pytest tests/
+      - name: Smoke-test the CLI
+        run: uv run bbs-gym --help
+      - name: Build tty-agent
+        if: matrix.python-version == '3.14'
+        run: uv build packages/tty-agent --out-dir dist/tty-agent
+      - name: Build bbs-gym
+        if: matrix.python-version == '3.14'
+        run: uv build packages/bbs-gym --out-dir dist/bbs-gym
