@@ -394,7 +394,7 @@ def test_build_match_participants_formats_objectives_and_logs(tmp_path):
         max_tokens=None,
         response_filter=None,
         no_anthropic_cache=False,
-        activity="bbs-door-line",
+        activity="tw2-game",
         profile_objective=None,
         run_objective="{agent_id} should find {opponents}",
         observe_timeout=None,
@@ -407,6 +407,7 @@ def test_build_match_participants_formats_objectives_and_logs(tmp_path):
         claude_stateful=False,
         disabled_actions=[],
         log_path=str(tmp_path / "match.jsonl"),
+        metrics_path=str(tmp_path / "metrics.jsonl"),
     )
 
     participants = build_match_participants(args, match_participant_specs(args), registry=None)
@@ -414,9 +415,13 @@ def test_build_match_participants_formats_objectives_and_logs(tmp_path):
     assert [participant.spec.agent_id for participant in participants] == ["codex-blue", "claude-red"]
     assert participants[0].runner.run_objective == "codex-blue should find claude-red"
     assert participants[1].runner.run_objective == "claude-red should find codex-blue"
-    assert participants[0].runner.profile.name == "bbs-door-line"
+    assert participants[0].runner.profile.name == "tw2-game"
     assert participants[0].log_path == tmp_path / "match.codex-blue.jsonl"
     assert participants[1].log_path == tmp_path / "match.claude-red.jsonl"
+    assert participants[0].runner.evaluation_profile is not None
+    assert participants[0].runner.evaluation_profile.name == "tw2-score"
+    assert participants[0].metrics_path == tmp_path / "metrics.codex-blue.jsonl"
+    assert participants[1].metrics_path == tmp_path / "metrics.claude-red.jsonl"
 
 
 def test_match_config_toml_supplies_scheduler_budget_and_participants(tmp_path):

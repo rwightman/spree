@@ -44,6 +44,7 @@ class MatchParticipantRuntime:
     model_metadata: dict[str, object]
     runner: ActivityRunner
     log_path: Path
+    metrics_path: Path | None = None
     # Runtime accounting mutated by the scheduler while a match is active.
     reconnects: int = 0
 
@@ -792,6 +793,7 @@ def _write_match_started(
                     "model": participant.spec.model,
                     "model_metadata": participant.model_metadata,
                     "agent_log_path": str(participant.log_path),
+                    "metrics_path": str(participant.metrics_path) if participant.metrics_path is not None else None,
                 }
                 for participant in participants
             ],
@@ -837,6 +839,7 @@ def _write_match_completed(
                     "activity": result.activity,
                     "metrics": result.evaluation.final_metrics or result.evaluation.latest_metrics,
                     "agent_log_path": str(participant.log_path),
+                    "metrics_path": str(participant.metrics_path) if participant.metrics_path is not None else None,
                 }
                 for participant, result in results
             ],

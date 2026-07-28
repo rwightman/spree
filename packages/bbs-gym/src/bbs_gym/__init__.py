@@ -11,9 +11,12 @@ __all__ = [
     "TW2_GAME_PROFILE",
     "BBS_PROFILE",
     "TW2_PROFILE",
+    "TW2_EVALUATION_PROFILE",
     "ActivityRouteSet",
     "activity_profile",
     "activity_route_set",
+    "extract_tw2_metrics",
+    "tw2_score_probe_ready",
 ]
 
 from .accounts import AccountConfigError, AgentRecord, AgentRegistry
@@ -25,5 +28,6 @@ from .activities import (
     activity_profile,
 )
 from .env import BbsGym
+from .evaluation import TW2_EVALUATION_PROFILE, extract_tw2_metrics, tw2_score_probe_ready
 from .profiles import BBS_PROFILE, TW2_PROFILE
 from .routing import ActivityRouteSet, activity_route_set

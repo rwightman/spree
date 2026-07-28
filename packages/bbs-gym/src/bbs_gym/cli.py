@@ -15,6 +15,7 @@ from typing import Any, get_args
 
 from tty_agent.ansi import strip_ansi
 from tty_agent.actions import DEFAULT_ALLOWED_ACTIONS
+from tty_agent.evaluation import EvaluationProfile
 from tty_agent.models import (
     AnthropicAdapter,
     ClaudeCliAdapter,
@@ -31,6 +32,7 @@ from tty_agent.transports.telnet import TelnetSession
 from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile
 from .env import BbsGym
+from .evaluation import TW2_EVALUATION_PROFILE
 from .match import (
     DisconnectPolicy,
     MatchOrder,
@@ -119,7 +121,14 @@ def run_activity(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    runner = ActivityRunner(profile, log_path=args.log_path, run_objective=args.run_objective or "")
+    evaluation_profile = _activity_evaluation_profile(profile.name)
+    runner = ActivityRunner(
+        profile,
+        log_path=args.log_path,
+        run_objective=args.run_objective or "",
+        evaluation_profile=evaluation_profile,
+        evaluation_log_path=args.metrics_path if evaluation_profile is not None else None,
+    )
 
     try:
         with BbsGym(
@@ -145,6 +154,8 @@ def run_activity(args: argparse.Namespace) -> int:
         return 1
 
     print(f"activity={result.activity} agent={result.agent_id} steps={len(result.steps)} stop={result.stop_reason}")
+    if evaluation_profile is not None:
+        _print_evaluation_summary(result, args.metrics_path)
     return 0
 
 
@@ -164,6 +175,8 @@ def run_routed(args: argparse.Namespace) -> int:
         route_set.routes,
         log_path=args.log_path,
         run_objective=args.run_objective or "",
+        evaluation_profile=TW2_EVALUATION_PROFILE,
+        evaluation_log_path=args.metrics_path,
     )
 
     try:
@@ -193,6 +206,7 @@ def run_routed(args: argparse.Namespace) -> int:
         f"route_set={route_set.name} agent={result.agent_id} steps={len(result.steps)} "
         f"stop={result.stop_reason} final_profile={runner.profile.name}"
     )
+    _print_evaluation_summary(result, args.metrics_path)
     return 0
 
 
@@ -224,10 +238,7 @@ def run_match(args: argparse.Namespace) -> int:
         print(f"connection failed: {exc}", file=sys.stderr)
         return 1
 
-    summary = ", ".join(
-        f"{result.agent_id}:steps={len(result.steps)} stop={result.stop_reason}"
-        for _, result in match_result.results
-    )
+    summary = ", ".join(_match_result_summary(result) for _, result in match_result.results)
     print(
         f"match participants={len(match_result.results)} commit_count={match_result.commit_count} "
         f"scheduler={scheduler.mode} {summary} log={match_log_path}"
@@ -261,6 +272,7 @@ def _apply_match_config(args: argparse.Namespace) -> None:
             "profile_objective": "profile_objective",
             "run_objective": "run_objective",
             "log_path": "log_path",
+            "metrics_path": "metrics_path",
             "observe_timeout": "observe_timeout",
             "stable_ms": "stable_ms",
             "byte_quiet_ms": "byte_quiet_ms",
@@ -499,7 +511,19 @@ def build_match_participants(
             )
         log_paths[log_path] = spec.agent_id
         objective = _format_match_objective(args.run_objective or DEFAULT_MATCH_OBJECTIVE, spec.agent_id, opponents)
-        runner = ActivityRunner(profile, log_path=log_path, run_objective=objective)
+        evaluation_profile = _activity_evaluation_profile(profile.name)
+        metrics_path = (
+            _agent_log_path(getattr(args, "metrics_path", "runtime/metrics/match.jsonl"), spec.agent_id)
+            if evaluation_profile is not None
+            else None
+        )
+        runner = ActivityRunner(
+            profile,
+            log_path=log_path,
+            run_objective=objective,
+            evaluation_profile=evaluation_profile,
+            evaluation_log_path=metrics_path,
+        )
         participants.append(
             MatchParticipantRuntime(
                 spec=spec,
@@ -507,6 +531,7 @@ def build_match_participants(
                 model_metadata=build_model_metadata(participant_args, registry),
                 runner=runner,
                 log_path=log_path,
+                metrics_path=metrics_path,
             )
         )
     return participants
@@ -597,6 +622,23 @@ def _agent_log_path(match_log_path: str | Path, agent_id: str) -> Path:
     safe_agent = "".join(char if char.isalnum() or char in "-_." else "_" for char in agent_id)
     suffix = path.suffix or ".jsonl"
     return path.with_name(f"{path.stem}.{safe_agent}{suffix}")
+
+
+def _activity_evaluation_profile(activity_name: str) -> EvaluationProfile | None:
+    return TW2_EVALUATION_PROFILE if activity_name == "tw2-game" else None
+
+
+def _print_evaluation_summary(result: Any, metrics_path: str | Path) -> None:
+    metrics = result.evaluation.final_metrics or result.evaluation.latest_metrics
+    print(f"metrics={metrics_path} final={json.dumps(metrics, sort_keys=True, separators=(',', ':'))}")
+
+
+def _match_result_summary(result: Any) -> str:
+    summary = f"{result.agent_id}:steps={len(result.steps)} stop={result.stop_reason}"
+    metrics = result.evaluation.final_metrics or result.evaluation.latest_metrics
+    if "score" in metrics:
+        summary += f" score={json.dumps(metrics['score'])}"
+    return summary
 
 
 def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
@@ -980,6 +1022,7 @@ def _add_runner_args(
         max_decision_ticks: int,
         max_wall_seconds: float,
         log_path: str,
+        metrics_path: str,
         disabled_actions_help: str,
         decision_ticks_help: str | None = None,
         wall_seconds_help: str | None = None,
@@ -1007,6 +1050,11 @@ def _add_runner_args(
         help=disabled_actions_help,
     )
     parser.add_argument("--log-path", default=log_path)
+    parser.add_argument(
+        "--metrics-path",
+        default=metrics_path,
+        help="JSONL evaluator log path; run-match derives one per-participant path from this base",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1049,6 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
         max_decision_ticks=20,
         max_wall_seconds=300.0,
         log_path="runtime/logs/activity.jsonl",
+        metrics_path="runtime/metrics/activity.jsonl",
         disabled_actions_help=(
             "remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup"
         ),
@@ -1068,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
         max_decision_ticks=50,
         max_wall_seconds=600.0,
         log_path="runtime/logs/routed-activity.jsonl",
+        metrics_path="runtime/metrics/routed-activity.jsonl",
         disabled_actions_help=(
             "remove an action from the activity schema for this run; repeatable, e.g. --disable-action hangup"
         ),
@@ -1116,6 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
         max_decision_ticks=50,
         max_wall_seconds=600.0,
         log_path="runtime/logs/match.jsonl",
+        metrics_path="runtime/metrics/match.jsonl",
         disabled_actions_help=(
             "remove an action from every participant's activity schema; repeatable, e.g. --disable-action hangup"
         ),

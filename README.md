@@ -248,6 +248,44 @@ built-in route sets are:
 - `bbs-auto`: start with a broader BBS door-safe profile, then specialize to
   TW2 when detected.
 
+### TW2 scoring
+
+TW2 scoring is enabled automatically for `run-activity --activity tw2-game`,
+for both TW2-aware routed profiles, and for `run-match --activity tw2-game`.
+The primary `score` is the door's own leaderboard `Value`, not its separate
+`Door points` counter. In this Synchronet TW2 implementation, Value is:
+
+```text
+credits + 500 * cargo holds
+        + 100 * (ship fighters + deployed fighters)
+        + 10 * ore + 20 * organics + 35 * equipment
+```
+
+Metric records also retain `credits`, `door_points`, rank, turns, sector,
+fighters, holds, cargo, `onboard_value`, and the inferred deployed-fighter
+count when the complete status is available. Agent-requested info and ranking
+screens are captured passively. At finalization, while the player is still at
+the safe TW2 main or computer prompt, the evaluator sends `XICRX`: it prints
+player info, opens the computer ranking, and restores the main prompt. This
+query consumes neither a model decision tick nor a TW2 game turn, and its
+output is excluded from model prompts and campaign memory.
+
+The default metric logs are `runtime/metrics/activity.jsonl` and
+`runtime/metrics/routed-activity.jsonl`; override them with `--metrics-path`.
+TW2 matches derive one file per participant from
+`runtime/metrics/match.jsonl`, avoiding concurrent writes to a shared metric
+file, and also include the final metrics in the `match_completed` event. If a
+player has hung up, disconnected, left TW2, or stopped inside an unsafe nested
+prompt, the evaluator preserves passive samples but does not inject a final
+query. The built-in ranking screen only lists ten players, so an exact `score`
+can be absent in larger games when the current pilot is not displayed;
+`onboard_value` remains available but deliberately does not pretend to include
+unknown deployed fighters.
+
+The installed door currently sorts its displayed player ranking in ascending
+Value order. `rank` records that screen value verbatim; use the numeric `score`
+for model comparisons rather than treating rank 1 as the strongest result.
+
 The `bbs-door-safe` profile is available directly through `run-activity` for
 experiments with stronger models. It removes `submit_line` and biases door-game
 input toward `press_key` for hotkeys and `type_text` for numeric values,
