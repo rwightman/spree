@@ -12,6 +12,10 @@ __all__ = [
     "ClaudeCliAdapter",
     "CodexCliAdapter",
     "EMPTY_PROFILE",
+    "EvaluationProbe",
+    "EvaluationProfile",
+    "EvaluationRecord",
+    "EvaluationResult",
     "FullScreenModule",
     "GENERIC_TERMINAL_MODULES",
     "InputModalityProfile",
@@ -46,6 +50,7 @@ __all__ = [
 from .agent import TerminalAgent, TerminalSessionAgent
 from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
+from .evaluation import EvaluationProbe, EvaluationProfile, EvaluationRecord, EvaluationResult
 from .hints import InputModalityProfile, InputModeRule, ObservationHints
 from .memory import JsonMemoryStore
 from .models import (

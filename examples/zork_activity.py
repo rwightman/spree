@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 from pathlib import Path
 
-from tty_agent.actions import ActionPolicy
+from tty_agent.actions import Action, ActionPolicy
 from tty_agent.agent import TerminalSessionAgent
+from tty_agent.evaluation import EvaluationProbe, EvaluationProfile
 from tty_agent.hints import InputModalityProfile, InputModeRule
 from tty_agent.memory import JsonMemoryStore
 from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter, output_filters_for_model
 from tty_agent.profiles import TEXT_ADVENTURE_PROFILE
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
-from tty_agent.terminal import TerminalScreen, TurnObserver
+from tty_agent.terminal import Observation, TerminalScreen, TurnObserver
 from tty_agent.transports.pty import PtySession
 
 
 DEFAULT_INTERPRETER_ARGS = ("-p", "-w", "100", "-h", "30")
+ZORK_SCORE_RE = re.compile(
+    r"Your score is\s+(?P<score>-?\d+)\s+\(total of\s+(?P<score_max>\d+)\s+points\),\s+"
+    r"in\s+(?P<moves>\d+)\s+moves?\.\s+This gives you the rank of\s+(?P<rank>[^.\r\n]+)\.",
+    re.IGNORECASE,
+)
 
 TEXT_ADVENTURE_GUIDANCE = StaticPromptModule(
     name="text_adventure.conventions",
@@ -47,6 +55,43 @@ TEXT_ADVENTURE_INPUT_MODALITY = InputModalityProfile(
             priority=20,
         ),
     )
+)
+
+
+def extract_zork_metrics(observation: Observation) -> dict[str, object] | None:
+    """Extract the newest standard Zork score response from terminal output."""
+
+    matches = list(ZORK_SCORE_RE.finditer(observation.new_text))
+    if not matches:
+        return None
+    match = matches[-1]
+    return {
+        "score": int(match.group("score")),
+        "score_max": int(match.group("score_max")),
+        "moves": int(match.group("moves")),
+        "rank": match.group("rank").strip(),
+    }
+
+
+def zork_score_probe_ready(observation: Observation) -> bool:
+    """Only issue the evaluator probe at Zork's normal command prompt."""
+
+    return observation.matched_prompt == "command-prompt"
+
+
+ZORK_EVALUATION_PROFILE = EvaluationProfile(
+    name="zork-score",
+    extractor=extract_zork_metrics,
+    final_probe=EvaluationProbe(
+        name="score",
+        action=Action(action="submit_line", text="score"),
+        ready=zork_score_probe_ready,
+        turn_cost="none",
+        observe_timeout=5.0,
+        stable_ms=50,
+        byte_quiet_ms=0,
+        prompt_fast_path=True,
+    ),
 )
 
 
@@ -159,6 +204,8 @@ def main() -> None:
             memory_store=JsonMemoryStore(args.memory_root),
             log_path=args.log_path,
             run_objective=args.run_objective,
+            evaluation_profile=ZORK_EVALUATION_PROFILE,
+            evaluation_log_path=args.metrics_path,
         )
         result = runner.run(
             agent,
@@ -167,7 +214,12 @@ def main() -> None:
         )
 
     print(f"activity={result.activity} agent={result.agent_id} stop_reason={result.stop_reason}")
-    print(f"steps={len(result.steps)} log={args.log_path} transcript={args.transcript}")
+    print(
+        f"decision_ticks={result.decision_ticks} records={len(result.steps)} "
+        f"log={args.log_path} transcript={args.transcript}"
+    )
+    final_metrics = result.evaluation.final_metrics or result.evaluation.latest_metrics
+    print(f"metrics={args.metrics_path} final={json.dumps(final_metrics, sort_keys=True, separators=(',', ':'))}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -215,6 +267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-bare", action="store_true")
     parser.add_argument("--transcript", type=Path, default=Path("runtime/transcripts/zork-activity.raw"))
     parser.add_argument("--log-path", type=Path, default=Path("runtime/logs/zork-activity.jsonl"))
+    parser.add_argument("--metrics-path", type=Path, default=Path("runtime/metrics/zork-activity.jsonl"))
     parser.add_argument("--memory-root", type=Path, default=Path("runtime/memory"))
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--columns", type=int, default=100)

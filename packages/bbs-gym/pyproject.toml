@@ -1,13 +1,13 @@
 [project]
 name = "bbs-gym"
-version = "0.1.0"
+version = "0.1.1"
 description = "BBS and door-game environments for LLM terminal agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "tty-agent==0.1.0",
+    "tty-agent==0.1.1",
 ]
 
 [project.urls]

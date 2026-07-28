@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from tty_agent.evaluation import EvaluationResult
 from tty_agent.runner import ActivityBudget, ActivityResult, ActivityRunner, PreparedActivityStep
 from tty_agent.transports.base import SessionDisconnected
 
@@ -706,6 +707,8 @@ def _partial_result(participant: MatchParticipantRuntime, state: Any) -> Activit
         session_summary=state.session_summary,
         stop_reason="finish_failed",
         run_objective=runner.run_objective,
+        evaluation=EvaluationResult(records=list(state.evaluation_records)),
+        decision_ticks=state.budget.decision_ticks,
     )
 
 
@@ -737,7 +740,10 @@ def _match_limit_stop_reason(scheduler: MatchSchedulerConfig) -> str:
 
 
 def _commit_count(results: list[tuple[MatchParticipantRuntime, ActivityResult]]) -> int:
-    return sum(len(result.steps) for _, result in results)
+    # Activity records can include terminal observations that deliberately do
+    # not consume a decision tick. Match commit accounting counts only model
+    # decisions admitted by the scheduler.
+    return sum(result.decision_ticks for _, result in results)
 
 
 def _event_clock(round_number: int | None, tick: int | None = None) -> dict[str, int]:
@@ -826,8 +832,10 @@ def _write_match_completed(
                 {
                     "agent_id": result.agent_id,
                     "steps": len(result.steps),
+                    "decision_ticks": result.decision_ticks,
                     "stop_reason": result.stop_reason,
                     "activity": result.activity,
+                    "metrics": result.evaluation.final_metrics or result.evaluation.latest_metrics,
                     "agent_log_path": str(participant.log_path),
                 }
                 for participant, result in results

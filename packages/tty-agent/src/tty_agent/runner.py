@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 
 from .agent import ActionExecution, TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
+from .evaluation import EvaluationProfile, EvaluationRecord, EvaluationResult, EvaluationSource
 from .hints import InputModalityProfile, ObservationHints
 from .memory import JsonMemoryStore
 from .models import (
@@ -161,6 +162,8 @@ class ActivityResult:
     session_summary: SessionSummary
     stop_reason: str
     run_objective: str = ""
+    evaluation: EvaluationResult = field(default_factory=EvaluationResult)
+    decision_ticks: int = 0
 
 
 @dataclass(frozen=True)
@@ -192,6 +195,8 @@ class ActivityRunState:
     active_profile: ActivityProfile | None = None
     active_route_name: str = "default"
     decision_prompts_sent: dict[str, int] = field(default_factory=dict)
+    evaluation_records: list[EvaluationRecord] = field(default_factory=list)
+    response_pending: bool = False
     completed: bool = False
 
 
@@ -214,11 +219,15 @@ class ActivityRunner:
             memory_store: JsonMemoryStore | None = None,
             log_path: Path | str | None = None,
             run_objective: str = "",
+            evaluation_profile: EvaluationProfile | None = None,
+            evaluation_log_path: Path | str | None = None,
     ) -> None:
         self.profile = profile
         self.memory_store = memory_store or JsonMemoryStore()
         self.log_path = Path(log_path) if log_path else None
         self.run_objective = run_objective.strip()
+        self.evaluation_profile = evaluation_profile
+        self.evaluation_log_path = Path(evaluation_log_path) if evaluation_log_path else None
 
     def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
         return self._run(agent, model, budget, stop_on_completion=True)
@@ -268,6 +277,7 @@ class ActivityRunner:
             return None
 
         active_profile = state.active_profile or self.profile
+        trigger_action = state.last_action_for_hints if state.response_pending else None
         try:
             observation = state.agent.observe_turn(
                 timeout=active_profile.observe_timeout,
@@ -280,6 +290,7 @@ class ActivityRunner:
             state.stop_reason = "disconnected"
             state.completed = True
             return None
+        state.response_pending = False
 
         route_events: list[dict[str, Any]] = []
         if profile_selector is not None:
@@ -287,6 +298,13 @@ class ActivityRunner:
             active_profile = selected_profile
         state.active_profile = active_profile
         state.last_observation = observation
+        self._evaluate_observation(
+            state,
+            observation,
+            source="agent_action" if trigger_action is not None else "observation",
+            visible_to_model=True,
+            action=trigger_action,
+        )
 
         if stop_on_completion and active_profile.should_exit(observation, None, state.budget):
             state.stop_reason = "profile_complete"
@@ -430,6 +448,7 @@ class ActivityRunner:
         self._write_step(step)
         state.previous_observation = observation
         state.last_action_for_hints = executed_action
+        state.response_pending = bool(executed_action is not None and executed_action.action != "hangup")
 
         if disconnected:
             state.stop_reason = "disconnected"
@@ -449,6 +468,9 @@ class ActivityRunner:
         return step
 
     def finish_state(self, state: ActivityRunState) -> ActivityResult:
+        self._drain_final_observation(state)
+        self._run_final_evaluation_probe(state)
+
         if self._has_decision_steps(state.all_steps) and state.last_observation is not None:
             active_profile = state.active_profile or self.profile
             patch = self._commit_memory(
@@ -469,6 +491,8 @@ class ActivityRunner:
             session_summary=state.session_summary,
             stop_reason=state.stop_reason,
             run_objective=self.run_objective,
+            evaluation=EvaluationResult(records=list(state.evaluation_records)),
+            decision_ticks=state.budget.decision_ticks,
         )
 
     def _run(
@@ -811,6 +835,217 @@ class ActivityRunner:
         updated["notes"] = notes
         return updated
 
+    def _drain_final_observation(self, state: ActivityRunState) -> None:
+        """Capture the result of the last admitted agent action before finalization."""
+
+        if not state.response_pending or state.stop_reason in {"disconnected", "hangup"}:
+            return
+
+        active_profile = state.active_profile or self.profile
+        trigger_action = state.last_action_for_hints
+        try:
+            observation = state.agent.observe_turn(
+                timeout=active_profile.observe_timeout,
+                stable_ms=active_profile.stable_ms,
+                byte_quiet_ms=active_profile.byte_quiet_ms,
+                poll_interval=active_profile.poll_interval,
+                prompt_fast_path=active_profile.prompt_fast_path,
+            )
+        except SessionDisconnected:
+            state.response_pending = False
+            return
+
+        state.response_pending = False
+        state.last_observation = observation
+        self._evaluate_observation(
+            state,
+            observation,
+            source="agent_action" if trigger_action is not None else "observation",
+            visible_to_model=False,
+            final=True,
+            action=trigger_action,
+        )
+        self._record_terminal_step(
+            state,
+            observation=observation,
+            stop_reason=state.stop_reason,
+            active_profile=active_profile,
+        )
+
+    def _run_final_evaluation_probe(self, state: ActivityRunState) -> None:
+        """Run one evaluator-owned final query without changing agent state or budget."""
+
+        evaluation_profile = self.evaluation_profile
+        if evaluation_profile is None or evaluation_profile.final_probe is None:
+            return
+
+        probe = evaluation_profile.final_probe
+        base_observation = state.last_observation
+        if base_observation is None:
+            return
+        if state.stop_reason in {"disconnected", "hangup"}:
+            self._record_final_probe(
+                state,
+                status="error",
+                error=f"terminal unavailable after {state.stop_reason}",
+            )
+            return
+
+        try:
+            ready = probe.is_ready(base_observation)
+        except Exception as exc:
+            self._record_final_probe(state, status="error", error=f"probe readiness failed: {exc}")
+            return
+        if not ready:
+            self._record_final_probe(
+                state,
+                status="no_match",
+                error="final probe is not safe at the current terminal prompt",
+            )
+            return
+
+        active_profile = state.active_profile or self.profile
+        try:
+            action = active_profile.action_policy.validate(probe.action)
+            execution = self._execution_record(state.agent.act_action(action))
+            observation = state.agent.observe_turn(
+                timeout=probe.observe_timeout if probe.observe_timeout is not None else active_profile.observe_timeout,
+                stable_ms=probe.stable_ms if probe.stable_ms is not None else active_profile.stable_ms,
+                byte_quiet_ms=(
+                    probe.byte_quiet_ms if probe.byte_quiet_ms is not None else active_profile.byte_quiet_ms
+                ),
+                poll_interval=(
+                    probe.poll_interval if probe.poll_interval is not None else active_profile.poll_interval
+                ),
+                prompt_fast_path=(
+                    probe.prompt_fast_path if probe.prompt_fast_path is not None else active_profile.prompt_fast_path
+                ),
+            )
+        except (ActionError, UnicodeEncodeError, SessionDisconnected) as exc:
+            self._record_final_probe(state, status="error", error=str(exc))
+            return
+
+        try:
+            metrics = dict(evaluation_profile.extractor(observation) or {})
+        except Exception as exc:
+            self._record_final_probe(
+                state,
+                status="error",
+                observation=observation,
+                execution=execution,
+                error=f"metric extraction failed: {exc}",
+            )
+            return
+
+        self._record_final_probe(
+            state,
+            status="ok" if metrics else "no_match",
+            metrics=metrics,
+            observation=observation,
+            execution=execution,
+            error="" if metrics else "final probe response did not contain recognized metrics",
+        )
+
+    def _evaluate_observation(
+            self,
+            state: ActivityRunState,
+            observation: Observation,
+            source: EvaluationSource,
+            visible_to_model: bool,
+            final: bool = False,
+            action: Action | None = None,
+    ) -> None:
+        evaluation_profile = self.evaluation_profile
+        if evaluation_profile is None:
+            return
+
+        try:
+            metrics = dict(evaluation_profile.extractor(observation) or {})
+        except Exception as exc:
+            self._record_evaluation(
+                state,
+                EvaluationRecord(
+                    agent_id=state.agent_id,
+                    evaluator=evaluation_profile.name,
+                    source=source,
+                    status="error",
+                    decision_tick=state.budget.decision_ticks,
+                    final=final,
+                    visible_to_model=visible_to_model,
+                    observation=self._evaluation_observation(observation),
+                    action=action.to_dict() if action is not None else None,
+                    error=f"metric extraction failed: {exc}",
+                ),
+            )
+            return
+        if not metrics:
+            return
+
+        self._record_evaluation(
+            state,
+            EvaluationRecord(
+                agent_id=state.agent_id,
+                evaluator=evaluation_profile.name,
+                source=source,
+                status="ok",
+                decision_tick=state.budget.decision_ticks,
+                metrics=metrics,
+                final=final,
+                visible_to_model=visible_to_model,
+                observation=self._evaluation_observation(observation),
+                action=action.to_dict() if action is not None else None,
+            ),
+        )
+
+    def _record_final_probe(
+            self,
+            state: ActivityRunState,
+            status: Literal["ok", "no_match", "error"],
+            metrics: dict[str, Any] | None = None,
+            observation: Observation | None = None,
+            execution: dict[str, Any] | None = None,
+            error: str = "",
+    ) -> None:
+        evaluation_profile = self.evaluation_profile
+        if evaluation_profile is None or evaluation_profile.final_probe is None:
+            return
+        probe = evaluation_profile.final_probe
+        self._record_evaluation(
+            state,
+            EvaluationRecord(
+                agent_id=state.agent_id,
+                evaluator=evaluation_profile.name,
+                source="final_probe",
+                status=status,
+                decision_tick=state.budget.decision_ticks,
+                metrics=dict(metrics or {}),
+                final=True,
+                visible_to_model=False,
+                observation=self._evaluation_observation(observation) if observation is not None else {},
+                action=probe.action.to_dict(),
+                execution=dict(execution or {}),
+                error=error,
+                probe_turn_cost=probe.turn_cost,
+            ),
+        )
+
+    def _record_evaluation(self, state: ActivityRunState, record: EvaluationRecord) -> None:
+        state.evaluation_records.append(record)
+        self._write_evaluation(record)
+
+    def _evaluation_observation(self, observation: Observation) -> dict[str, Any]:
+        return {
+            "model_text": observation.model_text,
+            "new_text": observation.new_text,
+            "matched_prompt": observation.matched_prompt,
+            "ready_reason": observation.ready_reason,
+            "profile": observation.profile,
+            "transcript_path": str(observation.transcript_path) if observation.transcript_path else None,
+            "transcript_byte_start": observation.transcript_byte_start,
+            "transcript_byte_end": observation.transcript_byte_end,
+            "timestamp": observation.timestamp,
+        }
+
     def _terminal_step_record(
             self,
             step_number: int,
@@ -1077,6 +1312,13 @@ class ActivityRunner:
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(step.to_dict(), sort_keys=True) + "\n")
 
+    def _write_evaluation(self, record: EvaluationRecord) -> None:
+        if self.evaluation_log_path is None:
+            return
+        self.evaluation_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.evaluation_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
+
 
 class RoutedActivityRunner(ActivityRunner):
     def __init__(
@@ -1087,12 +1329,16 @@ class RoutedActivityRunner(ActivityRunner):
             memory_store: JsonMemoryStore | None = None,
             log_path: Path | str | None = None,
             run_objective: str = "",
+            evaluation_profile: EvaluationProfile | None = None,
+            evaluation_log_path: Path | str | None = None,
     ) -> None:
         super().__init__(
             default_profile,
             memory_store=memory_store,
             log_path=log_path,
             run_objective=run_objective,
+            evaluation_profile=evaluation_profile,
+            evaluation_log_path=evaluation_log_path,
         )
         self.name = name
         self.default_profile = default_profile

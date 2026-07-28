@@ -16,7 +16,7 @@ dev = [
 
 [[package]]
 name = "bbs-gym"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/bbs-gym" }
 dependencies = [
     { name = "tty-agent" },
@@ -122,7 +122,7 @@ wheels = [
 
 [[package]]
 name = "tty-agent"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/tty-agent" }
 dependencies = [
     { name = "pyte" },

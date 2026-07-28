@@ -108,7 +108,9 @@ def test_run_scheduled_match_sequential_writes_order_and_steps(tmp_path):
     assert result.commit_count == 2
     assert [activity.agent_id for _, activity in result.results] == ["alpha", "bravo"]
     assert [activity.stop_reason for _, activity in result.results] == ["match_rounds", "match_rounds"]
-    assert [len(activity.steps) for _, activity in result.results] == [1, 1]
+    assert [activity.decision_ticks for _, activity in result.results] == [1, 1]
+    assert [len(activity.steps) for _, activity in result.results] == [2, 2]
+    assert all(activity.steps[-1].validation["terminal"] is True for _, activity in result.results)
     events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
     assert [event["type"] for event in events] == [
         "match_started",
@@ -363,7 +365,10 @@ def test_sequential_match_isolates_one_participant_failure(tmp_path):
 
     stop_reasons = {activity.agent_id: activity.stop_reason for _, activity in result.results}
     assert stop_reasons == {"alpha": "match_rounds", "boom": "scheduler_error"}
-    assert dict((activity.agent_id, len(activity.steps)) for _, activity in result.results)["alpha"] == 2
+    alpha_result = next(activity for _, activity in result.results if activity.agent_id == "alpha")
+    assert alpha_result.decision_ticks == 2
+    assert len(alpha_result.steps) == 3
+    assert alpha_result.steps[-1].validation["terminal"] is True
 
     events = [json.loads(line) for line in match_log.read_text(encoding="utf-8").splitlines()]
     failures = [event for event in events if event["type"] == "agent_step_failed"]

@@ -195,6 +195,13 @@ uv run python examples/zork_activity.py runtime/zcode/zork1.z3 \
   --max-decision-ticks 100
 ```
 
+The Zork activity passively records score responses requested by the agent and,
+while the terminal is still available, issues one evaluator-owned `score`
+command after the final agent action has been observed. The final query does
+not consume an agent decision tick and is not included in prompts or campaign
+memory. Metric samples are written to `runtime/metrics/zork-activity.jsonl` by
+default; use `--metrics-path` to select another path.
+
 The same example can run a stateful Claude Code session through `claude -p`:
 
 ```bash

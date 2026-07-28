@@ -1,6 +1,6 @@
 [project]
 name = "tty-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal-agent runtime for LLM-driven interactive TTY sessions"
 readme = "README.md"
 license = "Apache-2.0"
