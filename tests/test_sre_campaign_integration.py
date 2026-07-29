@@ -64,12 +64,15 @@ def _join_empire(
             adapter.cleanup_after_session()
 
 
-def test_sre_native_two_player_identities_survive_relaunch_and_maintenance(tmp_path):
+def test_sre_native_two_player_identities_survive_relaunch_and_maintenance(
+        tmp_path: Path,
+        sre_source_world: Path,
+) -> None:
     start = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
     adapter = SreCampaignAdapter(
         SreCampaignAdapterConfig(
             campaign_dir=tmp_path / "campaign",
-            source_world=Path("doors/sre"),
+            source_world=sre_source_world,
             dosemu_config=Path("docker/synchronet/dosemu.conf"),
             control_timeout=60.0,
             verify_clock=False,

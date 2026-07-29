@@ -75,9 +75,9 @@ def _observation(new_text: str, model_text: str, byte_start: int) -> Observation
     )
 
 
-def _fresh_reset_source(tmp_path: Path) -> Path:
+def _fresh_reset_source(tmp_path: Path, sre_source_world: Path) -> Path:
     source = tmp_path / "source"
-    copytree(Path("doors/sre"), source)
+    copytree(sre_source_world, source)
     system_path = source / "DATA" / "SYSTEM.II"
     galaxy_path = source / "DATA" / "GALAXY.II"
     system = bytearray(system_path.read_bytes())
@@ -96,9 +96,12 @@ def _fresh_reset_source(tmp_path: Path) -> Path:
     return source
 
 
-def test_sre_campaign_initializes_patched_isolated_world(tmp_path):
+def test_sre_campaign_initializes_patched_isolated_world(
+        tmp_path: Path,
+        sre_source_world: Path,
+) -> None:
     start = datetime(2026, 7, 28, 12, tzinfo=timezone.utc)
-    source = _fresh_reset_source(tmp_path)
+    source = _fresh_reset_source(tmp_path, sre_source_world)
     adapter = SreCampaignAdapter(
         SreCampaignAdapterConfig(
             campaign_dir=tmp_path / "campaign",
