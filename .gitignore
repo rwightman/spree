@@ -17,6 +17,8 @@ runtime/*
 # Proprietary/shareware DOS door distributions are supplied locally and are not
 # committed by default.
 doors/bre/*
+doors/sre/*
 doors/tw2002/*
 !doors/bre/.gitkeep
+!doors/sre/.gitkeep
 !doors/tw2002/.gitkeep

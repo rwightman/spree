@@ -17,6 +17,11 @@ from .profiles import DEFAULT_PROFILE, PromptProfile
 _TELNET_LOGIN_TIMEOUT = 8.0
 _TELNET_LOGIN_STABLE_MS = 300
 _TELNET_LOGIN_MAX_STEPS = 6
+_RLOGIN_LOGIN_TIMEOUT = 8.0
+# Synchronet waits 500ms between its ANSI cursor-position probes and normal
+# logon output. Keep connection setup internal until that fixed probe window
+# has elapsed so a model's first action cannot be discarded by its input flush.
+_RLOGIN_LOGIN_STABLE_MS = 700
 
 
 class BbsGym:
@@ -54,22 +59,26 @@ class BbsGym:
             node: int | None = None,
             transport: str | None = None,
             model_metadata: dict[str, object] | None = None,
+            run_id: str | None = None,
     ) -> TerminalSessionAgent:
-        validate_agent_id(agent_id)
+        account_agent_id = validate_agent_id(agent_id)
+        runtime_agent_id = validate_agent_id(run_id or agent_id)
         # One BBS account maps to one live session; a stale registration for the
         # same id would otherwise leak its socket when overwritten.
-        previous = self.agents.pop(agent_id, None)
+        previous = self.agents.pop(account_agent_id, None)
         if previous is not None:
             previous.close()
         active_transport = transport or self.transport
-        transcript = self.transcript_dir / f"{agent_id}.raw"
-        record = self.agent_registry.maybe_get(agent_id) if self.agent_registry is not None else None
+        transcript = self.transcript_dir / f"{runtime_agent_id}.raw"
+        record = self.agent_registry.maybe_get(account_agent_id) if self.agent_registry is not None else None
         telnet_password: str | None = None
         if active_transport == "telnet":
             if record is not None:
                 telnet_password = record.resolve_password()
                 if telnet_password is None:
-                    raise AccountConfigError(f"telnet login requires a resolved BBS password for {agent_id!r}")
+                    raise AccountConfigError(
+                        f"telnet login requires a resolved BBS password for {account_agent_id!r}"
+                    )
             session = TelnetSession(
                 self.host,
                 self.port,
@@ -79,10 +88,10 @@ class BbsGym:
             )
         elif active_transport == "rlogin":
             if record is None:
-                raise AccountConfigError(f"rlogin requires an agent registry entry for {agent_id!r}")
+                raise AccountConfigError(f"rlogin requires an agent registry entry for {account_agent_id!r}")
             password = record.resolve_password()
             if password is None:
-                raise AccountConfigError(f"rlogin requires a resolved BBS password for {agent_id!r}")
+                raise AccountConfigError(f"rlogin requires a resolved BBS password for {account_agent_id!r}")
             session = RLoginSession(
                 self.host,
                 self.rlogin_port,
@@ -96,7 +105,16 @@ class BbsGym:
             raise ValueError(f"unsupported BBS transport: {active_transport}")
         try:
             session.connect()
-            return self._build_agent(agent_id, session, active_transport, node, record, telnet_password, model_metadata)
+            return self._build_agent(
+                runtime_agent_id,
+                session,
+                active_transport,
+                node,
+                record,
+                telnet_password,
+                model_metadata,
+                account_agent_id,
+            )
         except BaseException:
             # A connect or login that fails before the agent is registered would
             # otherwise leak the socket and its open transcript handle.
@@ -112,6 +130,7 @@ class BbsGym:
             record: Any,
             telnet_password: str | None,
             model_metadata: dict[str, object] | None,
+            account_agent_id: str,
     ) -> TerminalSessionAgent:
         terminal = TerminalScreen(columns=self.columns, lines=self.lines, encoding=session.encoding)
         metadata = {
@@ -128,6 +147,7 @@ class BbsGym:
         if record is not None:
             metadata.update(
                 {
+                    "account_agent_id": account_agent_id,
                     "bbs_alias": record.bbs_alias,
                     "account_metadata": record.metadata,
                 }
@@ -148,10 +168,17 @@ class BbsGym:
             metadata["login_outcome"] = _login_outcome(login_observation)
             observer.metadata = metadata
         elif active_transport == "rlogin":
+            login_observation = observer.observe_turn(
+                timeout=_RLOGIN_LOGIN_TIMEOUT,
+                stable_ms=_RLOGIN_LOGIN_STABLE_MS,
+            )
+            session.drain_sent_bytes()
             metadata["authenticated"] = True
             metadata["login_method"] = "rlogin"
+            metadata["login_outcome"] = _login_outcome(login_observation)
+            observer.metadata = metadata
         agent = TerminalSessionAgent(agent_id, session, observer, metadata)
-        self.agents[agent_id] = agent
+        self.agents[account_agent_id] = agent
         return agent
 
     def _login_telnet(

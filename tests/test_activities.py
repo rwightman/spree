@@ -1,7 +1,13 @@
 from pathlib import Path
 
-from bbs_gym.activities import TW2_ENTRY_PROFILE, activity_profile
-from bbs_gym.prompt_modules import BBS_PROMPT_MODULES, TW2_INPUT_MODALITY_PROFILE, TW2_PROMPT_MODULES
+from bbs_gym.activities import SRE_GAME_PROFILE, TW2_ENTRY_PROFILE, activity_profile
+from bbs_gym.prompt_modules import (
+    BBS_PROMPT_MODULES,
+    SRE_INPUT_MODALITY_PROFILE,
+    SRE_PROMPT_MODULES,
+    TW2_INPUT_MODALITY_PROFILE,
+    TW2_PROMPT_MODULES,
+)
 from tty_agent.actions import Action
 from tty_agent.hints import ObservationHints
 from tty_agent.prompt_modules import (
@@ -74,6 +80,16 @@ def test_activity_profile_factory_returns_bbs_door_line_profile():
     assert any(module.name == "bbs.door_safe_input" for module in profile.prompt_modules)
 
 
+def test_activity_profile_factory_returns_sre_game_profile():
+    profile = activity_profile("sre-game")
+
+    assert profile is SRE_GAME_PROFILE
+    assert profile.action_policy.allowed_actions == frozenset(
+        {"submit_line", "type_text", "press_key", "wait", "hangup"}
+    )
+    assert any(module.name == "sre.command_vocabulary" for module in profile.prompt_modules)
+
+
 def test_activity_profile_factory_overrides_named_profile_objectives():
     tw2_game = activity_profile("tw2-game", "custom game objective")
     tw2_entry = activity_profile("tw2-entry", "custom entry objective")
@@ -107,6 +123,26 @@ def test_tw2_input_modality_profile_classifies_value_prompts():
     assert "press_key enter" in hints.input_mode_hint
 
 
+def test_sre_input_modality_profile_classifies_name_and_pause_prompts():
+    name_hints = ObservationHints.from_observation(
+        observation("Choose a name for your new empire:\n> "),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=SRE_INPUT_MODALITY_PROFILE,
+    )
+    pause_hints = ObservationHints.from_observation(
+        observation("Empire Status\n░▒▓█PAUSED█▓▒░"),
+        previous_observation=None,
+        last_action=None,
+        modality_profile=SRE_INPUT_MODALITY_PROFILE,
+    )
+
+    assert name_hints.input_mode == "line_input_expected"
+    assert "submit_line" in name_hints.input_mode_hint
+    assert pause_hints.input_mode == "any_key_expected"
+    assert "press_key" in pause_hints.input_mode_hint
+
+
 def test_prompt_module_assistance_levels_are_ablatable():
     obs = observation("Command (?=Help)?")
     context = PromptRenderContext(
@@ -129,8 +165,11 @@ def test_prompt_module_assistance_levels_are_ablatable():
     generic_prompt = render_prompt_modules(collect_prompt_module_results(GENERIC_TERMINAL_MODULES, context))
     bbs_prompt = render_prompt_modules(collect_prompt_module_results(BBS_PROMPT_MODULES, context))
     tw2_prompt = render_prompt_modules(collect_prompt_module_results(TW2_PROMPT_MODULES, context))
+    sre_prompt = render_prompt_modules(collect_prompt_module_results(SRE_PROMPT_MODULES, context))
 
     assert len(generic_prompt) < len(bbs_prompt) < len(tw2_prompt)
+    assert len(bbs_prompt) < len(sre_prompt)
     assert "Most recent terminal output:" in generic_prompt
     assert "BBS convention:" in bbs_prompt
     assert "Trade Wars 2 command vocabulary" in tw2_prompt
+    assert "Solar Realms Elite menus" in sre_prompt

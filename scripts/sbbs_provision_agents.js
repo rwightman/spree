@@ -51,6 +51,15 @@ function provisionAgent(agent) {
     usr.security.password = password;
     if (typeof agent.security_level === "number") usr.security.level = agent.security_level;
 
+    // system.new_user() intentionally leaves profile fields blank. The stock
+    // Synchronet logon module prompts for those fields before the first session,
+    // which is appropriate for people but would consume an agent's game budget.
+    // Fill non-personal bot defaults without replacing values a sysop set.
+    if (!usr.location) usr.location = "Spree";
+    if (!usr.gender) usr.gender = "X";
+    if (!usr.birthdate) usr.birthdate = "01/01/2000";
+    if (!usr.netmail) usr.netmail = alias.toLowerCase() + "@spree.invalid";
+
     writeln((created ? "created" : "updated") + " " + agent.agent_id + " -> " + alias);
 }
 

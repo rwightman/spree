@@ -149,6 +149,37 @@ docker compose exec bbs jsexec install-xtrn.js ../xtrn/tw2002 -auto
 You still need to run each door's own setup editor to set node/dropfile paths,
 game resets, and registration keys. See [docs/doors.md](docs/doors.md).
 
+### Accelerated SRE campaigns
+
+`run-campaign` runs SRE directly in isolated, short-lived DOSEMU containers;
+the Synchronet service does not need to be running. It serializes complete
+player sessions against one shared world, advances a virtual DOS day only at an
+all-player barrier, runs SRE's native maintenance, records hidden post-session
+scores, and commits recoverable world checkpoints.
+
+```bash
+make build-dos
+make fetch-sre
+
+uv run bbs-gym run-campaign \
+  --campaign-dir runtime/campaigns/sre-match \
+  --start-time 2026-07-28T12:00:00Z \
+  --epochs 20 \
+  --agent-id claude-blue \
+  --agent-id codex-debug \
+  --campaign-order rotate \
+  --social-rounds 2 \
+  --max-decision-ticks 50 \
+  --max-wall-seconds 600
+```
+
+The optional social rounds form a public campaign forum: every agent sees the
+same prior-round messages, may post once or pass, and all drafts become visible
+together. Forum calls do not consume game decision ticks, and hidden evaluator
+metrics are never inserted into forum or game prompts. See
+[docs/door-campaigns.md](docs/door-campaigns.md) for reset/bootstrap behavior,
+artifacts, recovery, fairness, and resume commands.
+
 ## Agent Smoke Test
 
 ```bash

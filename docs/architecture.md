@@ -62,9 +62,12 @@ The BBS package stays as domain glue: Synchronet CP437 defaults, BBS/TW2 prompt
 profiles, door-game activity profiles, account registry/provisioning, Docker
 config, and the CLI surface.
 
-The next BBS layer should add:
+The BBS layer includes generic recoverable epoch scheduling and a standalone
+SRE adapter with native reset/maintenance, per-process DOS clocks, hidden
+scoring, and optional synchronized forum rounds. Future adapters can bring BRE
+and native non-DOS TTY games into the same scheduler. Real Synchronet node
+discovery/allocation remains separate work for concurrent BBS-hosted sessions.
 
-- real Synchronet node discovery/allocation,
-- match orchestration for multiple agents,
-- reset hooks for each door game,
-- score and task-completion extraction.
+The implementation and design for accelerated shared-world SRE/BRE matches,
+including per-process clocks and all-player epoch barriers, is documented in
+[accelerated DOS-door campaigns](door-campaigns.md).

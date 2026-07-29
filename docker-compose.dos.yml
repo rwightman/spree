@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: docker/synchronet/Dockerfile
       args:
-        SYNCHRONET_IMAGE: ${SYNCHRONET_BASE_IMAGE:-bbsio/synchronet:3.19c}
+        SYNCHRONET_COMMIT: ${SYNCHRONET_COMMIT:-74911bb1379078e52a52f4cac47696ca4190d3f9}
+        DOSEMU2_VERSION: ${DOSEMU2_VERSION:-2.0~pre9-10228-0aeb4d174+202607270023~ubuntu24.04.1}
     security_opt:
       - seccomp=unconfined
-

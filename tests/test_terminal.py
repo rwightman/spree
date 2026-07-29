@@ -84,6 +84,14 @@ def test_observe_turn_sends_ansi_process_replies():
     assert session.sent == [b"\x1b[?6c", b"\x1b[1;1R"]
 
 
+def test_terminal_ignores_xterm_private_margin_restore():
+    terminal = TerminalScreen()
+
+    terminal.feed(b"Before\x1b[?1001rAfter")
+
+    assert "BeforeAfter" in terminal.model_text()
+
+
 def test_observe_turn_can_use_prompt_fast_path_when_enabled():
     profile = PromptProfile.from_patterns("test", {"command": r"Command:\s*$"})
     observer = TurnObserver("agent-001", FakeSession([b"Welcome\r\nCommand:"]), profile=profile)

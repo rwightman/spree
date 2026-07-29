@@ -41,6 +41,14 @@ TW2_COMMAND_VOCABULARY = (
     "use press_key enter to submit them."
 )
 
+SRE_COMMAND_VOCABULARY = (
+    "Solar Realms Elite menus use one-key commands. Use press_key for menu choices, yes/no answers, and PAUSED "
+    "screens; Q, 0, or Escape normally returns to the previous menu. Use submit_line only for names and other "
+    "ordinary line prompts. In numeric prompts, Enter accepts the bracketed default, > selects the displayed "
+    "maximum, K appends three zeros, and M appends six zeros. When creating a player, you can decline the long "
+    "initial instructions with N and consult help later so the session budget remains available for play."
+)
+
 BBS_INPUT_MODALITY_PROFILE = InputModalityProfile(
     rules=(
         InputModeRule.from_pattern(
@@ -76,6 +84,33 @@ TW2_INPUT_MODALITY_PROFILE = InputModalityProfile(
             mode="hotkey_expected",
             pattern=r"command\s+\(\?=help\)\?\s*$",
             hint="one-character commands are usually single keypresses; use press_key unless you need to type a value",
+            priority=40,
+            target="active_prompt",
+        ),
+        *BBS_INPUT_MODALITY_PROFILE.rules,
+    )
+)
+
+SRE_INPUT_MODALITY_PROFILE = InputModalityProfile(
+    rules=(
+        InputModeRule.from_pattern(
+            mode="line_input_expected",
+            pattern=r"(?:enter|choose) (?:(?:a|the) )?name[^\r\n]*[:>]\s*$|^>\s*$",
+            hint="enter the requested name with submit_line",
+            priority=60,
+            target="active_prompt",
+        ),
+        InputModeRule.from_pattern(
+            mode="any_key_expected",
+            pattern=r"PAUSED[^\r\n]*$",
+            hint="dismiss the paused screen with one press_key, usually enter",
+            priority=50,
+            target="screen_tail",
+        ),
+        InputModeRule.from_pattern(
+            mode="hotkey_expected",
+            pattern=r"Which one\?[^\r\n]*$",
+            hint="choose a displayed one-character menu option with press_key; Enter selects the shown default",
             priority=40,
             target="active_prompt",
         ),
@@ -131,5 +166,15 @@ TW2_PROMPT_MODULES: tuple[PromptModule, ...] = (
         name="tw2.command_vocabulary",
         level="game_interface",
         text=TW2_COMMAND_VOCABULARY,
+    ),
+)
+
+SRE_PROMPT_MODULES: tuple[PromptModule, ...] = (
+    *BBS_PROMPT_MODULES,
+    TraceOnlyModule(name="sre.input_modes", level="game_interface"),
+    StaticPromptModule(
+        name="sre.command_vocabulary",
+        level="game_interface",
+        text=SRE_COMMAND_VOCABULARY,
     ),
 )

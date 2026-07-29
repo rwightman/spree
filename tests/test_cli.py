@@ -1,14 +1,19 @@
 import argparse
 import json
 
+import pytest
+
 from bbs_gym.accounts import AgentRecord, AgentRegistry
 from bbs_gym.cli import (
+    build_epoch_campaign_config,
     build_match_scheduler_config,
     build_activity_profile,
     build_activity_route_set,
     build_match_participants,
     build_model,
     build_model_metadata,
+    campaign_participant_specs,
+    main,
     match_participant_specs,
     smoke,
 )
@@ -22,6 +27,42 @@ from bbs_gym.match import (
 from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
 from tty_agent.runner import ActivityBudget
 from tty_agent.transports.base import SessionDisconnected
+
+
+def test_run_campaign_cli_and_epoch_social_config(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run-campaign", "--help"])
+
+    assert exc_info.value.code == 0
+    assert "--social-rounds" in capsys.readouterr().out
+
+    args = argparse.Namespace(
+        start_time="2026-07-28T12:00:00Z",
+        epochs=3,
+        epoch_seconds=86_400,
+        campaign_order="rotate",
+        campaign_seed=17,
+        failure_policy="stop",
+        max_decision_ticks=25,
+        max_wall_seconds=300.0,
+        max_campaign_wall_seconds=3_600.0,
+        social_rounds=2,
+        social_max_message_chars=400,
+        social_history_messages=80,
+        participant=["alpha:claude:sonnet"],
+        agent_id=["bravo"],
+    )
+
+    config = build_epoch_campaign_config(args)
+    specs = campaign_participant_specs(args)
+
+    assert config.max_epochs == 3
+    assert config.social_rounds == 2
+    assert config.start_time.isoformat() == "2026-07-28T12:00:00+00:00"
+    assert [(spec.agent_id, spec.provider, spec.model) for spec in specs] == [
+        ("alpha", "claude", "sonnet"),
+        ("bravo", None, None),
+    ]
 
 
 def test_build_model_uses_agent_registry_model_config():
@@ -307,6 +348,15 @@ def test_build_activity_profile_applies_named_profile_overrides():
     assert profile.recent_steps_to_keep == 5
     assert profile.prompt_mode == "stateful_delta"
     assert profile.prompt_layout == "cache_friendly"
+
+
+def test_sre_activity_selects_the_sre_evaluator():
+    from bbs_gym.cli import _activity_evaluation_profile
+
+    evaluation_profile = _activity_evaluation_profile("sre-game")
+
+    assert evaluation_profile is not None
+    assert evaluation_profile.name == "sre-score"
 
 
 def test_build_activity_profile_can_disable_actions():

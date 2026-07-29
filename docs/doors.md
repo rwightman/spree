@@ -39,6 +39,53 @@ BRE is not truly simultaneous multi-node gameplay in the same way as TW2002.
 For experiments, serialize BRE sessions unless you have verified the specific
 version you run handles lock contention cleanly.
 
+## Solar Realms Elite
+
+The original author hosts a DOSBox-ready SRE 0.994b archive. Fetch, verify,
+stage, and register its Synchronet entry with:
+
+```bash
+make install-sre
+```
+
+Run `SPREG.BAT` once inside the door directory to generate the author's free
+registration, then reset the game with `SPRERST.BAT`. The reset batch uses a
+31-Dec-1999 DOS clock, as recommended by the author, because the unmodified
+game rejects later maintenance timestamps.
+
+Immediately after a reset, while the world is idle and before any players
+join, advance it to the current hour with:
+
+```bash
+make patch-sre-reset-time
+```
+
+This makes a timestamped backup under `runtime/backups`, raises only SRE
+0.994b's four hard-coded 1999 timestamp comparisons, advances the two
+validation timestamps in `DATA/SYSTEM.II`, decrypts and advances all three
+maintenance clocks in `DATA/GALAXY.II`, and sets the tournament start to the
+beginning of the current UTC day. SRE compares that field with a date
+normalized to midnight, so using the current hour would leave the game closed
+until the following day. The helper then re-encrypts the Galaxy and rebuilds
+its integrity descriptor. The backup contains `SRE.EXE`, `SYSTEM.II`, and
+`GALAXY.II`. Override `SRE_BACKUP_DIRECTORY` if a specific destination is
+desired.
+
+The staged `external.bat` also sets `TZ=UTC0`. This keeps SRE's DOS runtime
+on the same clock as the reset-time helper and avoids a seasonal four- or
+five-hour offset. Apply the patch only to a freshly reset, idle world; SRE's
+`inuse.sr` lock must not exist.
+
+Synchronet runs a host-side JavaScript cleanup module after the door exits so a
+carrier-loss or budget disconnect cannot strand SRE's `inuse.sr` lock. The
+module is only a recovery path; SRE/BRE sessions still require serialized
+admission. Accelerated daily-turn campaigns are described in
+[accelerated DOS-door campaigns](door-campaigns.md).
+
+The recovered record encryption, integrity layout, and a lossless-first JSON
+plan for a clean Python implementation are documented in
+[SRE reverse engineering](sre-reverse-engineering.md).
+
 ## TradeWars 2002
 
 1. Put the extracted TW2002 files in `doors/tw2002`.
@@ -80,4 +127,3 @@ git. The `.gitignore` is set up to enforce that by default.
 If local DOS execution is unstable, configure a Synchronet internet gateway
 door to an rlogin/TWGS server. That is less reproducible than local execution
 but useful for testing the agent driver against a working TradeWars endpoint.
-

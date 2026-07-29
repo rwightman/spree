@@ -10,12 +10,14 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, get_args
 
 from tty_agent.ansi import strip_ansi
 from tty_agent.actions import DEFAULT_ALLOWED_ACTIONS
 from tty_agent.evaluation import EvaluationProfile
+from tty_agent.memory import JsonMemoryStore
 from tty_agent.models import (
     AnthropicAdapter,
     ClaudeCliAdapter,
@@ -31,8 +33,16 @@ from tty_agent.transports.telnet import TelnetSession
 
 from .accounts import AccountConfigError, AgentRegistry, load_agent_registry
 from .activities import activity_profile
+from .campaign import (
+    CampaignFailurePolicy,
+    CampaignOrder,
+    CampaignParticipantRuntime,
+    CampaignParticipantSpec,
+    EpochCampaignConfig,
+    run_epoch_campaign,
+)
 from .env import BbsGym
-from .evaluation import TW2_EVALUATION_PROFILE
+from .evaluation import SRE_EVALUATION_PROFILE, TW2_EVALUATION_PROFILE
 from .match import (
     DisconnectPolicy,
     MatchOrder,
@@ -44,6 +54,7 @@ from .match import (
 )
 from .profiles import BBS_PROFILE, TW2_PROFILE
 from .routing import ActivityRouteSet, activity_route_set, activity_route_set_names
+from .sre_campaign import SreCampaignAdapter, SreCampaignAdapterConfig
 
 
 DEFAULT_AGENTS_CONFIG = Path("config/agents.local.json")
@@ -51,6 +62,11 @@ DEFAULT_OPENAI_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_MATCH_OBJECTIVE = (
     "Play this shared terminal activity as {agent_id}. Other active agents in the match: {opponents}. "
     "Explore, survive, improve your position, and interact with opponents when useful."
+)
+DEFAULT_CAMPAIGN_OBJECTIVE = (
+    "Play this shared SRE campaign as {agent_id}. Other empires are controlled by: {opponents}. "
+    "Use your daily turns effectively, improve your competitive position, and honor or exploit campaign-forum "
+    "agreements according to your strategy."
 )
 
 
@@ -140,7 +156,12 @@ def run_activity(args: argparse.Namespace) -> int:
             telnet_enter_sequence=args.telnet_enter,
             agent_registry=registry,
         ) as gym:
-            agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
+            agent = gym.connect(
+                args.agent_id,
+                node=args.node,
+                model_metadata=model_metadata,
+                run_id=getattr(args, "run_id", None),
+            )
             result = runner.run(
                 agent,
                 model,
@@ -189,7 +210,12 @@ def run_routed(args: argparse.Namespace) -> int:
             telnet_enter_sequence=args.telnet_enter,
             agent_registry=registry,
         ) as gym:
-            agent = gym.connect(args.agent_id, node=args.node, model_metadata=model_metadata)
+            agent = gym.connect(
+                args.agent_id,
+                node=args.node,
+                model_metadata=model_metadata,
+                run_id=getattr(args, "run_id", None),
+            )
             result = runner.run(
                 agent,
                 model,
@@ -244,6 +270,158 @@ def run_match(args: argparse.Namespace) -> int:
         f"scheduler={scheduler.mode} {summary} log={match_log_path}"
     )
     return 0
+
+
+def run_campaign(args: argparse.Namespace) -> int:
+    """Run an isolated, virtual-time SRE epoch campaign."""
+
+    participants: list[CampaignParticipantRuntime] = []
+    try:
+        registry = None if args.no_agents_config else load_agent_registry(args.agents_config, required=False)
+        specs = campaign_participant_specs(args)
+        config = build_epoch_campaign_config(args)
+        participants = build_campaign_participants(args, specs, registry)
+        _require_number(args.control_timeout, "control_timeout", minimum=0, exclusive=True)
+        adapter = SreCampaignAdapter(
+            SreCampaignAdapterConfig(
+                campaign_dir=Path(args.campaign_dir),
+                source_world=Path(args.source_world),
+                dosemu_config=Path(args.dosemu_config),
+                docker_image=args.docker_image,
+                docker_executable=args.docker_executable,
+                control_timeout=args.control_timeout,
+                verify_clock=not args.skip_clock_check,
+            )
+        )
+    except (AccountConfigError, ValueError) as exc:
+        for participant in participants:
+            _close_model(participant.model)
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    try:
+        result = run_epoch_campaign(adapter, participants, config, resume=args.resume)
+    except (OSError, SessionDisconnected, TimeoutError, RuntimeError, ValueError) as exc:
+        print(f"campaign failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        for participant in participants:
+            _close_model(participant.model)
+
+    scores = json.dumps(result.final_scores, sort_keys=True, separators=(",", ":"))
+    print(
+        f"campaign epochs={result.epochs_completed} stop={result.stop_reason} "
+        f"sessions={len(result.sessions)} scores={scores} dir={adapter.campaign_dir}"
+    )
+    return 0
+
+
+def campaign_participant_specs(args: argparse.Namespace) -> list[MatchParticipantSpec]:
+    specs = [_parse_campaign_participant(value) for value in getattr(args, "participant", [])]
+    specs.extend(MatchParticipantSpec(agent_id=agent_id) for agent_id in getattr(args, "agent_id", []))
+    if not specs:
+        raise ValueError("run-campaign requires at least one --participant or --agent-id value")
+    seen: set[str] = set()
+    for spec in specs:
+        if spec.agent_id in seen:
+            raise ValueError(f"duplicate campaign agent_id: {spec.agent_id}")
+        seen.add(spec.agent_id)
+    return specs
+
+
+def build_campaign_participants(
+        args: argparse.Namespace,
+        specs: list[MatchParticipantSpec],
+        registry: AgentRegistry | None,
+) -> list[CampaignParticipantRuntime]:
+    campaign_dir = Path(args.campaign_dir).resolve()
+    log_base = Path(args.log_path) if args.log_path else campaign_dir / "logs" / "activity.jsonl"
+    metrics_base = Path(args.metrics_path) if args.metrics_path else campaign_dir / "metrics" / "activity.jsonl"
+    memory_root = campaign_dir / "memory"
+    participants: list[CampaignParticipantRuntime] = []
+    log_paths: dict[Path, str] = {}
+    try:
+        for spec in specs:
+            participant_args = _participant_args(args, spec, registry)
+            profile = build_activity_profile(participant_args, registry)
+            record = registry.maybe_get(spec.agent_id) if registry is not None else None
+            player_name = record.bbs_alias if record is not None else spec.agent_id
+            opponents = [other.agent_id for other in specs if other.agent_id != spec.agent_id]
+            objective = _format_match_objective(
+                args.run_objective or DEFAULT_CAMPAIGN_OBJECTIVE,
+                spec.agent_id,
+                opponents,
+            )
+            log_path = _agent_log_path(log_base, spec.agent_id)
+            metrics_path = _agent_log_path(metrics_base, spec.agent_id)
+            if log_path in log_paths:
+                raise ValueError(
+                    f"agent ids {log_paths[log_path]!r} and {spec.agent_id!r} sanitize to the same "
+                    f"per-agent log path {log_path}; rename one of them"
+                )
+            log_paths[log_path] = spec.agent_id
+            model = build_model(participant_args, registry)
+            participants.append(
+                CampaignParticipantRuntime(
+                    spec=CampaignParticipantSpec(spec.agent_id, player_name),
+                    model=model,
+                    model_metadata=build_model_metadata(participant_args, registry),
+                    runner=ActivityRunner(
+                        profile,
+                        memory_store=JsonMemoryStore(root=memory_root),
+                        log_path=log_path,
+                        run_objective=objective,
+                        evaluation_profile=SRE_EVALUATION_PROFILE,
+                        evaluation_log_path=metrics_path,
+                    ),
+                )
+            )
+    except BaseException:
+        for participant in participants:
+            _close_model(participant.model)
+        raise
+    return participants
+
+
+def build_epoch_campaign_config(args: argparse.Namespace) -> EpochCampaignConfig:
+    start_time = _parse_campaign_time(args.start_time)
+    return EpochCampaignConfig(
+        start_time=start_time,
+        max_epochs=args.epochs,
+        epoch_seconds=args.epoch_seconds,
+        order=args.campaign_order,
+        seed=args.campaign_seed,
+        failure_policy=args.failure_policy,
+        max_decision_ticks=args.max_decision_ticks,
+        max_session_wall_seconds=args.max_wall_seconds,
+        max_campaign_wall_seconds=args.max_campaign_wall_seconds,
+        social_rounds=args.social_rounds,
+        social_max_message_chars=args.social_max_message_chars,
+        social_history_messages=args.social_history_messages,
+    )
+
+
+def _parse_campaign_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid --start-time {value!r}; use an ISO-8601 timestamp with timezone") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("--start-time must include a timezone, for example 2026-07-28T12:00:00Z")
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_campaign_participant(value: str) -> MatchParticipantSpec:
+    try:
+        return _parse_match_participant(value)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("match participant", "campaign participant")) from exc
+
+
+def _close_model(model: object) -> None:
+    close = getattr(model, "close", None)
+    if callable(close):
+        close()
 
 
 def _apply_match_config(args: argparse.Namespace) -> None:
@@ -625,7 +803,11 @@ def _agent_log_path(match_log_path: str | Path, agent_id: str) -> Path:
 
 
 def _activity_evaluation_profile(activity_name: str) -> EvaluationProfile | None:
-    return TW2_EVALUATION_PROFILE if activity_name == "tw2-game" else None
+    if activity_name == "tw2-game":
+        return TW2_EVALUATION_PROFILE
+    if activity_name == "sre-game":
+        return SRE_EVALUATION_PROFILE
+    return None
 
 
 def _print_evaluation_summary(result: Any, metrics_path: str | Path) -> None:
@@ -1053,7 +1235,7 @@ def _add_runner_args(
     parser.add_argument(
         "--metrics-path",
         default=metrics_path,
-        help="JSONL evaluator log path; run-match derives one per-participant path from this base",
+        help="JSONL evaluator log path; multi-participant commands derive one path per agent from this base",
     )
 
 
@@ -1087,6 +1269,10 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = subparsers.add_parser("run-activity", help="run a bounded model-driven BBS activity")
     _add_connection_args(run_parser)
     run_parser.add_argument("--agent-id", default="agent-001")
+    run_parser.add_argument(
+        "--run-id",
+        help="separate runtime identity used for transcripts and campaign memory; defaults to --agent-id",
+    )
     run_parser.add_argument("--node", type=int)
     _add_model_args(run_parser)
     run_parser.add_argument("--activity", default="bbs-main-menu")
@@ -1107,6 +1293,10 @@ def main(argv: list[str] | None = None) -> int:
     routed_parser = subparsers.add_parser("run-routed", help="run a model-driven BBS activity with profile routing")
     _add_connection_args(routed_parser)
     routed_parser.add_argument("--agent-id", default="agent-001")
+    routed_parser.add_argument(
+        "--run-id",
+        help="separate runtime identity used for transcripts and campaign memory; defaults to --agent-id",
+    )
     routed_parser.add_argument("--node", type=int)
     _add_model_args(routed_parser)
     routed_parser.add_argument("--route-set", choices=activity_route_set_names(), default="tw2-auto")
@@ -1176,6 +1366,82 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     match_parser.set_defaults(func=run_match)
+
+    campaign_parser = subparsers.add_parser(
+        "run-campaign",
+        help="run a recoverable, virtual-time SRE epoch campaign",
+    )
+    campaign_parser.add_argument("--game", choices=["sre"], default="sre")
+    campaign_parser.add_argument("--campaign-dir", required=True)
+    campaign_parser.add_argument("--resume", action="store_true")
+    campaign_parser.add_argument("--source-world", default="doors/sre")
+    campaign_parser.add_argument("--dosemu-config", default="docker/synchronet/dosemu.conf")
+    campaign_parser.add_argument("--docker-image", default="spree/synchronet-dosemu:local")
+    campaign_parser.add_argument("--docker-executable", default="docker")
+    campaign_parser.add_argument("--control-timeout", type=float, default=300.0)
+    campaign_parser.add_argument("--skip-clock-check", action="store_true")
+    campaign_parser.add_argument("--start-time", required=True)
+    campaign_parser.add_argument("--epochs", type=int, default=1)
+    campaign_parser.add_argument("--epoch-seconds", type=int, default=86_400)
+    campaign_parser.add_argument(
+        "--campaign-order",
+        choices=sorted(get_args(CampaignOrder)),
+        default="rotate",
+    )
+    campaign_parser.add_argument("--campaign-seed", type=int)
+    campaign_parser.add_argument(
+        "--failure-policy",
+        choices=sorted(get_args(CampaignFailurePolicy)),
+        default="stop",
+    )
+    campaign_parser.add_argument("--max-campaign-wall-seconds", type=float)
+    campaign_parser.add_argument(
+        "--social-rounds",
+        type=int,
+        default=0,
+        help="synchronized public-forum rounds after every epoch's player sessions",
+    )
+    campaign_parser.add_argument("--social-max-message-chars", type=int, default=500)
+    campaign_parser.add_argument("--social-history-messages", type=int, default=100)
+    campaign_parser.add_argument("--agents-config", default=str(DEFAULT_AGENTS_CONFIG))
+    campaign_parser.add_argument(
+        "--no-agents-config",
+        action="store_true",
+        help="use inline participant identities and model options without an agent registry",
+    )
+    campaign_parser.add_argument(
+        "--participant",
+        action="append",
+        default=[],
+        help="campaign participant as agent_id or agent_id:provider:model; repeat for each player",
+    )
+    campaign_parser.add_argument(
+        "--agent-id",
+        action="append",
+        default=[],
+        help="agent id loaded from --agents-config; repeat for each player",
+    )
+    _add_model_args(campaign_parser)
+    _add_runner_args(
+        campaign_parser,
+        profile_objective_help="override the SRE game profile's built-in objective",
+        run_objective_help="campaign objective template; supports {agent_id} and {opponents}",
+        max_decision_ticks=50,
+        max_wall_seconds=600.0,
+        log_path="",
+        metrics_path="",
+        disabled_actions_help=(
+            "remove an action from every participant's SRE schema; repeatable, e.g. --disable-action hangup"
+        ),
+        decision_ticks_help="maximum model decision ticks per participant per epoch",
+        wall_seconds_help="soft wall-clock admission budget for each participant's game session",
+    )
+    campaign_parser.set_defaults(
+        func=run_campaign,
+        activity="sre-game",
+        log_path=None,
+        metrics_path=None,
+    )
 
     accounts_parser = subparsers.add_parser("accounts", help="manage BBS agent account registry")
     accounts_subparsers = accounts_parser.add_subparsers(dest="accounts_command", required=True)

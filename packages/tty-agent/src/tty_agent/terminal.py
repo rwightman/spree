@@ -117,6 +117,23 @@ class _ProcessInputScreen(pyte.Screen):
     def write_process_input(self, data: str) -> None:
         self._process_input.append(data)
 
+    def set_margins(
+            self,
+            top: int | None = None,
+            bottom: int | None = None,
+            private: bool = False,
+    ) -> None:
+        """Handle DEC private restore controls without treating them as margins.
+
+        XTerm uses ``CSI ? 1001 r`` while restoring mouse-tracking state.
+        Pyte dispatches private ``r`` sequences to ``set_margins`` but its
+        screen method does not accept the parser's ``private`` keyword.
+        """
+
+        if private:
+            return
+        super().set_margins(top, bottom)
+
     def drain_process_input(self, encoding: str) -> tuple[bytes, ...]:
         chunks = tuple(item.encode(encoding, errors="replace") for item in self._process_input)
         self._process_input.clear()

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+sbbs_root="/sbbs"
+sbbs_data="/sbbs-data"
+
+if [[ ! -w "$sbbs_data" ]]; then
+  sudo chown "$(id -u):$(id -g)" "$sbbs_data"
+fi
+
+mkdir -p "$sbbs_data"
+exec 9>"$sbbs_data/.init.lock"
+flock 9
+
+copy_tree() {
+  local source="$1"
+  local target="$2"
+
+  mkdir -p "$target"
+  cp -a "$source"/. "$target"/
+}
+
+ensure_link() {
+  local target="$1"
+  local link="$2"
+
+  if [[ -L "$link" ]]; then
+    return 0
+  fi
+  if [[ -e "$link" ]]; then
+    echo "Cannot initialize Synchronet: $link exists and is not a symlink" >&2
+    exit 1
+  fi
+  ln -s "$target" "$link"
+}
+
+hydrate() {
+  local dist_name="$1"
+  local data_name="$2"
+  local target="$sbbs_data/$data_name"
+
+  if [[ ! -e "$target" ]]; then
+    if [[ -n "$dist_name" ]]; then
+      copy_tree "$sbbs_root/dist/$dist_name" "$target"
+    else
+      mkdir -p "$target"
+    fi
+  fi
+  ensure_link "$target" "$sbbs_root/$data_name"
+}
+
+hydrate ctrl ctrl
+hydrate xtrn xtrn
+hydrate text text
+hydrate web-ecweb4 web
+hydrate "" data
+hydrate "" mods
+hydrate "" fido
+
+mkdir -p "$sbbs_data/backup" "$sbbs_data/nodes"
+
+node_count=4
+shopt -s nullglob
+for node_dir in "$sbbs_data"/nodes/node*; do
+  node_name="${node_dir##*/node}"
+  if [[ "$node_name" =~ ^[0-9]+$ ]] && (( node_name > node_count )); then
+    node_count="$node_name"
+  fi
+done
+shopt -u nullglob
+
+for ((node_number = 1; node_number <= node_count; node_number++)); do
+  node_target="$sbbs_data/nodes/node$node_number"
+  if [[ ! -e "$node_target" ]]; then
+    copy_tree "$sbbs_root/dist/node1" "$node_target"
+  fi
+  ensure_link "$node_target" "$sbbs_root/node$node_number"
+done
+
+new_version="$(cat "$sbbs_root/exec/version.txt")"
+old_version=""
+if [[ -f "$sbbs_root/ctrl/version.txt" ]]; then
+  old_version="$(cat "$sbbs_root/ctrl/version.txt")"
+fi
+
+if [[ -f "$sbbs_root/ctrl/main.cnf" && ! -f "$sbbs_root/ctrl/main.ini" ]]; then
+  echo "This image requires a Synchronet v3.20-or-newer configuration." >&2
+  echo "Preserve the legacy runtime and initialize a fresh /sbbs-data directory." >&2
+  exit 1
+fi
+
+if [[ "$old_version" != "$new_version" ]]; then
+  if [[ -n "$old_version" ]]; then
+    echo "Synchronet image version changed; updating persistent state."
+    upgrade_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    upgrade_backup="$sbbs_data/backup/pre-upgrade-$upgrade_stamp"
+    mkdir -p "$upgrade_backup"
+    for state_dir in ctrl data nodes xtrn; do
+      if [[ -e "$sbbs_data/$state_dir" ]]; then
+        cp -a --reflink=auto "$sbbs_data/$state_dir" "$upgrade_backup/$state_dir"
+      fi
+    done
+
+    if ! cmp -s "$sbbs_root/ctrl/text.dat" "$sbbs_root/dist/ctrl/text.dat"; then
+      cp "$sbbs_root/ctrl/text.dat" "$sbbs_root/ctrl/text.dat.$upgrade_stamp.bak"
+      cp "$sbbs_root/dist/ctrl/text.dat" "$sbbs_root/ctrl/text.dat"
+    fi
+
+    /sbbs/exec/jsexec -n /sbbs/exec/update.js
+  else
+    echo "Initializing fresh Synchronet persistent state."
+  fi
+
+  mkdir -p "$sbbs_data/backup/defaults/exec"
+  cp -a "$sbbs_root/exec"/. "$sbbs_data/backup/defaults/exec"/
+  for dist_dir in "$sbbs_root"/dist/*; do
+    dist_name="${dist_dir##*/}"
+    copy_tree "$dist_dir" "$sbbs_data/backup/defaults/$dist_name"
+  done
+
+  printf '%s\n' "$new_version" > "$sbbs_root/ctrl/version.txt"
+fi
