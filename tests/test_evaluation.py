@@ -93,6 +93,53 @@ def test_zork_score_extractor_parses_standard_wrapped_response():
     assert singular_metrics["moves"] == 1
 
 
+def test_zork_provider_utility_reasoning_options(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "zork_activity.py",
+            "story.z3",
+            "--no-compaction-reasoning",
+            "--compaction-extra-body-json",
+            '{"response_format":{"type":"json_object"}}',
+            "--memory-reasoning",
+            "--memory-extra-body-json",
+            '{"response_format":{"type":"json_object"}}',
+        ],
+    )
+
+    args = zork_activity.parse_args()
+
+    assert args.compaction_reasoning is False
+    assert args.compaction_extra_body_json == {"response_format": {"type": "json_object"}}
+    assert args.memory_reasoning is True
+    assert args.memory_extra_body_json == {"response_format": {"type": "json_object"}}
+
+
+def test_zork_responses_state_options(monkeypatch, tmp_path):
+    state_file = tmp_path / "zork.responses.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "zork_activity.py",
+            "story.z3",
+            "--model-api",
+            "responses",
+            "--responses-stateful",
+            "--responses-state-file",
+            str(state_file),
+            "--responses-resume",
+        ],
+    )
+
+    args = zork_activity.parse_args()
+
+    assert args.model_api == "responses"
+    assert args.responses_stateful is True
+    assert args.responses_state_file == state_file
+    assert args.responses_resume is True
+
+
 def test_final_zork_probe_is_outside_decision_steps_and_model_context(tmp_path):
     agent = EvaluationAgent(
         [

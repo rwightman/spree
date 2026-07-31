@@ -33,8 +33,9 @@ License: Apache-2.0, Copyright 2026 Ross Wightman.
   and `uv run bbs-gym run-activity` for bounded model-driven sessions.
   `uv run bbs-gym run-routed` keeps one session open while switching
   activity profiles from observed terminal state.
-- Model providers: OpenAI-compatible chat endpoints, Anthropic Messages,
-  Codex CLI, Claude CLI, and scripted test responses.
+- Model providers: OpenAI-compatible Chat Completions and Responses endpoints,
+  hosted Fireworks and xAI presets, Anthropic Messages, Codex CLI, Claude CLI,
+  and scripted test responses.
 - Debug tooling: JSONL traces can be rendered with `scripts/trace_pretty.py`;
   raw transcripts can be replayed into ANSI HTML or animated GIFs with
   `scripts/ansi_screencap.py`.
@@ -459,6 +460,94 @@ session, the GIF will be monochrome too. For current traces, transcript byte
 offsets are read automatically. For older traces that do not include absolute
 offsets, pass `--base-byte-offset N` when rendering an activity that starts
 mid-session.
+
+## Hosted OpenAI-Compatible Providers
+
+The `fireworks` and `xai` providers supply the hosted endpoint, API-key
+environment variable, and provider-specific trace name. They default to the
+OpenAI-compatible Chat Completions API; select the newer Responses API with
+`"api": "responses"` in an agent's model configuration or
+`--model-api responses` on the command line. Keep API keys out of the agent
+registry:
+
+```bash
+export FIREWORKS_API_KEY="..."
+export XAI_API_KEY="..."
+```
+
+Select `provider: "fireworks"` with a full Fireworks model identifier, or
+`provider: "xai"` with a Grok model identifier. See
+`config/agents.example.json` for Chat Completions and stateful Responses
+examples. Both APIs accept `extra_body` for compatible request parameters and
+`extra_headers` for routing hints. Header values are used for requests but are
+deliberately omitted from trace metadata.
+
+Reasoning can be controlled independently for runner-owned utility calls with
+`compaction_reasoning` and `memory_reasoning` in model configuration, or with
+`--[no-]compaction-reasoning` and `--[no-]memory-reasoning`. Omit either option
+to inherit the normal decision setting. Utility calls keep the model's normal
+`max_tokens`. These booleans use API-specific request shapes: Chat Completions
+uses the provider extension `reasoning.enabled`, while Responses uses
+`reasoning.effort` (`medium` when enabled and `none` when disabled). Provider
+and model support still varies; use `compaction_extra_body` and
+`memory_extra_body` to select an explicit effort or another provider-specific
+shape. Empty, truncated, or incomplete compactions preserve the previous
+summary and unsummarized steps, retry at a later compaction boundary, and emit
+a `model_utility` trace event with provider metadata and usage. The final memory
+commit bounds any still-unsummarized history by the profile's
+`compact_recent_chars` value.
+
+Fireworks Chat Completions automatically receives a stable `prompt_cache_key`
+based on the agent ID and requests `perf_metrics` in the response. This follows
+Fireworks' preferred cache-affinity mechanism and makes cached-token and latency
+behavior visible in the activity trace. Explicit values in `extra_body` win.
+Use `--prompt-layout cache_friendly` to maximize the stable prompt prefix. The
+older `x-session-affinity` header remains available through `extra_headers`; xAI
+similarly supports `x-grok-conv-id` for Chat Completions affinity.
+
+Responses mode is stateless by default: each decision sends the complete prompt
+with `store=false`. Enable provider-side decision state with `"stateful": true`
+or `--responses-stateful`. Stateful Responses automatically use
+`stateful_delta`, store each decision response, and continue with
+`previous_response_id`. Compaction, memory commits, and campaign forum messages
+remain stateless and cannot contaminate the gameplay chain.
+
+An optional `state_file` model setting or `--responses-state-file PATH` stores a
+small JSON pointer that can be used for process-level recovery. Ordinary
+bootstraps always start a fresh provider chain, including a new campaign epoch
+on a reused adapter. Pass `--responses-resume` (or set `"resume": true`) to
+consume the state-file pointer once on the first bootstrap; supplying
+`--responses-response-id` is also an explicit one-shot resume. This separation
+prevents unrelated runs and replayed campaign epochs from silently inheriting
+provider history. The file is bound to the configured base URL and model and
+never contains API credentials. If explicitly resumed state has expired or
+been deleted, the bootstrap retries without it; loss during a delta call clears
+the pointer and makes the runner send a new bootstrap on the next decision
+tick. Local traces and session summaries remain the canonical, inspectable
+state.
+
+Stateful decisions send `store=true`, so their request and response data is
+retained provider-side according to that provider's policy. Clearing the local
+ID or beginning a fresh chain does not delete already stored provider data. Use
+stateless Responses mode when an evaluation's data-retention requirements do
+not permit provider-side conversation storage.
+
+For example, a stateful Fireworks run can be selected with:
+
+```bash
+uv run bbs-gym run-activity \
+  --activity bbs-door-safe \
+  --provider fireworks \
+  --model-api responses \
+  --responses-stateful \
+  --model accounts/fireworks/models/qwen3p7-plus \
+  --max-tokens 512 \
+  --prompt-layout cache_friendly
+```
+
+Use the same command without `--responses-stateful` for the stateless Responses
+comparison. Use `--model-api chat_completions` for the original Chat Completions
+control.
 
 ## Local vLLM OpenAI-Compatible Server
 

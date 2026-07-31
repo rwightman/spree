@@ -92,7 +92,10 @@ Missing:
 - Snapshot/reset orchestration beyond individual door reset scripts.
 - Optional PNG/image observations for multimodal models.
 - Stronger memory consolidation for long matches and repeated coordination
-  failures.
+  failures. The proposed design — pluggable memory policies, an
+  operations-based reconciliation contract with typed exits instead of lossy
+  summary rewrites, an intent channel, and provider-chain rollover — is in
+  `docs/memory-design.md`.
 
 The `tty_agent` package is intentionally separate from `bbs_gym`.
 Terminal observation, action validation, model adapters, memory, and the

@@ -20,6 +20,7 @@ from .models import (
     MemoryPatch,
     ModelAdapter,
     ModelError,
+    ModelStateError,
     SessionSummary,
 )
 from .prompt_modules import (
@@ -187,6 +188,10 @@ class ActivityRunState:
     # Leading entries of recent_steps already folded into session_summary; they
     # are kept only as prompt-continuity context and are not re-compacted.
     summarized_recent_steps: int = 0
+    # A failed compaction keeps its input intact. Delay retries so a provider
+    # failure or malformed utility response cannot trigger an expensive call
+    # on every subsequent decision.
+    compaction_retry_after_step: int = 0
     all_steps: list[StepRecord] = field(default_factory=list)
     stop_reason: str = "budget"
     last_observation: Observation | None = None
@@ -320,16 +325,42 @@ class ActivityRunner:
             )
 
         unsummarized_steps = state.recent_steps[state.summarized_recent_steps:]
-        if unsummarized_steps and self._should_compact(active_profile, state.all_steps, unsummarized_steps):
-            state.session_summary = self._compact(
-                active_profile,
-                state.model,
-                state.session_summary,
-                unsummarized_steps,
-                observation,
-            )
-            state.recent_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
-            state.summarized_recent_steps = len(state.recent_steps)
+        if unsummarized_steps and self._should_compact(
+            active_profile,
+            state.all_steps,
+            unsummarized_steps,
+            retry_after_step=state.compaction_retry_after_step,
+        ):
+            try:
+                session_summary = self._compact(
+                    active_profile,
+                    state.model,
+                    state.session_summary,
+                    unsummarized_steps,
+                    observation,
+                )
+            except ModelError as exc:
+                retry_interval = active_profile.compact_every_steps or active_profile.recent_steps_to_keep
+                state.compaction_retry_after_step = len(state.all_steps) + max(1, retry_interval)
+                route_events.append(
+                    self._compaction_event(
+                        state.model,
+                        unsummarized_steps,
+                        error=exc,
+                    )
+                )
+            else:
+                state.session_summary = session_summary
+                state.recent_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
+                state.summarized_recent_steps = len(state.recent_steps)
+                state.compaction_retry_after_step = 0
+                route_events.append(
+                    self._compaction_event(
+                        state.model,
+                        unsummarized_steps,
+                        summary=session_summary,
+                    )
+                )
 
         hints = ObservationHints.from_observation(
             observation=observation,
@@ -338,7 +369,8 @@ class ActivityRunner:
             modality_profile=active_profile.input_modality_profile,
         )
         # Decision prompts see a bounded window; the full recent_steps list is
-        # retained for compaction and the end-of-run memory commit.
+        # retained for compaction. The final memory commit applies its own
+        # character bound in case compaction remains unavailable.
         prompt_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
         prompt_module_results = self._prompt_module_results(
             active_profile,
@@ -352,6 +384,12 @@ class ActivityRunner:
         )
         profile_prompt_count = state.decision_prompts_sent.get(active_profile.name, 0)
         prompt_stage = self._prompt_stage(active_profile, profile_prompt_count)
+        if active_profile.prompt_mode == "stateful_delta" and prompt_stage == "bootstrap":
+            # A provider-side conversation is one global chain, not one chain
+            # per routed profile. Once any profile bootstraps, every other
+            # profile must bootstrap again before it can safely send deltas.
+            state.decision_prompts_sent.clear()
+            profile_prompt_count = 0
         prompt = self._build_decision_prompt(
             active_profile,
             agent_id=state.agent_id,
@@ -364,7 +402,12 @@ class ActivityRunner:
         )
 
         action, validation = self._decide_with_retry(active_profile, state.model, prompt)
-        if action is not None or validation.get("invalid_responses"):
+        if validation.get("requires_bootstrap") is True:
+            # A remote Responses chain can expire or be deleted while the local
+            # runner still expects delta prompts. Clear every profile counter so
+            # the next decision reconstructs a complete, locally-owned bootstrap.
+            state.decision_prompts_sent.clear()
+        elif action is not None or validation.get("invalid_responses"):
             # Count only prompts the model actually received; otherwise a
             # stateful_delta bootstrap that never reached the provider would
             # permanently downgrade the run to delta prompts.
@@ -787,6 +830,11 @@ class ActivityRunner:
         for provider_attempt in range(0, profile.model_error_retries + 1):
             try:
                 return model.decide(prompt, profile.action_policy), None, model_errors
+            except ModelStateError as exc:
+                model_errors.append(self._model_error_record(exc, stage, provider_attempt))
+                # Retrying the same delta cannot restore missing conversation
+                # state. Let the outer runner issue a full bootstrap next tick.
+                return None, None, model_errors
             except ModelError as exc:
                 model_errors.append(self._model_error_record(exc, stage, provider_attempt))
             except ActionError as exc:
@@ -823,6 +871,8 @@ class ActivityRunner:
             "notes": [f"model_error: {last_error}"],
             "model_errors": model_errors,
         }
+        if any(error.get("requires_bootstrap") is True for error in model_errors):
+            validation["requires_bootstrap"] = True
         if invalid_responses:
             validation["invalid_responses"] = invalid_responses
         return validation
@@ -1114,6 +1164,8 @@ class ActivityRunner:
                     "Return exactly one valid JSON action object and no surrounding prose.",
                 ]
             ),
+            mode=prompt.mode,
+            stage=prompt.stage,
         )
 
     def _compact(
@@ -1141,17 +1193,30 @@ class ActivityRunner:
                 ]
             ),
         )
-        try:
-            return model.compact(prompt)
-        except ModelError as exc:
-            return SessionSummary(
-                current_state=session_summary.current_state,
-                last_error=f"compaction_model_error: {exc}",
-                open_subgoals=session_summary.open_subgoals,
-                discovered_facts=session_summary.discovered_facts,
-                failed_actions=session_summary.failed_actions,
-                strategy_notes=session_summary.strategy_notes,
-            )
+        return model.compact(prompt)
+
+    def _compaction_event(
+            self,
+            model: ModelAdapter,
+            steps: list[StepRecord],
+            *,
+            summary: SessionSummary | None = None,
+            error: ModelError | None = None,
+    ) -> dict[str, Any]:
+        event: dict[str, Any] = {
+            "type": "model_utility",
+            "operation": "compaction",
+            "status": "error" if error is not None else "ok",
+            "step_count": len(steps),
+            "first_step": steps[0].step,
+            "last_step": steps[-1].step,
+            "model_response": self._model_response_record(model),
+        }
+        if summary is not None:
+            event["summary"] = summary.to_dict()
+        if error is not None:
+            event["error"] = self._model_error_record(error, "compaction", 0)
+        return event
 
     def _commit_memory(
             self,
@@ -1169,7 +1234,7 @@ class ActivityRunner:
                 + [
                     f"Existing campaign memory:\n{json.dumps(campaign_memory, indent=2, sort_keys=True)}",
                     f"Session summary:\n{self._summary_text(session_summary)}",
-                    f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
+                    f"Recent steps:\n{self._bounded_recent_steps_text(profile, recent_steps)}",
                     f"Final screen:\n{observation.model_text}",
                     "Return JSON with durable_facts, strategy_notes, open_tasks, and errors_to_avoid when applicable.",
                 ]
@@ -1194,7 +1259,7 @@ class ActivityRunner:
         return record
 
     def _model_error_record(self, error: ModelError, stage: str, provider_attempt: int) -> dict[str, Any]:
-        return {
+        record = {
             "stage": stage,
             "provider_attempt": provider_attempt,
             "type": error.__class__.__name__,
@@ -1203,8 +1268,13 @@ class ActivityRunner:
             "stdout": self._truncate(error.stdout, 2_000),
             "stderr": self._truncate(error.stderr, 2_000),
         }
+        if error.status_code is not None:
+            record["status_code"] = error.status_code
+        if isinstance(error, ModelStateError):
+            record["requires_bootstrap"] = True
+        return record
 
-    def _model_response_record(self, model: ModelAdapter) -> dict[str, str]:
+    def _model_response_record(self, model: ModelAdapter) -> dict[str, Any]:
         raw = getattr(model, "last_response", "")
         parsed = getattr(model, "last_parsed_response", raw)
         record = {
@@ -1214,6 +1284,15 @@ class ActivityRunner:
         reasoning = getattr(model, "last_reasoning", "")
         if reasoning:
             record["reasoning"] = self._truncate(reasoning, 4_000)
+        response_id = getattr(model, "last_response_id", None)
+        if isinstance(response_id, str) and response_id:
+            record["response_id"] = response_id
+        usage = getattr(model, "last_usage", None)
+        if isinstance(usage, dict):
+            record["usage"] = usage
+        provider_metadata = getattr(model, "last_provider_metadata", None)
+        if isinstance(provider_metadata, dict):
+            record["provider_metadata"] = provider_metadata
         return record
 
     def _truncate(self, text: str, limit: int) -> str:
@@ -1226,7 +1305,10 @@ class ActivityRunner:
             profile: ActivityProfile,
             all_steps: list[StepRecord],
             recent_steps: list[StepRecord],
+            retry_after_step: int = 0,
     ) -> bool:
+        if len(all_steps) < retry_after_step:
+            return False
         every = profile.compact_every_steps
         if every > 0 and len(all_steps) > 0 and len(all_steps) % every == 0:
             return True
@@ -1250,13 +1332,45 @@ class ActivityRunner:
     def _recent_steps_text(self, profile: ActivityProfile, steps: list[StepRecord]) -> str:
         if not steps:
             return "(none)"
+        return "\n\n".join(self._recent_step_contexts(profile, steps))
+
+    def _bounded_recent_steps_text(self, profile: ActivityProfile, steps: list[StepRecord]) -> str:
+        """Render the newest whole steps within the compaction character budget."""
+
+        if not steps:
+            return "(none)"
+        limit = max(0, profile.compact_recent_chars)
+        if limit == 0:
+            return ""
+        contexts = self._recent_step_contexts(profile, steps)
+        full_text = "\n\n".join(contexts)
+        if len(full_text) <= limit:
+            return full_text
+
+        marker = "[Older unsummarized step context omitted from final memory commit.]\n\n"
+        if len(marker) >= limit:
+            return marker[:limit]
+
+        selected: list[str] = []
+        used = len(marker)
+        for context in reversed(contexts):
+            separator_length = 2 if selected else 0
+            if used + separator_length + len(context) > limit:
+                break
+            selected.append(context)
+            used += separator_length + len(context)
+        if not selected:
+            return marker + contexts[-1][-(limit - len(marker)) :]
+        return marker + "\n\n".join(reversed(selected))
+
+    def _recent_step_contexts(self, profile: ActivityProfile, steps: list[StepRecord]) -> list[str]:
         lines = []
         for index, step in enumerate(steps):
             after_text = "Current terminal observation below."
             if index + 1 < len(steps):
                 after_text = self._observation_effect_text(profile, steps[index + 1].observation)
             lines.append(self._step_context_text(profile, step, after_text))
-        return "\n\n".join(lines)
+        return lines
 
     def _previous_step_delta_text(self, profile: ActivityProfile, steps: list[StepRecord]) -> str:
         if not steps:

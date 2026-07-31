@@ -14,6 +14,51 @@
       }
     },
     {
+      "agent_id": "fireworks-large-001",
+      "bbs_alias": "FireworksOne",
+      "bbs_password_env": "BBS_FIREWORKS_ONE_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "fireworks",
+        "api": "chat_completions",
+        "api_key_env": "FIREWORKS_API_KEY",
+        "model": "accounts/fireworks/models/qwen3p7-plus",
+        "max_tokens": 512,
+        "temperature": 0.2
+      }
+    },
+    {
+      "agent_id": "fireworks-responses-001",
+      "bbs_alias": "FireResp",
+      "bbs_password_env": "BBS_FIREWORKS_RESPONSES_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "fireworks",
+        "api": "responses",
+        "api_key_env": "FIREWORKS_API_KEY",
+        "model": "accounts/fireworks/models/qwen3p7-plus",
+        "max_tokens": 512,
+        "temperature": 0.2,
+        "stateful": true
+      }
+    },
+    {
+      "agent_id": "xai-grok-001",
+      "bbs_alias": "GrokOne",
+      "bbs_password_env": "BBS_GROK_ONE_PASSWORD",
+      "security_level": 50,
+      "model": {
+        "provider": "xai",
+        "api_key_env": "XAI_API_KEY",
+        "model": "grok-4.5",
+        "max_tokens": 2048,
+        "temperature": 0.2,
+        "extra_headers": {
+          "x-grok-conv-id": "xai-grok-001"
+        }
+      }
+    },
+    {
       "agent_id": "claude-blue",
       "bbs_alias": "ClaudeBlue",
       "bbs_password_env": "BBS_CLAUDE_BLUE_PASSWORD",

@@ -122,7 +122,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--telnet-enter", choices=["cr", "lf", "crlf"], default="lf")
     parser.add_argument("--agent-id", default="tele-arena-codex")
     parser.add_argument("--activity", choices=["bbs-door-safe", "bbs-door-line"], default="bbs-door-line")
-    parser.add_argument("--provider", choices=["openai-compatible", "claude", "codex"], default="codex")
+    parser.add_argument(
+        "--provider",
+        choices=["openai-compatible", "fireworks", "xai", "claude", "codex"],
+        default="codex",
+    )
     parser.add_argument("--model", default="gpt-5.5")
     parser.add_argument("--base-url")
     parser.add_argument("--api-key")

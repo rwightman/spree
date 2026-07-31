@@ -42,6 +42,15 @@ def test_tele_arena_example_can_select_safe_activity():
     assert _option(argv, "--activity") == "bbs-door-safe"
 
 
+def test_tele_arena_example_accepts_hosted_openai_compatible_providers():
+    for provider in ("fireworks", "xai"):
+        args, _passthrough = parse_args(["--provider", provider, "--model", "hosted-model"])
+
+        argv = build_bbs_gym_argv(args)
+
+        assert _option(argv, "--provider") == provider
+
+
 def test_tele_arena_example_forwards_model_and_codex_options():
     args, passthrough = parse_args(
         [

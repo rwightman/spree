@@ -23,6 +23,7 @@ from tty_agent.models import (
     ClaudeCliAdapter,
     CodexCliAdapter,
     OpenAICompatibleAdapter,
+    ResponsesCompatibleAdapter,
     ScriptedModelAdapter,
 )
 from tty_agent.models import output_filters_for_model
@@ -59,6 +60,16 @@ from .sre_campaign import SreCampaignAdapter, SreCampaignAdapterConfig
 
 DEFAULT_AGENTS_CONFIG = Path("config/agents.local.json")
 DEFAULT_OPENAI_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+MODEL_API_CHAT_COMPLETIONS = "chat_completions"
+MODEL_API_RESPONSES = "responses"
+MODEL_APIS = (MODEL_API_CHAT_COMPLETIONS, MODEL_API_RESPONSES)
+_OPENAI_COMPATIBLE_PROVIDER_DEFAULTS: dict[str, tuple[str, str | None]] = {
+    "openai-compatible": (DEFAULT_OPENAI_BASE_URL, None),
+    "fireworks": (DEFAULT_FIREWORKS_BASE_URL, "FIREWORKS_API_KEY"),
+    "xai": (DEFAULT_XAI_BASE_URL, "XAI_API_KEY"),
+}
 DEFAULT_MATCH_OBJECTIVE = (
     "Play this shared terminal activity as {agent_id}. Other active agents in the match: {opponents}. "
     "Explore, survive, improve your position, and interact with opponents when useful."
@@ -719,6 +730,7 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
     record = registry.maybe_get(args.agent_id) if registry is not None else None
     model_config = record.model if record is not None else {}
     provider = getattr(args, "provider", None) or _config_str(model_config, "provider") or "openai-compatible"
+    model_api = _model_api(args, model_config) if provider in _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS else None
     overrides: dict[str, object] = {}
     if args.observe_timeout is not None:
         _require_number(args.observe_timeout, "observe_timeout", minimum=0, exclusive=True)
@@ -736,10 +748,18 @@ def build_profile_overrides(args: argparse.Namespace, registry: AgentRegistry | 
         _require_int(args.model_error_retries, "model_error_retries", minimum=0)
         overrides["model_error_retries"] = args.model_error_retries
     if getattr(args, "prompt_mode", None) is not None:
+        if (
+            args.prompt_mode == "stateful_delta"
+            and model_api == MODEL_API_RESPONSES
+            and not _responses_stateful(args, model_config)
+        ):
+            raise ValueError("stateful_delta prompt mode requires --responses-stateful or model stateful=true")
         overrides["prompt_mode"] = args.prompt_mode
     elif provider == "codex" and _codex_stateful(args, model_config):
         overrides["prompt_mode"] = "stateful_delta"
     elif provider == "claude" and _claude_stateful(args, model_config):
+        overrides["prompt_mode"] = "stateful_delta"
+    elif model_api == MODEL_API_RESPONSES and _responses_stateful(args, model_config):
         overrides["prompt_mode"] = "stateful_delta"
     if getattr(args, "prompt_layout", None) is not None:
         overrides["prompt_layout"] = args.prompt_layout
@@ -781,6 +801,10 @@ def _participant_args(
             data["codex_stateful"] = bool(data["stateful"])
         elif provider == "claude":
             data["claude_stateful"] = bool(data["stateful"])
+        elif provider in _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS:
+            model_api = data.get("model_api") or data.get("api")
+            if model_api == MODEL_API_RESPONSES:
+                data["responses_stateful"] = bool(data["stateful"])
     return argparse.Namespace(**data)
 
 
@@ -883,22 +907,56 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
                 args.response_filter or _config_str(model_config, "response_filter"),
             ),
         )
-    elif provider == "openai-compatible":
+    elif provider in _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS:
         model_name = args.model or _config_str(model_config, "model")
         if not model_name:
-            raise ValueError("--model is required for openai-compatible provider")
-        model = OpenAICompatibleAdapter(
-            model=model_name,
-            base_url=args.base_url or _config_str(model_config, "base_url") or DEFAULT_OPENAI_BASE_URL,
-            api_key=args.api_key or _config_secret(model_config, "api_key", "api_key_env"),
-            temperature=_config_float(args.temperature, model_config, "temperature", 0.2),
-            max_tokens=_config_int(args.max_tokens, model_config, "max_tokens", 512),
-            extra_body=_config_dict(model_config, "extra_body"),
-            output_filters=output_filters_for_model(
+            raise ValueError(f"--model is required for {provider} provider")
+        model_api = _model_api(args, model_config)
+        default_base_url, default_api_key_env = _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS[provider]
+        api_key = args.api_key or _config_secret(model_config, "api_key", "api_key_env")
+        if not api_key and default_api_key_env is not None:
+            api_key_env = _config_str(model_config, "api_key_env") or default_api_key_env
+            api_key = os.environ.get(api_key_env)
+            if not api_key:
+                raise ValueError(f"{api_key_env} is required for {provider} provider; set it or pass --api-key")
+        base_url = args.base_url or _config_str(model_config, "base_url") or default_base_url
+        extra_body = _config_dict(model_config, "extra_body") or {}
+        if provider == "fireworks" and model_api == MODEL_API_CHAT_COMPLETIONS:
+            # Fireworks recommends prompt_cache_key over the older affinity
+            # header. Returning perf metrics lets traces verify actual cache use.
+            extra_body.setdefault("prompt_cache_key", args.agent_id)
+            extra_body.setdefault("perf_metrics_in_response", True)
+        common_options = {
+            "model": model_name,
+            "base_url": base_url,
+            "api_key": api_key,
+            "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+            "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+            "extra_body": extra_body,
+            "extra_headers": _config_str_dict(model_config, "extra_headers"),
+            "compaction_reasoning": _model_operation_reasoning(args, model_config, "compaction_reasoning"),
+            "compaction_extra_body": _config_dict(model_config, "compaction_extra_body"),
+            "memory_reasoning": _model_operation_reasoning(args, model_config, "memory_reasoning"),
+            "memory_extra_body": _config_dict(model_config, "memory_extra_body"),
+            "output_filters": output_filters_for_model(
                 model_name,
                 args.response_filter or _config_str(model_config, "response_filter"),
             ),
-        )
+        }
+        if model_api == MODEL_API_RESPONSES:
+            model = ResponsesCompatibleAdapter(
+                **common_options,
+                name=f"{provider}-responses:{model_name}",
+                stateful=_responses_stateful(args, model_config),
+                response_id=getattr(args, "responses_response_id", None) or _config_str(model_config, "response_id"),
+                state_file=getattr(args, "responses_state_file", None) or _config_str(model_config, "state_file"),
+                resume=_responses_resume(args, model_config),
+            )
+        else:
+            model = OpenAICompatibleAdapter(
+                **common_options,
+                name=f"{provider}:{model_name}",
+            )
     else:
         raise ValueError(f"unknown model provider: {provider}")
     return model
@@ -968,16 +1026,47 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
                 "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
             }
         )
-    if provider == "openai-compatible":
+    if provider in _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS:
         model_name = args.model or _config_str(model_config, "model") or ""
+        model_api = _model_api(args, model_config)
+        default_base_url, _default_api_key_env = _OPENAI_COMPATIBLE_PROVIDER_DEFAULTS[provider]
+        extra_body = _config_dict(model_config, "extra_body") or {}
+        if provider == "fireworks" and model_api == MODEL_API_CHAT_COMPLETIONS:
+            extra_body.setdefault("prompt_cache_key", args.agent_id)
+            extra_body.setdefault("perf_metrics_in_response", True)
+        responses_stateful = _responses_stateful(args, model_config) if model_api == MODEL_API_RESPONSES else None
+        response_id = (
+            getattr(args, "responses_response_id", None) or _config_str(model_config, "response_id")
+            if model_api == MODEL_API_RESPONSES
+            else None
+        )
+        state_file = (
+            getattr(args, "responses_state_file", None) or _config_str(model_config, "state_file")
+            if model_api == MODEL_API_RESPONSES
+            else None
+        )
+        resume = _responses_resume(args, model_config) if model_api == MODEL_API_RESPONSES else None
         return _without_empty_values(
             {
-                "provider": "openai-compatible",
+                "provider": provider,
+                "api": model_api,
                 "model": model_name,
-                "base_url": args.base_url or _config_str(model_config, "base_url") or DEFAULT_OPENAI_BASE_URL,
+                "base_url": args.base_url or _config_str(model_config, "base_url") or default_base_url,
                 "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
                 "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
-                "extra_body": _config_dict(model_config, "extra_body"),
+                "extra_body": extra_body,
+                "compaction_reasoning": _model_operation_reasoning(
+                    args,
+                    model_config,
+                    "compaction_reasoning",
+                ),
+                "compaction_extra_body": _config_dict(model_config, "compaction_extra_body"),
+                "memory_reasoning": _model_operation_reasoning(args, model_config, "memory_reasoning"),
+                "memory_extra_body": _config_dict(model_config, "memory_extra_body"),
+                "stateful": responses_stateful,
+                "response_id": response_id,
+                "state_file": state_file,
+                "resume": resume,
                 "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
             }
         )
@@ -1080,6 +1169,17 @@ def _config_dict(config: dict[str, Any], key: str) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+def _config_str_dict(config: dict[str, Any], key: str) -> dict[str, str] | None:
+    value = config.get(key)
+    if not isinstance(value, dict):
+        return None
+    return {
+        item_key: item_value
+        for item_key, item_value in value.items()
+        if isinstance(item_key, str) and isinstance(item_value, str)
+    }
+
+
 def _config_str_list(config: dict[str, Any], key: str) -> list[str]:
     value = config.get(key)
     if isinstance(value, str):
@@ -1094,6 +1194,41 @@ def _config_str_list(config: dict[str, Any], key: str) -> list[str]:
 def _config_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
     value = config.get(key)
     return value if isinstance(value, bool) else default
+
+
+def _model_operation_reasoning(
+        args: argparse.Namespace,
+        model_config: dict[str, Any],
+        key: str,
+) -> bool | None:
+    value = getattr(args, key, None)
+    if isinstance(value, bool):
+        return value
+    config_value = model_config.get(key)
+    return config_value if isinstance(config_value, bool) else None
+
+
+def _model_api(args: argparse.Namespace, model_config: dict[str, Any]) -> str:
+    value = getattr(args, "model_api", None) or _config_str(model_config, "api") or MODEL_API_CHAT_COMPLETIONS
+    if value not in MODEL_APIS:
+        raise ValueError(f"unknown model API: {value}; expected one of {', '.join(MODEL_APIS)}")
+    return value
+
+
+def _responses_stateful(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
+    if getattr(args, "responses_stateful", False):
+        return True
+    if "stateful" in model_config:
+        return _config_bool(model_config, "stateful")
+    return False
+
+
+def _responses_resume(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
+    if getattr(args, "responses_resume", False):
+        return True
+    if getattr(args, "responses_response_id", None) or _config_str(model_config, "response_id"):
+        return True
+    return _config_bool(model_config, "resume")
 
 
 def _codex_stateful(args: argparse.Namespace, model_config: dict[str, Any]) -> bool:
@@ -1164,14 +1299,38 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
 def _add_model_args(parser: argparse.ArgumentParser) -> None:
     """Model provider options shared by every session command."""
 
-    parser.add_argument("--provider", choices=["openai-compatible", "anthropic", "claude", "codex", "scripted"])
+    parser.add_argument(
+        "--provider",
+        choices=["openai-compatible", "fireworks", "xai", "anthropic", "claude", "codex", "scripted"],
+    )
     parser.add_argument("--base-url")
     parser.add_argument("--api-key")
+    parser.add_argument("--model-api", choices=MODEL_APIS)
+    parser.add_argument("--responses-stateful", action="store_true")
+    parser.add_argument("--responses-response-id")
+    parser.add_argument("--responses-state-file")
+    parser.add_argument(
+        "--responses-resume",
+        action="store_true",
+        help="resume once from --responses-state-file; ordinary bootstraps start fresh chains",
+    )
     parser.add_argument("--no-anthropic-cache", action="store_true")
     parser.add_argument("--model")
     parser.add_argument("--scripted-response", action="append", default=[])
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--max-tokens", type=int)
+    parser.add_argument(
+        "--compaction-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="request provider-specific reasoning control for compaction; omitted inherits decision settings",
+    )
+    parser.add_argument(
+        "--memory-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="request provider-specific reasoning control for final memory calls; omitted inherits decision settings",
+    )
     parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"])
     parser.add_argument("--codex-profile")
     parser.add_argument("--codex-executable")

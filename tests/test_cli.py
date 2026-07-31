@@ -24,7 +24,12 @@ from bbs_gym.match import (
     handle_match_disconnect,
     match_round_order,
 )
-from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter
+from tty_agent.models import (
+    ClaudeCliAdapter,
+    CodexCliAdapter,
+    OpenAICompatibleAdapter,
+    ResponsesCompatibleAdapter,
+)
 from tty_agent.runner import ActivityBudget
 from tty_agent.transports.base import SessionDisconnected
 
@@ -101,6 +106,164 @@ def test_build_model_uses_agent_registry_model_config():
     assert model.model == "Qwen/Qwen3-32B"
     assert model.base_url == "http://localhost:8000/v1"
     assert model.extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _hosted_model_args(agent_id: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        agent_id=agent_id,
+        provider=None,
+        scripted_response=[],
+        model=None,
+        base_url=None,
+        api_key=None,
+        temperature=None,
+        max_tokens=None,
+        response_filter=None,
+        no_anthropic_cache=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "api_key_env", "base_url", "model_name", "extra_headers"),
+    [
+        (
+            "fireworks",
+            "FIREWORKS_API_KEY",
+            "https://api.fireworks.ai/inference/v1",
+            "accounts/fireworks/models/test-model",
+            {"x-session-affinity": "fireworks-agent"},
+        ),
+        (
+            "xai",
+            "XAI_API_KEY",
+            "https://api.x.ai/v1",
+            "grok-test",
+            {"x-grok-conv-id": "xai-agent"},
+        ),
+    ],
+)
+def test_build_model_uses_hosted_openai_compatible_provider_defaults(
+        monkeypatch,
+        provider: str,
+        api_key_env: str,
+        base_url: str,
+        model_name: str,
+        extra_headers: dict[str, str],
+) -> None:
+    monkeypatch.setenv(api_key_env, "hosted-key")
+    agent_id = f"{provider}-agent"
+    registry = AgentRegistry(
+        agents={
+            agent_id: AgentRecord(
+                agent_id=agent_id,
+                bbs_alias=f"{provider}Agent",
+                model={
+                    "provider": provider,
+                    "model": model_name,
+                    "extra_body": {"response_format": {"type": "json_object"}},
+                    "extra_headers": extra_headers,
+                    "compaction_reasoning": False,
+                    "compaction_extra_body": {"utility_operation": "compact"},
+                    "memory_reasoning": True,
+                    "memory_extra_body": {"utility_operation": "memory"},
+                },
+            )
+        }
+    )
+    args = _hosted_model_args(agent_id)
+
+    model = build_model(args, registry)
+    metadata = build_model_metadata(args, registry)
+
+    assert isinstance(model, OpenAICompatibleAdapter)
+    assert model.name == f"{provider}:{model_name}"
+    assert model.base_url == base_url
+    assert model.api_key == "hosted-key"
+    expected_extra_body = {"response_format": {"type": "json_object"}}
+    if provider == "fireworks":
+        expected_extra_body.update(
+            {
+                "prompt_cache_key": "fireworks-agent",
+                "perf_metrics_in_response": True,
+            }
+        )
+    assert model.extra_body == expected_extra_body
+    assert model.extra_headers == extra_headers
+    assert model.compaction_reasoning is False
+    assert model.compaction_extra_body == {"utility_operation": "compact"}
+    assert model.memory_reasoning is True
+    assert model.memory_extra_body == {"utility_operation": "memory"}
+    assert metadata["provider"] == provider
+    assert metadata["api"] == "chat_completions"
+    assert metadata["base_url"] == base_url
+    assert metadata["extra_body"] == expected_extra_body
+    assert metadata["compaction_reasoning"] is False
+    assert metadata["compaction_extra_body"] == {"utility_operation": "compact"}
+    assert metadata["memory_reasoning"] is True
+    assert metadata["memory_extra_body"] == {"utility_operation": "memory"}
+    assert "extra_headers" not in metadata
+
+
+def test_build_model_uses_stateful_fireworks_responses(monkeypatch, tmp_path):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "hosted-key")
+    state_file = tmp_path / "fireworks.responses.json"
+    registry = AgentRegistry(
+        agents={
+            "fireworks-responses": AgentRecord(
+                agent_id="fireworks-responses",
+                bbs_alias="FireResp",
+                model={
+                    "provider": "fireworks",
+                    "api": "responses",
+                    "model": "accounts/fireworks/models/qwen3p7-plus",
+                    "stateful": True,
+                    "state_file": str(state_file),
+                    "resume": True,
+                    "extra_body": {"reasoning": {"effort": "low"}},
+                },
+            )
+        }
+    )
+    args = _hosted_model_args("fireworks-responses")
+
+    model = build_model(args, registry)
+    metadata = build_model_metadata(args, registry)
+
+    assert isinstance(model, ResponsesCompatibleAdapter)
+    assert model.name == "fireworks-responses:accounts/fireworks/models/qwen3p7-plus"
+    assert model.stateful is True
+    assert model.state_file == state_file
+    assert model.resume is True
+    assert model.extra_body == {"reasoning": {"effort": "low"}}
+    assert metadata["api"] == "responses"
+    assert metadata["stateful"] is True
+    assert metadata["state_file"] == str(state_file)
+    assert metadata["resume"] is True
+
+
+@pytest.mark.parametrize(
+    ("provider", "api_key_env"),
+    [("fireworks", "FIREWORKS_API_KEY"), ("xai", "XAI_API_KEY")],
+)
+def test_hosted_openai_compatible_provider_requires_api_key(
+        monkeypatch,
+        provider: str,
+        api_key_env: str,
+) -> None:
+    monkeypatch.delenv(api_key_env, raising=False)
+    agent_id = f"{provider}-agent"
+    registry = AgentRegistry(
+        agents={
+            agent_id: AgentRecord(
+                agent_id=agent_id,
+                bbs_alias=f"{provider}Agent",
+                model={"provider": provider, "model": "test-model"},
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match=api_key_env):
+        build_model(_hosted_model_args(agent_id), registry)
 
 
 def test_build_model_uses_codex_registry_model_config():
@@ -323,6 +486,76 @@ def test_build_activity_profile_uses_stateful_delta_for_stateful_claude():
     profile = build_activity_profile(args, registry)
 
     assert profile.prompt_mode == "stateful_delta"
+
+
+def test_build_activity_profile_uses_stateful_delta_for_stateful_responses():
+    registry = AgentRegistry(
+        agents={
+            "fireworks-responses": AgentRecord(
+                agent_id="fireworks-responses",
+                bbs_alias="FireResp",
+                model={
+                    "provider": "fireworks",
+                    "api": "responses",
+                    "model": "accounts/fireworks/models/qwen3p7-plus",
+                    "stateful": True,
+                },
+            )
+        }
+    )
+    args = argparse.Namespace(
+        agent_id="fireworks-responses",
+        provider=None,
+        activity="tw2-game",
+        profile_objective=None,
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        model_error_retries=None,
+        prompt_mode=None,
+        prompt_layout=None,
+        responses_stateful=False,
+        disabled_actions=[],
+    )
+
+    profile = build_activity_profile(args, registry)
+
+    assert profile.prompt_mode == "stateful_delta"
+
+
+def test_build_activity_profile_rejects_stateful_delta_for_stateless_responses():
+    registry = AgentRegistry(
+        agents={
+            "fireworks-responses": AgentRecord(
+                agent_id="fireworks-responses",
+                bbs_alias="FireResp",
+                model={
+                    "provider": "fireworks",
+                    "api": "responses",
+                    "model": "accounts/fireworks/models/qwen3p7-plus",
+                },
+            )
+        }
+    )
+    args = argparse.Namespace(
+        agent_id="fireworks-responses",
+        provider=None,
+        activity="tw2-game",
+        profile_objective=None,
+        observe_timeout=None,
+        stable_ms=None,
+        byte_quiet_ms=None,
+        recent_steps_to_keep=None,
+        model_error_retries=None,
+        prompt_mode="stateful_delta",
+        prompt_layout=None,
+        responses_stateful=False,
+        disabled_actions=[],
+    )
+
+    with pytest.raises(ValueError, match="responses-stateful"):
+        build_activity_profile(args, registry)
 
 
 def test_build_activity_profile_applies_named_profile_overrides():

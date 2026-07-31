@@ -14,7 +14,13 @@ from tty_agent.agent import TerminalSessionAgent
 from tty_agent.evaluation import EvaluationProbe, EvaluationProfile
 from tty_agent.hints import InputModalityProfile, InputModeRule
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import ClaudeCliAdapter, CodexCliAdapter, OpenAICompatibleAdapter, output_filters_for_model
+from tty_agent.models import (
+    ClaudeCliAdapter,
+    CodexCliAdapter,
+    OpenAICompatibleAdapter,
+    ResponsesCompatibleAdapter,
+    output_filters_for_model,
+)
 from tty_agent.profiles import TEXT_ADVENTURE_PROFILE
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner
@@ -151,16 +157,37 @@ def main() -> None:
             output_filters=output_filters,
         )
     else:
-        model = OpenAICompatibleAdapter(
-            model=args.model,
-            base_url=args.base_url,
-            api_key=args.api_key,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            output_filters=output_filters,
-        )
+        api_key = args.api_key
+        if args.api_key_env:
+            api_key = os.environ.get(args.api_key_env)
+            if not api_key:
+                raise SystemExit(f"{args.api_key_env} is not set or is empty")
+        common_options = {
+            "model": args.model,
+            "base_url": args.base_url,
+            "api_key": api_key,
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "extra_body": args.extra_body_json,
+            "extra_headers": dict(args.extra_header),
+            "compaction_reasoning": args.compaction_reasoning,
+            "compaction_extra_body": args.compaction_extra_body_json,
+            "memory_reasoning": args.memory_reasoning,
+            "memory_extra_body": args.memory_extra_body_json,
+            "output_filters": output_filters,
+        }
+        if args.model_api == "responses":
+            model = ResponsesCompatibleAdapter(
+                **common_options,
+                stateful=args.responses_stateful,
+                response_id=args.responses_response_id,
+                state_file=args.responses_state_file,
+                resume=args.responses_resume,
+            )
+        else:
+            model = OpenAICompatibleAdapter(**common_options)
     prompt_mode = args.prompt_mode or (
-        "stateful_delta" if args.codex_stateful or args.claude_stateful else "stateless_full"
+        "stateful_delta" if args.codex_stateful or args.claude_stateful or args.responses_stateful else "stateless_full"
     )
     profile = ActivityProfile(
         name="zork",
@@ -196,6 +223,12 @@ def main() -> None:
                 "story": str(story_path),
                 "encoding": session.encoding,
                 "model": args.model,
+                "model_api": args.model_api if args.provider == "openai-compatible" else None,
+                "model_stateful": (
+                    args.responses_stateful
+                    if args.provider == "openai-compatible" and args.model_api == "responses"
+                    else args.codex_stateful or args.claude_stateful
+                ),
             },
         )
         agent = TerminalSessionAgent(args.agent_id, session, observer, observer.metadata)
@@ -235,8 +268,71 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-id", default="zork-gemma4")
     parser.add_argument("--provider", choices=["openai-compatible", "claude", "codex"], default="openai-compatible")
     parser.add_argument("--model", default="gemma4")
+    parser.add_argument(
+        "--model-api",
+        choices=["chat_completions", "responses"],
+        default="chat_completions",
+        help="HTTP API used by the openai-compatible provider",
+    )
+    parser.add_argument(
+        "--responses-stateful",
+        action="store_true",
+        help="chain decision calls with previous_response_id; utility calls remain stateless",
+    )
+    parser.add_argument("--responses-response-id")
+    parser.add_argument("--responses-state-file", type=Path)
+    parser.add_argument(
+        "--responses-resume",
+        action="store_true",
+        help="resume once from --responses-state-file; ordinary bootstraps start fresh chains",
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="local")
+    parser.add_argument(
+        "--api-key-env",
+        help="read the API key from this environment variable instead of placing it on the command line",
+    )
+    parser.add_argument(
+        "--extra-header",
+        action="append",
+        type=parse_header,
+        default=[],
+        metavar="NAME=VALUE",
+        help="additional HTTP request header; repeat for multiple headers",
+    )
+    parser.add_argument(
+        "--extra-body-json",
+        type=parse_json_object,
+        default={},
+        metavar="JSON",
+        help="JSON object merged into each Chat Completions or Responses request body",
+    )
+    parser.add_argument(
+        "--compaction-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="request provider-specific reasoning control for compaction; omitted inherits decision settings",
+    )
+    parser.add_argument(
+        "--compaction-extra-body-json",
+        type=parse_json_object,
+        default={},
+        metavar="JSON",
+        help="JSON object applied only to compaction requests",
+    )
+    parser.add_argument(
+        "--memory-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="request provider-specific reasoning control for final memory calls; omitted inherits decision settings",
+    )
+    parser.add_argument(
+        "--memory-extra-body-json",
+        type=parse_json_object,
+        default={},
+        metavar="JSON",
+        help="JSON object applied only to final memory requests",
+    )
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"], default="auto")
@@ -305,7 +401,40 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.interpreter_arg is None:
         args.interpreter_arg = list(DEFAULT_INTERPRETER_ARGS)
+    if args.responses_stateful and args.model_api != "responses":
+        parser.error("--responses-stateful requires --model-api responses")
+    if (
+        args.responses_response_id is not None or args.responses_state_file is not None or args.responses_resume
+    ) and not args.responses_stateful:
+        parser.error("Responses state options require --responses-stateful")
+    if args.responses_resume and args.responses_state_file is None and args.responses_response_id is None:
+        parser.error("--responses-resume requires --responses-state-file or --responses-response-id")
+    if args.prompt_mode == "stateful_delta" and not (
+        args.codex_stateful or args.claude_stateful or args.responses_stateful
+    ):
+        parser.error("--prompt-mode stateful_delta requires a stateful model adapter")
     return args
+
+
+def parse_header(value: str) -> tuple[str, str]:
+    """Parse one ``NAME=VALUE`` command-line header."""
+
+    name, separator, header_value = value.partition("=")
+    if not separator or not name.strip():
+        raise argparse.ArgumentTypeError("header must use NAME=VALUE syntax")
+    return name.strip(), header_value
+
+
+def parse_json_object(value: str) -> dict[str, object]:
+    """Parse a JSON object used for provider-specific request options."""
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"invalid JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("value must be a JSON object")
+    return parsed
 
 
 if __name__ == "__main__":

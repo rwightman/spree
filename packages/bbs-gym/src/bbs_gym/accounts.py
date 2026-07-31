@@ -138,7 +138,7 @@ class AgentRegistry:
         return {"agents": [record.provision_dict() for record in self.agents.values()]}
 
 
-_SENSITIVE_KEY_MARKERS = ("api_key", "apikey", "secret", "password")
+_SENSITIVE_KEY_MARKERS = ("api_key", "apikey", "authorization", "cookie", "secret", "password")
 
 
 def redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +150,7 @@ def redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
 
     redacted: dict[str, Any] = {}
     for key, value in config.items():
-        key_fold = key.casefold()
+        key_fold = key.casefold().replace("-", "_")
         if any(marker in key_fold for marker in _SENSITIVE_KEY_MARKERS) or (
             key_fold == "token" or key_fold.endswith("_token")
         ):

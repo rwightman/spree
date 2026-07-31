@@ -75,6 +75,11 @@ def test_public_dict_redacts_provider_credentials():
             "api_key": "sk-live-do-not-leak",
             "max_tokens": 512,
             "extra": {"auth_token": "also-secret"},
+            "extra_headers": {
+                "Authorization": "Bearer hidden",
+                "X-API-Key": "header-secret",
+                "x-session-affinity": "agent-001",
+            },
             "providers": [{"name": "fallback", "api_key": "nested-list-secret"}],
         },
     )
@@ -83,6 +88,11 @@ def test_public_dict_redacts_provider_credentials():
 
     assert public["model"]["api_key"] == "[redacted]"
     assert public["model"]["extra"]["auth_token"] == "[redacted]"
+    assert public["model"]["extra_headers"] == {
+        "Authorization": "[redacted]",
+        "X-API-Key": "[redacted]",
+        "x-session-affinity": "agent-001",
+    }
     assert public["model"]["providers"][0]["api_key"] == "[redacted]"
     assert public["model"]["model"] == "some-model"
     assert public["model"]["max_tokens"] == 512

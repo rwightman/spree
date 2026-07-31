@@ -40,15 +40,21 @@ class ModelError(RuntimeError):
             command: list[str] | tuple[str, ...] = (),
             stdout: str | bytes | None = "",
             stderr: str | bytes | None = "",
+            status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.command = tuple(command)
         self.stdout = _subprocess_text(stdout)
         self.stderr = _subprocess_text(stderr)
+        self.status_code = status_code
 
 
 class ModelTimeoutError(ModelError):
     """Raised when a model provider command times out."""
+
+
+class ModelStateError(ModelError):
+    """Raised when provider-side conversation state can no longer be resumed."""
 
 
 @dataclass(frozen=True)
@@ -145,34 +151,54 @@ class TextChatAdapter:
     last_response: str = ""
     last_parsed_response: str = ""
     last_reasoning: str = ""
+    last_response_id: str | None = None
+    last_usage: dict[str, object] | None = None
+    last_provider_metadata: dict[str, object] | None = None
     output_filters: tuple[OutputFilter, ...] | None = None
 
     def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
-        self.last_reasoning = ""
+        self._reset_response_trace()
         self.last_response = self.chat(prompt.messages())
         self.last_parsed_response = self._filter_output(self.last_response).strip()
         return parse_action(self.last_parsed_response, policy)
 
     def compact(self, prompt: CompactionPrompt) -> SessionSummary:
-        self.last_reasoning = ""
-        self.last_response = self.chat(prompt.messages()).strip()
+        self._reset_response_trace()
+        self.last_response = self.compaction_chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
+        self._ensure_complete_utility_response("compaction")
         data = _json_mapping_from_text(self.last_parsed_response)
         if data is None:
             data = {"current_state": self._fallback_output_text()}
-        return SessionSummary.from_mapping(data)
+        summary = SessionSummary.from_mapping(data)
+        if summary.is_empty():
+            raise ModelError("compaction returned an empty session summary")
+        return summary
 
     def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch:
-        self.last_reasoning = ""
-        self.last_response = self.chat(prompt.messages()).strip()
+        self._reset_response_trace()
+        self.last_response = self.memory_chat(prompt.messages()).strip()
         self.last_parsed_response = self._filter_output(self.last_response).strip()
+        self._ensure_complete_utility_response("memory commit")
         data = _json_mapping_from_text(self.last_parsed_response)
         if data is None:
             data = {"summary": self._fallback_output_text()}
+        if not data:
+            raise ModelError("memory commit returned an empty patch")
         return MemoryPatch(data)
 
     def chat(self, messages: list[ModelMessage]) -> str:
         raise NotImplementedError
+
+    def compaction_chat(self, messages: list[ModelMessage]) -> str:
+        """Run a compaction request, allowing adapters to select utility settings."""
+
+        return self.chat(messages)
+
+    def memory_chat(self, messages: list[ModelMessage]) -> str:
+        """Run a memory-commit request, allowing adapters to select utility settings."""
+
+        return self.chat(messages)
 
     def _filter_output(self, text: str) -> str:
         filtered = text
@@ -181,11 +207,29 @@ class TextChatAdapter:
             filtered = output_filter(filtered)
         return filtered
 
+    def _reset_response_trace(self) -> None:
+        self.last_response = ""
+        self.last_parsed_response = ""
+        self.last_reasoning = ""
+        self.last_response_id = None
+        self.last_usage = None
+        self.last_provider_metadata = None
+
     def _fallback_output_text(self) -> str:
         # Deliberately the filtered text, not the raw response: when filters strip
         # a response down to nothing the model only emitted reasoning, and raw
         # reasoning must not be stored as a summary or memory patch.
         return self.last_parsed_response
+
+    def _ensure_complete_utility_response(self, operation: str) -> None:
+        metadata = self.last_provider_metadata or {}
+        finish_reason = metadata.get("finish_reason")
+        if finish_reason in {"length", "max_tokens"}:
+            raise ModelError(f"{operation} response was truncated ({finish_reason=})")
+        if metadata.get("status") == "incomplete":
+            raise ModelError(f"{operation} response was incomplete: {metadata.get('incomplete_details')!r}")
+        if not self.last_parsed_response:
+            raise ModelError(f"{operation} returned no usable content")
 
 
 class OpenAICompatibleAdapter(TextChatAdapter):
@@ -202,6 +246,11 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             max_tokens: int = 512,
             extra_body: dict[str, object] | None = None,
             output_filters: tuple[OutputFilter, ...] | None = None,
+            extra_headers: dict[str, str] | None = None,
+            compaction_reasoning: bool | None = None,
+            compaction_extra_body: dict[str, object] | None = None,
+            memory_reasoning: bool | None = None,
+            memory_extra_body: dict[str, object] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -211,20 +260,57 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.extra_body = dict(extra_body or {})
+        self.extra_headers = dict(extra_headers or {})
+        self.compaction_reasoning = compaction_reasoning
+        self.compaction_extra_body = dict(compaction_extra_body or {})
+        self.memory_reasoning = memory_reasoning
+        self.memory_extra_body = dict(memory_extra_body or {})
         self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
+        return self._chat(messages, extra_body=self.extra_body)
+
+    def compaction_chat(self, messages: list[ModelMessage]) -> str:
+        return self._chat(
+            messages,
+            extra_body=_operation_extra_body(
+                self.extra_body,
+                self.compaction_extra_body,
+                self.compaction_reasoning,
+            ),
+        )
+
+    def memory_chat(self, messages: list[ModelMessage]) -> str:
+        return self._chat(
+            messages,
+            extra_body=_operation_extra_body(
+                self.extra_body,
+                self.memory_extra_body,
+                self.memory_reasoning,
+            ),
+        )
+
+    def _chat(
+            self,
+            messages: list[ModelMessage],
+            *,
+            extra_body: dict[str, object],
+    ) -> str:
         payload = {
             "model": self.model,
             "messages": [message.to_dict() for message in messages],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-        payload.update(self.extra_body)
+        payload.update(extra_body)
         response = _post_json(
             f"{self.base_url}/chat/completions",
             payload,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers={
+                **self.extra_headers,
+                # Provider credentials always win over user-supplied headers.
+                "Authorization": f"Bearer {self.api_key}",
+            },
             timeout=self.timeout,
         )
         try:
@@ -233,6 +319,16 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             raise ModelError(f"unexpected OpenAI-compatible response: {response!r}") from exc
         if not isinstance(message, dict):
             raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
+        self.last_response_id = _optional_nonempty_string(response.get("id"))
+        self.last_usage = _optional_mapping(response.get("usage"))
+        provider_metadata: dict[str, object] = {}
+        perf_metrics = _optional_mapping(response.get("perf_metrics"))
+        if perf_metrics is not None:
+            provider_metadata["perf_metrics"] = perf_metrics
+        finish_reason = response.get("choices", [{}])[0].get("finish_reason")
+        if isinstance(finish_reason, str):
+            provider_metadata["finish_reason"] = finish_reason
+        self.last_provider_metadata = provider_metadata or None
         self.last_reasoning = _optional_string(message.get("reasoning") or message.get("reasoning_content"))
         content = message.get("content")
         if not isinstance(content, str):
@@ -240,6 +336,269 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             # an inexplicable invalid-action retry instead of a provider error.
             raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
         return content
+
+
+class ResponsesCompatibleAdapter(TextChatAdapter):
+    """Adapter for OpenAI-compatible ``/v1/responses`` servers.
+
+    Only terminal decisions participate in the optional provider-side chain.
+    Compaction, memory commits, and campaign-social prompts remain stateless so
+    their utility instructions do not pollute the gameplay conversation.
+    """
+
+    def __init__(
+            self,
+            model: str,
+            base_url: str = "http://localhost:11434/v1",
+            api_key: str | None = None,
+            name: str | None = None,
+            timeout: float = 120.0,
+            temperature: float = 0.2,
+            max_tokens: int = 512,
+            extra_body: dict[str, object] | None = None,
+            output_filters: tuple[OutputFilter, ...] | None = None,
+            extra_headers: dict[str, str] | None = None,
+            stateful: bool = False,
+            response_id: str | None = None,
+            state_file: str | Path | None = None,
+            resume: bool = False,
+            compaction_reasoning: bool | None = None,
+            compaction_extra_body: dict[str, object] | None = None,
+            memory_reasoning: bool | None = None,
+            memory_extra_body: dict[str, object] | None = None,
+    ) -> None:
+        if response_id is not None and not stateful:
+            raise ValueError("response_id requires stateful Responses mode")
+        if state_file is not None and not stateful:
+            raise ValueError("state_file requires stateful Responses mode")
+        if resume and not stateful:
+            raise ValueError("resume requires stateful Responses mode")
+        if resume and response_id is None and state_file is None:
+            raise ValueError("resume requires response_id or state_file")
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "local")
+        self.name = name or f"responses-compatible:{model}"
+        self.timeout = timeout
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.extra_body = dict(extra_body or {})
+        self.extra_headers = dict(extra_headers or {})
+        self.compaction_reasoning = compaction_reasoning
+        self.compaction_extra_body = dict(compaction_extra_body or {})
+        self.memory_reasoning = memory_reasoning
+        self.memory_extra_body = dict(memory_extra_body or {})
+        self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
+        self.stateful = stateful
+        self.response_id = response_id
+        self._decision_instructions: str | None = None
+        self.state_file = Path(state_file) if state_file is not None else None
+        # Supplying an ID is itself an explicit resume request. A state file is
+        # only read when resume=True; otherwise it is an output checkpoint for
+        # a possible later process and must not join an ordinary new run onto
+        # an older provider-side conversation.
+        self.resume = resume or response_id is not None
+        if self.response_id is None and self.state_file is not None and self.resume:
+            self.response_id = self._read_state_file()
+        self._resume_pending = self.response_id is not None
+
+    def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
+        self._reset_response_trace()
+        use_state = self.stateful and prompt.mode == "stateful_delta" and prompt.stage in {"bootstrap", "delta"}
+        if prompt.mode == "stateful_delta" and not self.stateful:
+            raise ModelError("stateful_delta prompts require stateful Responses mode")
+        if use_state and prompt.stage == "delta" and self.response_id is None:
+            raise ModelStateError("Responses conversation state is unavailable; resend a bootstrap prompt")
+        request_messages = prompt.messages()
+        if use_state and prompt.stage == "bootstrap":
+            if self._resume_pending:
+                # Persisted provider state is consumed once. Any later
+                # bootstrap on this adapter represents a new ActivityRunState
+                # and therefore starts a fresh chain.
+                self._resume_pending = False
+            else:
+                self.reset_state()
+            self._decision_instructions = prompt.system
+        elif use_state and prompt.stage == "delta":
+            if self._decision_instructions is None:
+                raise ModelStateError("Responses bootstrap instructions are unavailable; resend a bootstrap prompt")
+            # OpenAI-style Responses APIs do not promise that a prior call's
+            # instructions carry forward with previous_response_id. Reapply the
+            # locally-owned bootstrap instructions while keeping the large user
+            # context in provider-side state.
+            request_messages = [
+                ModelMessage("system", f"{self._decision_instructions}\n\n{prompt.system}"),
+                ModelMessage("user", prompt.user),
+            ]
+        self.last_response = self._request(
+            request_messages,
+            use_state=use_state,
+            allow_state_restart=prompt.stage == "bootstrap",
+            extra_body=self.extra_body,
+        )
+        self.last_parsed_response = self._filter_output(self.last_response).strip()
+        return parse_action(self.last_parsed_response, policy)
+
+    def chat(self, messages: list[ModelMessage]) -> str:
+        return self._request(
+            messages,
+            use_state=False,
+            allow_state_restart=False,
+            extra_body=self.extra_body,
+        )
+
+    def compaction_chat(self, messages: list[ModelMessage]) -> str:
+        return self._request(
+            messages,
+            use_state=False,
+            allow_state_restart=False,
+            extra_body=_operation_extra_body(
+                self.extra_body,
+                self.compaction_extra_body,
+                self.compaction_reasoning,
+                reasoning_format="responses_effort",
+            ),
+        )
+
+    def memory_chat(self, messages: list[ModelMessage]) -> str:
+        return self._request(
+            messages,
+            use_state=False,
+            allow_state_restart=False,
+            extra_body=_operation_extra_body(
+                self.extra_body,
+                self.memory_extra_body,
+                self.memory_reasoning,
+                reasoning_format="responses_effort",
+            ),
+        )
+
+    def _request(
+            self,
+            messages: list[ModelMessage],
+            *,
+            use_state: bool,
+            allow_state_restart: bool,
+            extra_body: dict[str, object],
+    ) -> str:
+        instructions, response_input = _responses_prompt(messages)
+        payload: dict[str, object] = {
+            "temperature": self.temperature,
+            **extra_body,
+            "model": self.model,
+            "input": response_input,
+            "max_output_tokens": self.max_tokens,
+            "store": use_state,
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        previous_response_id = self.response_id if use_state else None
+        payload.pop("previous_response_id", None)
+        if previous_response_id is not None:
+            payload["previous_response_id"] = previous_response_id
+
+        try:
+            response = self._post_response(payload)
+        except ModelError as exc:
+            if previous_response_id is None or not _is_missing_response_state_error(exc):
+                raise
+            self._set_response_id(None)
+            if not allow_state_restart:
+                self._decision_instructions = None
+                raise ModelStateError(
+                    "Responses conversation state was rejected; resend a bootstrap prompt",
+                    stderr=exc.stderr,
+                    status_code=exc.status_code,
+                ) from exc
+            payload.pop("previous_response_id", None)
+            response = self._post_response(payload)
+
+        status = response.get("status")
+        if status in {"failed", "cancelled"}:
+            raise ModelError(f"Responses request ended with status {status!r}: {response.get('error')!r}")
+
+        response_id = _optional_nonempty_string(response.get("id"))
+        if use_state:
+            if response_id is None:
+                raise ModelError(f"stored Responses result had no response id: {response!r}")
+            self._set_response_id(response_id)
+        self.last_response_id = response_id
+        self.last_usage = _optional_mapping(response.get("usage"))
+        self.last_reasoning = _responses_reasoning_text(response)
+        provider_metadata: dict[str, object] = {}
+        if isinstance(status, str):
+            provider_metadata["status"] = status
+        incomplete_details = _optional_mapping(response.get("incomplete_details"))
+        if incomplete_details is not None:
+            provider_metadata["incomplete_details"] = incomplete_details
+        self.last_provider_metadata = provider_metadata or None
+        return _responses_output_text(response)
+
+    def _post_response(self, payload: dict[str, object]) -> dict[str, object]:
+        return _post_json(
+            f"{self.base_url}/responses",
+            payload,
+            headers={
+                **self.extra_headers,
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            timeout=self.timeout,
+        )
+
+    def _read_state_file(self) -> str | None:
+        assert self.state_file is not None
+        if not self.state_file.is_file():
+            return None
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"could not read Responses state file {self.state_file}: {exc}") from exc
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            raise ValueError(f"invalid Responses state file: {self.state_file}")
+        if data.get("base_url") != self.base_url or data.get("model") != self.model:
+            raise ValueError(
+                f"Responses state file does not match the configured endpoint and model: {self.state_file}"
+            )
+        response_id = data.get("response_id")
+        if response_id is not None and not isinstance(response_id, str):
+            raise ValueError(f"invalid response_id in Responses state file: {self.state_file}")
+        return response_id or None
+
+    def reset_state(self) -> None:
+        """Start the next bootstrap without prior provider conversation state."""
+
+        self._resume_pending = False
+        self._decision_instructions = None
+        self._set_response_id(None)
+
+    def _set_response_id(self, response_id: str | None) -> None:
+        self.response_id = response_id
+        if self.state_file is None:
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "schema_version": 1,
+            "base_url": self.base_url,
+            "model": self.model,
+            "response_id": response_id,
+        }
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_file.parent,
+                prefix=f".{self.state_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                json.dump(state, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                temporary_path = Path(handle.name)
+            os.replace(temporary_path, self.state_file)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
 
 class AnthropicAdapter(TextChatAdapter):
@@ -875,7 +1234,11 @@ def _post_json(
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = _read_error_body(exc)
-        raise ModelError(f"HTTP {exc.code} from {url}: {detail}", stderr=detail) from exc
+        raise ModelError(
+            f"HTTP {exc.code} from {url}: {detail}",
+            stderr=detail,
+            status_code=exc.code,
+        ) from exc
     except socket.timeout as exc:
         raise ModelTimeoutError(f"request to {url} timed out after {timeout:g}s", stderr=str(exc)) from exc
     except urllib.error.URLError as exc:
@@ -911,6 +1274,146 @@ def _string_field(data: dict[str, object], key: str) -> str:
 
 def _optional_string(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _optional_nonempty_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_mapping(value: object) -> dict[str, object] | None:
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _responses_prompt(messages: list[ModelMessage]) -> tuple[str, object]:
+    instructions = "\n\n".join(message.content for message in messages if message.role == "system")
+    inputs = [message.to_dict() for message in messages if message.role != "system"]
+    if len(inputs) == 1 and inputs[0]["role"] == "user":
+        response_input: object = inputs[0]["content"]
+    else:
+        response_input = inputs
+    return instructions, response_input
+
+
+def _responses_output_text(response: dict[str, object]) -> str:
+    output = response.get("output")
+    if not isinstance(output, list):
+        raise ModelError(f"unexpected Responses result: {response!r}")
+    texts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+    if not texts:
+        raise ModelError(f"Responses result contained no assistant output text: {response!r}")
+    return "".join(texts)
+
+
+def _responses_reasoning_text(response: dict[str, object]) -> str:
+    texts: list[str] = []
+    reasoning = response.get("reasoning")
+    if isinstance(reasoning, dict):
+        texts.extend(_nested_text_values(reasoning.get("content")))
+        texts.extend(_nested_text_values(reasoning.get("summary")))
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            texts.extend(_nested_text_values(item.get("content")))
+            texts.extend(_nested_text_values(item.get("summary")))
+    return "\n".join(text for text in texts if text)
+
+
+def _nested_text_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    texts: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            texts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            texts.append(item["text"])
+    return texts
+
+
+def _is_missing_response_state_error(error: ModelError) -> bool:
+    if error.status_code not in {400, 404, 409, 422}:
+        return False
+    # ModelError's message includes the request URL (normally ending in
+    # /responses), so matching it makes unrelated 404s look state-related.
+    # Restrict classification to the provider's error body and require an
+    # explicit reference to the prior-response field.
+    detail = error.stderr.casefold().strip()
+    if not detail:
+        return False
+    references_previous_response = any(
+        marker in detail
+        for marker in (
+            "previous_response_id",
+            "previous response",
+            "previous_response_not_found",
+            "prior response",
+        )
+    )
+    rejects_reference = any(
+        marker in detail
+        for marker in (
+            "not found",
+            "not be found",
+            "does not exist",
+            "invalid",
+            "not valid",
+            "expired",
+            "deleted",
+            "missing",
+            "unknown",
+            "unavailable",
+        )
+    )
+    return references_previous_response and rejects_reference
+
+
+def _operation_extra_body(
+        base: dict[str, object],
+        override: dict[str, object],
+        reasoning: bool | None,
+        *,
+        reasoning_format: str = "enabled",
+) -> dict[str, object]:
+    """Build one utility request body without mutating decision settings."""
+
+    body = {**base, **override}
+    if reasoning is None:
+        return body
+    reasoning_options = body.get("reasoning")
+    if isinstance(reasoning_options, dict):
+        reasoning_options = dict(reasoning_options)
+    else:
+        reasoning_options = {}
+    if reasoning_format == "responses_effort":
+        reasoning_options.pop("enabled", None)
+        current_effort = reasoning_options.get("effort")
+        if reasoning:
+            if not isinstance(current_effort, str) or current_effort.casefold() in {"none", "off"}:
+                reasoning_options["effort"] = "medium"
+        else:
+            reasoning_options["effort"] = "none"
+    else:
+        # Several Chat Completions-compatible servers use this extension. It
+        # is deliberately not treated as a portable OpenAI API field.
+        reasoning_options["enabled"] = reasoning
+    body["reasoning"] = reasoning_options
+    return body
 
 
 def _string_tuple(data: dict[str, object], key: str) -> tuple[str, ...]:

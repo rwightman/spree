@@ -22,10 +22,12 @@ __all__ = [
     "InputModeRule",
     "JsonMemoryStore",
     "ModelError",
+    "ModelStateError",
     "ModelTimeoutError",
     "Observation",
     "ObservationHints",
     "OpenAICompatibleAdapter",
+    "ResponsesCompatibleAdapter",
     "PromptModule",
     "PromptLayout",
     "PromptMode",
@@ -58,8 +60,10 @@ from .models import (
     ClaudeCliAdapter,
     CodexCliAdapter,
     ModelError,
+    ModelStateError,
     ModelTimeoutError,
     OpenAICompatibleAdapter,
+    ResponsesCompatibleAdapter,
     ScriptedModelAdapter,
 )
 from .prompt_modules import GENERIC_TERMINAL_MODULES, FullScreenModule, PromptModule, PromptRenderContext

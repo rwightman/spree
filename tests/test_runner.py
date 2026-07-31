@@ -6,7 +6,7 @@ from bbs_gym.activities import TW2_ENTRY_PROFILE
 from tty_agent.actions import Action, ActionError, ActionPolicy
 from tty_agent.agent import ActionExecution
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import ModelError, ModelTimeoutError, ScriptedModelAdapter
+from tty_agent.models import DecisionPrompt, ModelError, ModelStateError, ModelTimeoutError, ScriptedModelAdapter
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
 from tty_agent.terminal import Observation
@@ -383,6 +383,38 @@ def test_routed_activity_runner_switches_profiles_from_observation(tmp_path):
     assert logged_steps[1]["events"][0]["type"] == "profile_switch"
 
 
+def test_stateful_routed_profiles_bootstrap_after_each_switch(tmp_path):
+    agent = SequencedScreenAgent(["BBS main menu", "TradeWars2 menu", "BBS main menu"])
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "wait", "arguments": {}}',
+            '{"action": "hangup", "arguments": {}}',
+            "{}",
+        ]
+    )
+    default_profile = ActivityProfile(name="bbs-safe", objective="default", prompt_mode="stateful_delta")
+    tw2_profile = ActivityProfile(name="tw2-game", objective="tw2", prompt_mode="stateful_delta")
+    runner = RoutedActivityRunner(
+        "auto",
+        default_profile,
+        (
+            ActivityRoute(
+                name="tw2",
+                profile=tw2_profile,
+                matches=lambda observation: "TradeWars2" in observation.model_text,
+                priority=10,
+            ),
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=3))
+
+    assert [step.active_profile for step in result.steps] == ["bbs-safe", "tw2-game", "bbs-safe"]
+    assert [step.prompt["stage"] for step in result.steps] == ["bootstrap", "bootstrap", "bootstrap"]
+
+
 def test_activity_runner_renders_and_traces_prompt_modules(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(['{"action": "wait", "arguments": {}}'])
@@ -563,6 +595,21 @@ def test_activity_runner_stateful_delta_bootstraps_then_sends_delta_prompts(tmp_
     assert "Most recent terminal output:" in second_prompt["user"]
 
 
+def test_stateful_action_repair_preserves_prompt_mode_and_stage(tmp_path):
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test repairs"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+    prompt = runner._build_retry_prompt(
+        DecisionPrompt("system", "screen", mode="stateful_delta", stage="delta"),
+        "invalid JSON",
+        1,
+    )
+
+    assert prompt.mode == "stateful_delta"
+    assert prompt.stage == "delta"
+
+
 def test_activity_runner_logs_action_execution_errors_without_crashing(tmp_path):
     agent = RejectingAgent()
     model = ScriptedModelAdapter(
@@ -730,6 +777,9 @@ def test_activity_runner_logs_separate_model_reasoning(tmp_path):
     class ReasoningModel(ScriptedModelAdapter):
         def chat(self, messages):
             self.last_reasoning = "screen says quitting is appropriate"
+            self.last_response_id = "resp-trace"
+            self.last_usage = {"input_tokens": 10, "output_tokens": 5}
+            self.last_provider_metadata = {"status": "completed"}
             return super().chat(messages)
 
     agent = FakeAgent()
@@ -749,6 +799,9 @@ def test_activity_runner_logs_separate_model_reasoning(tmp_path):
 
     assert result.stop_reason == "hangup"
     assert model_response["reasoning"] == "screen says quitting is appropriate"
+    assert model_response["response_id"] == "resp-trace"
+    assert model_response["usage"] == {"input_tokens": 10, "output_tokens": 5}
+    assert model_response["provider_metadata"] == {"status": "completed"}
 
 
 def test_activity_runner_excludes_model_responses_from_context_by_default(tmp_path):
@@ -996,6 +1049,86 @@ def test_compaction_covers_steps_beyond_prompt_window(tmp_path):
     assert "Step 4" in memory_chats[0]
 
 
+def test_failed_compaction_preserves_history_and_retries_on_next_boundary(tmp_path):
+    agent = SequencedScreenAgent(["S1", "S2", "S3", "S4", "S5"])
+    model = PromptRecordingModel(
+        [
+            '{"action": "submit_line", "arguments": {"text": "one"}}',
+            '{"action": "submit_line", "arguments": {"text": "two"}}',
+            "",
+            '{"action": "submit_line", "arguments": {"text": "three"}}',
+            '{"action": "submit_line", "arguments": {"text": "four"}}',
+            '{"current_state": "Recovered summary", "discovered_facts": ["kept all steps"]}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Done."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test failed compaction recovery",
+            recent_steps_to_keep=1,
+            compact_every_steps=2,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(agent, model, ActivityBudget(max_decision_ticks=6))
+
+    assert result.stop_reason == "hangup"
+    assert result.session_summary.current_state == "Recovered summary"
+    assert result.steps[2].events[0]["type"] == "model_utility"
+    assert result.steps[2].events[0]["operation"] == "compaction"
+    assert result.steps[2].events[0]["status"] == "error"
+    assert result.steps[2].events[0]["error"]["type"] == "ModelError"
+    assert result.steps[4].events[0]["status"] == "ok"
+    assert result.steps[4].events[0]["summary"]["current_state"] == "Recovered summary"
+
+    compaction_chats = [chat for chat in model.chats if "Compact older terminal activity" in chat]
+    assert len(compaction_chats) == 2
+    for marker in ("Step 1", "Step 2", "Step 3", "Step 4"):
+        assert marker in compaction_chats[1]
+
+
+def test_failed_compaction_bounds_final_memory_commit_history(tmp_path):
+    screens = [
+        "OLDEST-1 " + "a" * 90,
+        "MIDDLE-2 " + "b" * 90,
+        "NEWEST-3 " + "c" * 90,
+    ]
+    model = PromptRecordingModel(
+        [
+            '{"action": "submit_line", "arguments": {"text": "one"}}',
+            "",
+            '{"action": "submit_line", "arguments": {"text": "two"}}',
+            "",
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Done."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test bounded final memory",
+            recent_steps_to_keep=1,
+            screen_tail_chars=100,
+            compact_every_steps=1,
+            compact_recent_chars=450,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(SequencedScreenAgent(screens), model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.stop_reason == "hangup"
+    memory_chat = next(chat for chat in model.chats if "memory patch" in chat)
+    recent_text = memory_chat.split("Recent steps:\n", 1)[1].split("\n\nFinal screen:", 1)[0]
+    assert len(recent_text) <= 450
+    assert "Older unsummarized step context omitted" in recent_text
+    assert "NEWEST-3" in recent_text
+    assert "OLDEST-1" not in recent_text
+
+
 class FailFirstDecideModel(ScriptedModelAdapter):
     def __init__(self, responses: list[str], failures: int = 1) -> None:
         super().__init__(responses)
@@ -1035,6 +1168,52 @@ def test_stateful_delta_resends_bootstrap_after_model_error(tmp_path):
     assert result.steps[1].prompt["stage"] == "bootstrap"
     assert result.steps[1].action is not None
     assert result.steps[2].prompt["stage"] == "delta"
+
+
+def test_stateful_delta_rebootstraps_after_provider_state_is_lost(tmp_path):
+    class ExpiredModelStateError(ModelStateError):
+        pass
+
+    class StateLosingModel(ScriptedModelAdapter):
+        def __init__(self):
+            super().__init__(
+                [
+                    '{"action": "wait", "arguments": {}}',
+                    '{"action": "hangup", "arguments": {}}',
+                    '{"durable_facts": []}',
+                ]
+            )
+            self.decision_calls = 0
+
+        def decide(self, prompt, policy=None):
+            self.decision_calls += 1
+            if self.decision_calls == 2:
+                raise ExpiredModelStateError(
+                    "previous response was not found",
+                    status_code=404,
+                )
+            return super().decide(prompt, policy)
+
+    profile = ActivityProfile(
+        name="bbs-menu",
+        objective="test remote state recovery",
+        prompt_mode="stateful_delta",
+        model_error_retries=2,
+    )
+
+    result = ActivityRunner(profile, memory_store=JsonMemoryStore(tmp_path / "memory")).run(
+        FakeAgent(),
+        StateLosingModel(),
+        ActivityBudget(max_decision_ticks=4),
+    )
+
+    assert [step.prompt["stage"] for step in result.steps] == ["bootstrap", "delta", "bootstrap"]
+    assert result.steps[1].action is None
+    assert len(result.steps[1].validation["model_errors"]) == 1
+    assert result.steps[1].validation["model_errors"][0]["type"] == "ExpiredModelStateError"
+    assert result.steps[1].validation["model_errors"][0]["status_code"] == 404
+    assert result.steps[1].validation["requires_bootstrap"] is True
+    assert result.stop_reason == "hangup"
 
 
 class EncodeFailingAgent(FakeAgent):
