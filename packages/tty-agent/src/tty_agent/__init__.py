@@ -21,7 +21,16 @@ __all__ = [
     "InputModalityProfile",
     "InputModeRule",
     "JsonMemoryStore",
+    "LegacyMemoryLimits",
+    "MemoryDocumentLimits",
+    "MemoryContextKey",
+    "MemoryEvent",
+    "MemoryHandle",
+    "MemorySubsystem",
+    "StructuredMemoryConfig",
+    "StructuredMemorySubsystem",
     "ModelError",
+    "ModelOutputTruncated",
     "ModelStateError",
     "ModelTimeoutError",
     "Observation",
@@ -54,12 +63,15 @@ from .actions import Action, ActionPolicy, render_action_schema
 from .ansi import strip_ansi
 from .evaluation import EvaluationProbe, EvaluationProfile, EvaluationRecord, EvaluationResult
 from .hints import InputModalityProfile, InputModeRule, ObservationHints
-from .memory import JsonMemoryStore
+from .memory import JsonMemoryStore, MemoryDocumentLimits
+from .memory_subsystem import MemoryContextKey, MemoryEvent, MemoryHandle, MemorySubsystem
+from .structured_memory import StructuredMemoryConfig, StructuredMemorySubsystem
 from .models import (
     AnthropicAdapter,
     ClaudeCliAdapter,
     CodexCliAdapter,
     ModelError,
+    ModelOutputTruncated,
     ModelStateError,
     ModelTimeoutError,
     OpenAICompatibleAdapter,
@@ -74,6 +86,7 @@ from .runner import (
     ActivityRoute,
     ActivityRunState,
     ActivityRunner,
+    LegacyMemoryLimits,
     PromptLayout,
     PromptMode,
     RoutedActivityRunner,

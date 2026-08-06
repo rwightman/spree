@@ -95,7 +95,8 @@ Missing:
   failures. The proposed design — pluggable memory policies, an
   operations-based reconciliation contract with typed exits instead of lossy
   summary rewrites, an intent channel, and provider-chain rollover — is in
-  `docs/memory-design.md`.
+  `docs/memory-design.md`. A distilled subsystem and the common swap seam for
+  trialing implementations side by side is in `docs/memory-simple.md`.
 
 The `tty_agent` package is intentionally separate from `bbs_gym`.
 Terminal observation, action validation, model adapters, memory, and the

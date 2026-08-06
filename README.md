@@ -485,9 +485,27 @@ deliberately omitted from trace metadata.
 Reasoning can be controlled independently for runner-owned utility calls with
 `compaction_reasoning` and `memory_reasoning` in model configuration, or with
 `--[no-]compaction-reasoning` and `--[no-]memory-reasoning`. Omit either option
-to inherit the normal decision setting. Utility calls keep the model's normal
-`max_tokens`. These booleans use API-specific request shapes: Chat Completions
-uses the provider extension `reasoning.enabled`, while Responses uses
+to inherit the normal decision setting. Structured memory also performs a
+cleanup-only audit after final extraction. Set `audit_temperature` or
+`--audit-temperature` to tune that pass independently; when omitted it
+inherits the decision temperature. Periodic reconciliation and final
+durable-memory calls can use independent initial output budgets through
+`compaction_max_tokens` / `--compaction-max-tokens` and
+`memory_max_tokens` / `--memory-max-tokens`; either inherits the decision
+`max_tokens` when omitted. For structured memory, `compaction_*` governs both
+periodic reconciliation and final extraction, while `memory_*` governs the
+final audit; legacy final commits also use `memory_*`. HTTP adapters retry an
+explicit provider output-limit signal at a doubled budget, up to the independently configured
+`max_tokens_retry_ceiling`, `compaction_max_tokens_retry_ceiling`, or
+`memory_max_tokens_retry_ceiling` (and corresponding command-line options).
+The larger budget remains active for later calls of that operation, and each
+trace records the attempted budgets, token usage, and recovery. An incomplete
+stateful Responses result is never adopted as the next conversation state.
+CLI-built HTTP models default to 16,384 decision tokens and 32,768 utility
+tokens as retry ceilings. Long reasoning responses may also need a larger
+`timeout` / `--model-timeout`; that HTTP deadline applies to decisions and
+utility calls alike. These booleans use API-specific request shapes: Chat
+Completions uses the provider extension `reasoning.enabled`, while Responses uses
 `reasoning.effort` (`medium` when enabled and `none` when disabled). Provider
 and model support still varies; use `compaction_extra_body` and
 `memory_extra_body` to select an explicit effort or another provider-specific
@@ -496,6 +514,18 @@ summary and unsummarized steps, retry at a later compaction boundary, and emit
 a `model_utility` trace event with provider metadata and usage. The final memory
 commit bounds any still-unsummarized history by the profile's
 `compact_recent_chars` value.
+
+The inline legacy memory path is also bounded independently of prompt-window
+size. Compaction produces a selective working set with code-enforced string,
+item-count, and total-character caps. An oversized draft or an implausible
+wholesale loss of prior list items gets one repair pass. A failed bounds repair
+falls back to the first valid code-bounded draft; a failed destructive-rewrite
+repair preserves both the prior summary and the unsummarized steps for a later
+retry. Durable campaign documents use the same exact-dedupe and hard-bound
+discipline, while a failed final memory call leaves the previous document
+untouched. Defaults live in
+`ActivityProfile.legacy_memory_limits` so experiments can tune them without
+putting game-specific rules in the generic memory layer.
 
 Fireworks Chat Completions automatically receives a stable `prompt_cache_key`
 based on the agent ID and requests `perf_metrics` in the response. This follows

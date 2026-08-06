@@ -15,6 +15,7 @@ from tty_agent.models import (
     MemoryCommitPrompt,
     ModelError,
     ModelMessage,
+    ModelOutputTruncated,
     ModelStateError,
     ModelTimeoutError,
     OpenAICompatibleAdapter,
@@ -179,6 +180,7 @@ def test_openai_compatible_adapter_can_override_reasoning_for_utility_calls(monk
                 '"discovered_facts":[],"failed_actions":[],"strategy_notes":[]}'
             ),
             '{"durable_facts":["at prompt"]}',
+            "[]",
         ]
     )
 
@@ -202,22 +204,190 @@ def test_openai_compatible_adapter_can_override_reasoning_for_utility_calls(monk
             "response_format": {"type": "json_object"},
         },
         compaction_reasoning=False,
-        compaction_extra_body={"utility_operation": "compact"},
+        compaction_extra_body={"utility_operation": "compact", "max_tokens": 1},
         memory_reasoning=False,
-        memory_extra_body={"utility_operation": "memory"},
+        memory_extra_body={"utility_operation": "memory", "max_tokens": 1},
+        audit_temperature=0.6,
+        compaction_max_tokens=16_384,
+        memory_max_tokens=32_768,
     )
 
     adapter.decide(DecisionPrompt("s", "u"))
     adapter.compact(CompactionPrompt("s", "u"))
     adapter.commit_memory(MemoryCommitPrompt("s", "u"))
+    adapter.utility_text([ModelMessage("user", "audit")], "audit")
 
-    assert [payload["max_tokens"] for payload in payloads] == [2048, 2048, 2048]
+    assert [payload["max_tokens"] for payload in payloads] == [2048, 16_384, 32_768, 32_768]
     assert payloads[0]["reasoning"] == {"enabled": True, "effort": "medium"}
     assert payloads[1]["reasoning"] == {"enabled": False, "effort": "medium"}
     assert payloads[2]["reasoning"] == {"enabled": False, "effort": "medium"}
+    assert payloads[3]["reasoning"] == {"enabled": False, "effort": "medium"}
     assert payloads[1]["utility_operation"] == "compact"
     assert payloads[2]["utility_operation"] == "memory"
+    assert payloads[3]["utility_operation"] == "memory"
+    assert [payload["temperature"] for payload in payloads] == [0.2, 0.2, 0.2, 0.6]
     assert all(payload["response_format"] == {"type": "json_object"} for payload in payloads)
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        OpenAICompatibleAdapter(model="test-model", max_tokens=2048),
+        ResponsesCompatibleAdapter(model="test-model", max_tokens=2048),
+        AnthropicAdapter(model="test-model", api_key="key", max_tokens=2048),
+    ],
+)
+def test_http_adapters_inherit_decision_ceiling_for_unspecified_utility_limits(adapter):
+    assert adapter.compaction_max_tokens == 2048
+    assert adapter.memory_max_tokens == 2048
+    assert adapter.audit_temperature == adapter.temperature
+
+
+def test_openai_adapter_adaptively_retries_truncated_decision_and_keeps_larger_budget(monkeypatch):
+    payloads = []
+    responses = iter(
+        [
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"reasoning": "still thinking", "content": ""},
+                    }
+                ],
+                "usage": {
+                    "completion_tokens": 4096,
+                    "completion_tokens_details": {"reasoning_tokens": 4096},
+                },
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"action":"wait","arguments":{}}'},
+                    }
+                ],
+                "usage": {"completion_tokens": 200},
+            },
+        ]
+    )
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(
+        model="test-model",
+        max_tokens=4096,
+        max_tokens_retry_ceiling=16_384,
+    )
+
+    action = adapter.decide(DecisionPrompt("s", "u"))
+
+    assert action.action == "wait"
+    assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+    assert adapter.max_tokens == 8192
+    assert adapter.last_request_metadata == {
+        "operation": "decision",
+        "initial_max_tokens": 4096,
+        "effective_max_tokens": 8192,
+        "retry_ceiling": 16_384,
+        "output_token_retries": 1,
+        "attempts": [
+            {
+                "max_tokens": 4096,
+                "truncated": True,
+                "usage": {
+                    "completion_tokens": 4096,
+                    "completion_tokens_details": {"reasoning_tokens": 4096},
+                },
+                "reasoning_tokens": 4096,
+            },
+            {
+                "max_tokens": 8192,
+                "truncated": False,
+                "usage": {"completion_tokens": 200},
+            },
+        ],
+    }
+
+
+def test_openai_adapter_raises_typed_truncation_at_retry_ceiling(monkeypatch):
+    payloads = []
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return {
+            "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+            "usage": {"completion_tokens": payload["max_tokens"]},
+        }
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(
+        model="test-model",
+        max_tokens=4096,
+        max_tokens_retry_ceiling=8192,
+    )
+
+    with pytest.raises(ModelOutputTruncated) as raised:
+        adapter.decide(DecisionPrompt("s", "u"))
+
+    assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+    assert raised.value.requested_max_tokens == 8192
+    assert raised.value.retry_ceiling == 8192
+    assert raised.value.request_metadata["output_token_retries"] == 1
+
+
+def test_openai_adapter_uses_independent_sticky_compaction_retry_budget(monkeypatch):
+    payloads = []
+    responses = iter(
+        [
+            {
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                "usage": {"completion_tokens": 4},
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"current_state":"ready"}'},
+                    }
+                ],
+                "usage": {"completion_tokens": 3},
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"current_state":"still ready"}'},
+                    }
+                ],
+                "usage": {"completion_tokens": 3},
+            },
+        ]
+    )
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = OpenAICompatibleAdapter(
+        model="test-model",
+        max_tokens=2,
+        compaction_max_tokens=4,
+        compaction_max_tokens_retry_ceiling=8,
+    )
+
+    assert adapter.compact(CompactionPrompt("s", "u")).current_state == "ready"
+    assert adapter.compact(CompactionPrompt("s", "u2")).current_state == "still ready"
+
+    assert [payload["max_tokens"] for payload in payloads] == [4, 8, 8]
+    assert adapter.max_tokens == 2
+    assert adapter.compaction_max_tokens == 8
 
 
 def test_openai_compatible_adapter_merges_extra_headers_without_allowing_credential_override(monkeypatch):
@@ -425,6 +595,58 @@ def test_responses_adapter_stateful_decisions_chain_but_social_does_not(monkeypa
     assert json.loads(state_file.read_text(encoding="utf-8"))["response_id"] == "resp-delta"
 
 
+def test_responses_truncation_retry_does_not_advance_state_from_incomplete_result(monkeypatch, tmp_path):
+    payloads = []
+    results = iter(
+        [
+            _responses_result('{"action":"wait","arguments":{}}', "resp-bootstrap"),
+            {
+                "id": "resp-incomplete",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "still thinking"}],
+                    }
+                ],
+                "usage": {
+                    "output_tokens": 4096,
+                    "output_tokens_details": {"reasoning_tokens": 4096},
+                },
+            },
+            _responses_result('{"action":"hangup","arguments":{}}', "resp-retry"),
+        ]
+    )
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return next(results)
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    state_file = tmp_path / "responses.json"
+    adapter = ResponsesCompatibleAdapter(
+        model="test-model",
+        max_tokens=4096,
+        max_tokens_retry_ceiling=8192,
+        stateful=True,
+        state_file=state_file,
+    )
+
+    adapter.decide(DecisionPrompt("bootstrap", "screen", mode="stateful_delta", stage="bootstrap"))
+    action = adapter.decide(DecisionPrompt("delta", "next", mode="stateful_delta", stage="delta"))
+
+    assert action.action == "hangup"
+    assert payloads[1]["previous_response_id"] == "resp-bootstrap"
+    assert payloads[2]["previous_response_id"] == "resp-bootstrap"
+    assert [payloads[1]["max_output_tokens"], payloads[2]["max_output_tokens"]] == [4096, 8192]
+    assert adapter.response_id == "resp-retry"
+    assert json.loads(state_file.read_text(encoding="utf-8"))["response_id"] == "resp-retry"
+    assert adapter.last_request_metadata["output_token_retries"] == 1
+    assert adapter.last_request_metadata["attempts"][0]["reasoning_tokens"] == 4096
+
+
 def test_responses_adapter_new_bootstrap_starts_fresh_chain(monkeypatch):
     payloads = []
     results = iter(
@@ -581,6 +803,7 @@ def test_responses_adapter_uses_reasoning_effort_for_utility_calls(monkeypatch):
                 None,
             ),
             _responses_result('{"durable_facts":["ready"]}', None),
+            _responses_result("[]", None),
         ]
     )
 
@@ -593,14 +816,23 @@ def test_responses_adapter_uses_reasoning_effort_for_utility_calls(monkeypatch):
         model="test-model",
         extra_body={"reasoning": {"effort": "high"}},
         compaction_reasoning=True,
+        compaction_extra_body={"max_output_tokens": 1},
         memory_reasoning=False,
+        memory_extra_body={"max_output_tokens": 1},
+        audit_temperature=0.6,
+        compaction_max_tokens=16_384,
+        memory_max_tokens=32_768,
     )
 
     adapter.compact(CompactionPrompt("s", "u"))
     adapter.commit_memory(MemoryCommitPrompt("s", "u"))
+    adapter.utility_text([ModelMessage("user", "audit")], "audit")
 
     assert payloads[0]["reasoning"] == {"effort": "high"}
     assert payloads[1]["reasoning"] == {"effort": "none"}
+    assert payloads[2]["reasoning"] == {"effort": "none"}
+    assert [payload["max_output_tokens"] for payload in payloads] == [16_384, 32_768, 32_768]
+    assert [payload["temperature"] for payload in payloads] == [0.2, 0.2, 0.6]
 
 
 def test_openai_compatible_adapter_can_disable_response_filters():
@@ -633,6 +865,71 @@ def test_anthropic_adapter_uses_cache_control_for_system_prompt(monkeypatch):
     ]
 
 
+def test_anthropic_adapter_uses_operation_token_ceilings(monkeypatch):
+    payloads = []
+
+    def fake_post_json(url, payload, headers, timeout):
+        payloads.append(payload)
+        return {"content": [{"type": "text", "text": "{}"}]}
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = AnthropicAdapter(
+        model="test-model",
+        api_key="key",
+        max_tokens=2048,
+        compaction_max_tokens=16_384,
+        memory_max_tokens=32_768,
+        audit_temperature=0.6,
+    )
+    messages = [ModelMessage("user", "screen")]
+
+    adapter.chat(messages)
+    adapter.compaction_chat(messages)
+    adapter.memory_chat(messages)
+    adapter.audit_chat(messages)
+
+    assert [payload["max_tokens"] for payload in payloads] == [2048, 16_384, 32_768, 32_768]
+    assert [payload["temperature"] for payload in payloads] == [0.2, 0.2, 0.2, 0.6]
+
+
+def test_anthropic_adapter_adaptively_retries_thinking_only_truncation(monkeypatch):
+    payloads = []
+    responses = iter(
+        [
+            {
+                "content": [],
+                "stop_reason": "max_tokens",
+                "usage": {"output_tokens": 4},
+            },
+            {
+                "content": [{"type": "text", "text": '{"action":"wait","arguments":{}}'}],
+                "stop_reason": "end_turn",
+                "usage": {"output_tokens": 2},
+            },
+        ]
+    )
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    adapter = AnthropicAdapter(
+        model="test-model",
+        api_key="key",
+        max_tokens=4,
+        max_tokens_retry_ceiling=8,
+    )
+
+    action = adapter.decide(DecisionPrompt("system", "screen"))
+
+    assert action.action == "wait"
+    assert [payload["max_tokens"] for payload in payloads] == [4, 8]
+    assert adapter.last_request_metadata["output_token_retries"] == 1
+    assert adapter.max_tokens == 8
+
+
 def test_anthropic_adapter_infers_gemma4_response_filter():
     adapter = AnthropicAdapter(model="google/gemma-4-31B-it", api_key="key")
 
@@ -657,6 +954,55 @@ def test_post_json_wraps_http_error_as_model_error(monkeypatch):
     assert "HTTP 503" in str(excinfo.value)
     assert "server busy" in str(excinfo.value)
     assert excinfo.value.status_code == 503
+
+
+def test_post_json_never_uses_urllib_default_user_agent(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        captured["user_agent"] = request.get_header("User-agent")
+        return FakeResponse()
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", fake_urlopen)
+
+    _post_json("https://api.example.test/v1/chat/completions", {})
+
+    assert captured["user_agent"] == "spree/0.1.1"
+    assert not captured["user_agent"].startswith("Python-urllib/")
+
+
+def test_post_json_preserves_explicit_user_agent(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        captured["user_agent"] = request.get_header("User-agent")
+        return FakeResponse()
+
+    monkeypatch.setattr("tty_agent.models.urllib.request.urlopen", fake_urlopen)
+
+    _post_json("https://api.example.test/v1/chat/completions", {}, headers={"User-Agent": "custom-client/2"})
+
+    assert captured["user_agent"] == "custom-client/2"
 
 
 def test_post_json_wraps_unreachable_host_as_model_error(monkeypatch):
@@ -1048,3 +1394,82 @@ def test_anthropic_adapter_rejects_malformed_text_block(monkeypatch):
 
     with pytest.raises(ModelError, match="unexpected Anthropic response"):
         adapter.chat([ModelMessage("user", "screen")])
+
+
+def test_compact_rejects_prose_response():
+    class ProseModel(TextChatAdapter):
+        def chat(self, _messages):
+            return "I explored the house and found a lantern in the living room."
+
+    with pytest.raises(ModelError, match="not a JSON object"):
+        ProseModel().compact(CompactionPrompt("s", "u"))
+
+
+def test_commit_memory_rejects_prose_response():
+    class ProseModel(TextChatAdapter):
+        def chat(self, _messages):
+            return "Durable fact: the troll accepts payment in lunch."
+
+    with pytest.raises(ModelError, match="not a JSON object"):
+        ProseModel().commit_memory(MemoryCommitPrompt("s", "u"))
+
+
+def test_commit_memory_accepts_explicit_empty_patch():
+    class EmptyPatchModel(TextChatAdapter):
+        name = "empty-patch"
+
+        def chat(self, _messages):
+            return "{}"
+
+    patch = EmptyPatchModel().commit_memory(MemoryCommitPrompt("s", "u"))
+
+    assert patch.data == {}
+
+
+def test_claude_cli_utility_calls_run_stateless(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = '{"result":"[]"}'
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        captured["command"] = command
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = ClaudeCliAdapter(stateful=True, session_id="11111111-2222-3333-4444-555555555555")
+
+    output = adapter.compaction_chat(CompactionPrompt("s", "u").messages())
+
+    assert output == "[]"
+    assert "--no-session-persistence" in captured["command"]
+    assert "--resume" not in captured["command"]
+    # The gameplay conversation is untouched.
+    assert adapter.stateful is True
+    assert adapter.session_id == "11111111-2222-3333-4444-555555555555"
+
+
+def test_codex_cli_utility_calls_run_stateless(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = "[]"
+
+    def fake_run(command, input, text, capture_output, timeout, cwd, check):
+        captured["command"] = command
+        return Result()
+
+    monkeypatch.setattr("tty_agent.models.subprocess.run", fake_run)
+    adapter = CodexCliAdapter(stateful=True, session_id="abc-123")
+
+    output = adapter.memory_chat(MemoryCommitPrompt("s", "u").messages())
+
+    assert output == "[]"
+    assert "--ephemeral" in captured["command"]
+    assert "resume" not in captured["command"]
+    assert adapter.stateful is True
+    assert adapter.session_id == "abc-123"

@@ -6,9 +6,23 @@ from bbs_gym.activities import TW2_ENTRY_PROFILE
 from tty_agent.actions import Action, ActionError, ActionPolicy
 from tty_agent.agent import ActionExecution
 from tty_agent.memory import JsonMemoryStore
-from tty_agent.models import DecisionPrompt, ModelError, ModelStateError, ModelTimeoutError, ScriptedModelAdapter
+from tty_agent.models import (
+    DecisionPrompt,
+    ModelError,
+    ModelStateError,
+    ModelTimeoutError,
+    OpenAICompatibleAdapter,
+    ScriptedModelAdapter,
+)
 from tty_agent.prompt_modules import GENERIC_TERMINAL_MODULES, StaticPromptModule
-from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRoute, ActivityRunner, RoutedActivityRunner
+from tty_agent.runner import (
+    ActivityBudget,
+    ActivityProfile,
+    ActivityRoute,
+    ActivityRunner,
+    LegacyMemoryLimits,
+    RoutedActivityRunner,
+)
 from tty_agent.terminal import Observation
 from tty_agent.transports.base import SessionDisconnected
 
@@ -804,6 +818,55 @@ def test_activity_runner_logs_separate_model_reasoning(tmp_path):
     assert model_response["provider_metadata"] == {"status": "completed"}
 
 
+def test_activity_runner_does_not_charge_validation_failure_for_adaptive_output_retry(monkeypatch, tmp_path):
+    payloads = []
+    responses = iter(
+        [
+            {
+                "choices": [{"finish_reason": "length", "message": {"reasoning": "thinking", "content": ""}}],
+                "usage": {
+                    "completion_tokens": 4,
+                    "completion_tokens_details": {"reasoning_tokens": 4},
+                },
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"action":"hangup","arguments":{}}'},
+                    }
+                ],
+                "usage": {"completion_tokens": 2},
+            },
+            {
+                "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+                "usage": {"completion_tokens": 1},
+            },
+        ]
+    )
+
+    def fake_post_json(url, payload, headers, timeout):
+        del url, headers, timeout
+        payloads.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("tty_agent.models._post_json", fake_post_json)
+    model = OpenAICompatibleAdapter(model="test-model", max_tokens=4, max_tokens_retry_ceiling=8)
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test adaptive output retry"),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(FakeAgent(), model, ActivityBudget(max_decision_ticks=1))
+
+    assert result.stop_reason == "hangup"
+    assert result.steps[0].budget["validation_failures"] == 0
+    assert "recovered_after_output_truncation" in result.steps[0].validation["notes"]
+    request_metadata = result.steps[0].validation["model_response"]["request_metadata"]
+    assert request_metadata["output_token_retries"] == 1
+    assert request_metadata["effective_max_tokens"] == 8
+    assert [payload["max_tokens"] for payload in payloads] == [4, 8, 4]
+
+
 def test_activity_runner_excludes_model_responses_from_context_by_default(tmp_path):
     agent = FakeAgent()
     model = ScriptedModelAdapter(
@@ -1033,6 +1096,7 @@ def test_compaction_covers_steps_beyond_prompt_window(tmp_path):
 
     compaction_chats = [chat for chat in model.chats if "Compact older terminal activity" in chat]
     assert len(compaction_chats) == 1
+    assert "Keep reasoning concise and reserve enough output for the required JSON" in compaction_chats[0]
     # Every step since the last compaction is summarized, not just the prompt window.
     for marker in ("Step 1", "Step 2", "Step 3", '"text": "one"', '"text": "three"'):
         assert marker in compaction_chats[0]
@@ -1046,7 +1110,145 @@ def test_compaction_covers_steps_beyond_prompt_window(tmp_path):
     # The end-of-run memory commit sees the steps accumulated since compaction.
     memory_chats = [chat for chat in model.chats if "memory patch" in chat]
     assert len(memory_chats) == 1
+    assert "Keep reasoning concise and reserve enough output for the required JSON" in memory_chats[0]
     assert "Step 4" in memory_chats[0]
+
+
+def test_legacy_compaction_repairs_oversized_draft_and_enforces_limits(tmp_path):
+    limits = LegacyMemoryLimits(
+        summary_max_chars=350,
+        current_state_max_chars=80,
+        last_error_max_chars=40,
+        item_max_chars=50,
+        max_open_subgoals=2,
+        max_discovered_facts=2,
+        max_failed_actions=2,
+        max_strategy_notes=2,
+        campaign_max_chars=500,
+        campaign_max_string_chars=50,
+        campaign_max_list_items=3,
+    )
+    oversized = json.dumps(
+        {
+            "current_state": "state " * 100,
+            "last_error": "error " * 100,
+            "open_subgoals": [f"goal-{index} " * 20 for index in range(6)],
+            "discovered_facts": [f"fact-{index} " * 20 for index in range(6)],
+            "failed_actions": [f"failure-{index} " * 20 for index in range(6)],
+            "strategy_notes": [f"strategy-{index} " * 20 for index in range(6)],
+        }
+    )
+    repaired = json.dumps(
+        {
+            "current_state": "At the crossroads.",
+            "last_error": "",
+            "open_subgoals": ["Explore west."],
+            "discovered_facts": ["Cyclops", "cyclops", "Cyclops"],
+            "failed_actions": [],
+            "strategy_notes": ["Map exits exactly."],
+        }
+    )
+    model = PromptRecordingModel(
+        [
+            '{"action":"submit_line","arguments":{"text":"look"}}',
+            oversized,
+            repaired,
+            '{"action":"hangup","arguments":{}}',
+            "{}",
+        ]
+    )
+    result = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test bounded legacy compaction",
+            compact_every_steps=1,
+            legacy_memory_limits=limits,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(FakeAgent(), model, ActivityBudget(max_decision_ticks=2))
+
+    assert result.stop_reason == "hangup"
+    assert result.session_summary.current_state == "At the crossroads."
+    assert result.session_summary.discovered_facts == ("Cyclops", "cyclops")
+    event = result.steps[1].events[0]
+    assert event["repair"]["attempted"] is True
+    assert event["repair"]["status"] == "accepted"
+    assert "limit is 350" in event["repair"]["reason"]
+    assert event["bounds"]["after_chars"] <= 350
+    compaction_chats = [chat for chat in model.chats if "Compact older terminal activity" in chat]
+    assert len(compaction_chats) == 2
+    assert "Hard limits: at most 350 serialized characters" in compaction_chats[0]
+    assert "The first draft needs one bounded repair pass" in compaction_chats[1]
+
+
+def test_legacy_compaction_repairs_implausible_prior_memory_drop(tmp_path):
+    initial_facts = [f"stable fact {index}" for index in range(10)]
+    repaired_facts = initial_facts[:8] + ["new observation"]
+    model = PromptRecordingModel(
+        [
+            '{"action":"submit_line","arguments":{"text":"look"}}',
+            json.dumps({"current_state": "Room one", "discovered_facts": initial_facts}),
+            '{"action":"submit_line","arguments":{"text":"north"}}',
+            json.dumps({"current_state": "Room two", "discovered_facts": ["new observation"]}),
+            json.dumps({"current_state": "Room two", "discovered_facts": repaired_facts}),
+            '{"action":"hangup","arguments":{}}',
+            "{}",
+        ]
+    )
+    limits = LegacyMemoryLimits(
+        repair_min_previous_items=10,
+        repair_min_retained_fraction=0.4,
+    )
+    result = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test destructive compaction guard",
+            compact_every_steps=1,
+            recent_steps_to_keep=1,
+            legacy_memory_limits=limits,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(FakeAgent(), model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.stop_reason == "hangup"
+    assert result.session_summary.discovered_facts == tuple(repaired_facts)
+    repair = result.steps[2].events[0]["repair"]
+    assert repair["attempted"] is True
+    assert repair["status"] == "accepted"
+    assert "retained only 1 of 10 prior list items" in repair["reason"]
+
+
+def test_legacy_compaction_keeps_prior_memory_when_destructive_repair_fails(tmp_path):
+    initial_facts = [f"stable fact {index}" for index in range(10)]
+    model = PromptRecordingModel(
+        [
+            '{"action":"submit_line","arguments":{"text":"look"}}',
+            json.dumps({"current_state": "Room one", "discovered_facts": initial_facts}),
+            '{"action":"submit_line","arguments":{"text":"north"}}',
+            json.dumps({"current_state": "Room two", "discovered_facts": ["only new fact"]}),
+            "",
+            '{"action":"hangup","arguments":{}}',
+            "{}",
+        ]
+    )
+    result = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test failed destructive compaction repair",
+            compact_every_steps=1,
+            recent_steps_to_keep=1,
+            legacy_memory_limits=LegacyMemoryLimits(repair_min_previous_items=10),
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    ).run(FakeAgent(), model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.stop_reason == "hangup"
+    assert result.session_summary.discovered_facts == tuple(initial_facts)
+    event = result.steps[2].events[0]
+    assert event["status"] == "error"
+    assert "unsafe compaction draft could not be repaired" in event["error"]["message"]
+    memory_chat = next(chat for chat in model.chats if "memory patch" in chat)
+    assert "Step 2" in memory_chat
 
 
 def test_failed_compaction_preserves_history_and_retries_on_next_boundary(tmp_path):
@@ -1294,3 +1496,187 @@ def test_zero_recent_steps_window_means_empty_not_unbounded(tmp_path):
 
     # [-0:] would have leaked the entire history into the second prompt.
     assert "Recent steps:\n(none)" in result.steps[1].prompt["user"]
+
+
+def test_failed_memory_commit_retries_and_is_recorded(tmp_path):
+    class CommitFailingModel(ScriptedModelAdapter):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.memory_calls = 0
+
+        def memory_chat(self, messages):
+            self.memory_calls += 1
+            raise ModelError("memory provider down")
+
+    model = CommitFailingModel(
+        [
+            '{"action": "submit_line", "arguments": {"text": "?"}}',
+            '{"action": "hangup", "arguments": {}}',
+        ]
+    )
+    memory = JsonMemoryStore(tmp_path / "memory")
+    runner = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test commit failure", model_error_retries=1),
+        memory_store=memory,
+        log_path=tmp_path / "steps.jsonl",
+    )
+
+    result = runner.run(FakeAgent(), model, ActivityBudget(max_decision_ticks=3))
+
+    assert result.stop_reason == "hangup"
+    # Bounded retry: 1 + model_error_retries attempts, no silent single try.
+    assert model.memory_calls == 2
+    # The failure is durable in the activity log, not swallowed.
+    records = [json.loads(line) for line in (tmp_path / "steps.jsonl").read_text(encoding="utf-8").splitlines()]
+    failures = [record for record in records if record.get("type") == "memory_commit_failed"]
+    assert len(failures) == 1
+    assert "memory provider down" in failures[0]["error"]
+    # Campaign memory is unchanged rather than polluted or half-written.
+    assert memory.load("agent-001") == {}
+
+
+def test_successful_empty_memory_patch_bounds_existing_legacy_document(tmp_path):
+    memory = JsonMemoryStore(tmp_path / "memory")
+    memory.save(
+        "agent-001",
+        {
+            "durable_facts": [f"important-{index}-" + "x" * 100 for index in range(8)],
+            "strategy_notes": ["repeat", "repeat", "y" * 100],
+        },
+    )
+    limits = LegacyMemoryLimits(
+        campaign_max_chars=180,
+        campaign_max_string_chars=30,
+        campaign_max_list_items=3,
+    )
+    model = ScriptedModelAdapter(['{"action":"hangup","arguments":{}}', "{}"])
+
+    result = ActivityRunner(
+        ActivityProfile(name="bbs-menu", objective="test old memory convergence", legacy_memory_limits=limits),
+        memory_store=memory,
+    ).run(FakeAgent(), model, ActivityBudget(max_decision_ticks=1))
+
+    assert result.stop_reason == "hangup"
+    saved = memory.load("agent-001")
+    assert len(json.dumps(saved, ensure_ascii=False, separators=(",", ":"), sort_keys=True)) <= 180
+    assert all(len(item) <= 30 for items in saved.values() for item in items)
+    records = _memory_journal(tmp_path)
+    assert [record["op"] for record in records] == ["legacy_merge_patch", "legacy_bound_campaign"]
+    assert records[0]["fields"]["patch"] == {}
+    assert records[1]["fields"]["bounds"]["changed"] is True
+
+
+def test_failed_memory_commit_leaves_existing_legacy_document_unchanged(tmp_path):
+    class CommitFailingModel(ScriptedModelAdapter):
+        def memory_chat(self, messages):
+            del messages
+            raise ModelError("memory provider down")
+
+    memory = JsonMemoryStore(tmp_path / "memory")
+    original = {"durable_facts": ["x" * 200, "keep this exact old document"]}
+    memory.save("agent-001", original)
+    limits = LegacyMemoryLimits(
+        campaign_max_chars=100,
+        campaign_max_string_chars=20,
+        campaign_max_list_items=1,
+    )
+
+    ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test failed commit isolation",
+            model_error_retries=0,
+            legacy_memory_limits=limits,
+        ),
+        memory_store=memory,
+    ).run(
+        FakeAgent(),
+        CommitFailingModel(['{"action":"hangup","arguments":{}}']),
+        ActivityBudget(max_decision_ticks=1),
+    )
+
+    assert memory.load("agent-001") == original
+
+
+def _memory_journal(tmp_path: Path) -> list[dict]:
+    from tty_agent.memory_subsystem import read_journal_records
+
+    return read_journal_records(tmp_path / "memory" / "agent-001" / "ops.jsonl")
+
+
+def test_legacy_journal_records_compaction_and_commit(tmp_path):
+    agent = SequencedScreenAgent(["S1", "S2", "S3", "S4"])
+    model = ScriptedModelAdapter(
+        [
+            '{"action": "submit_line", "arguments": {"text": "one"}}',
+            '{"action": "submit_line", "arguments": {"text": "two"}}',
+            '{"action": "submit_line", "arguments": {"text": "three"}}',
+            '{"current_state": "Compacted", "last_error": "", "open_subgoals": [], "discovered_facts": [], "failed_actions": [], "strategy_notes": []}',
+            '{"action": "hangup", "arguments": {}}',
+            '{"durable_facts": ["Done."]}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test legacy journal",
+            recent_steps_to_keep=1,
+            compact_every_steps=3,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    runner.run(agent, model, ActivityBudget(max_decision_ticks=6))
+
+    records = _memory_journal(tmp_path)
+    assert [record["op"] for record in records] == ["legacy_replace_summary", "legacy_merge_patch"]
+    summary_record, commit_record = records
+    assert summary_record["accepted"] is True
+    assert summary_record["batch"] == "reconcile"
+    assert summary_record["source_steps"] == [1, 2, 3]
+    assert summary_record["fields"]["summary"]["current_state"] == "Compacted"
+    assert commit_record["accepted"] is True
+    assert commit_record["batch"] == "commit"
+    assert commit_record["fields"]["patch"] == {"durable_facts": ["Done."]}
+    # Same record schema as the structured subsystem's journal.
+    from tty_agent.memory_subsystem import mutation_record
+
+    expected_keys = set(mutation_record(op="x", origin="model", accepted=True, batch="reconcile"))
+    assert all(set(record) == expected_keys for record in records)
+
+
+def test_legacy_journal_records_failures(tmp_path):
+    class FailingUtilityModel(ScriptedModelAdapter):
+        def compaction_chat(self, messages):
+            raise ModelError("compaction provider down")
+
+        def memory_chat(self, messages):
+            raise ModelError("memory provider down")
+
+    model = FailingUtilityModel(
+        [
+            '{"action": "submit_line", "arguments": {"text": "one"}}',
+            '{"action": "submit_line", "arguments": {"text": "two"}}',
+            '{"action": "hangup", "arguments": {}}',
+        ]
+    )
+    runner = ActivityRunner(
+        ActivityProfile(
+            name="bbs-menu",
+            objective="test legacy journal failures",
+            compact_every_steps=2,
+            model_error_retries=0,
+        ),
+        memory_store=JsonMemoryStore(tmp_path / "memory"),
+    )
+
+    result = runner.run(FakeAgent(), model, ActivityBudget(max_decision_ticks=4))
+
+    assert result.stop_reason == "hangup"
+    records = _memory_journal(tmp_path)
+    assert [(record["op"], record["accepted"]) for record in records] == [
+        ("legacy_replace_summary", False),
+        ("legacy_merge_patch", False),
+    ]
+    assert "compaction provider down" in records[0]["reason"]
+    assert "memory provider down" in records[1]["reason"]

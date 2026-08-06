@@ -11,14 +11,15 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
 from typing import Protocol
 
 from .actions import Action, ActionPolicy, parse_action
 
 OutputFilter = Callable[[str], str]
+DEFAULT_HTTP_USER_AGENT = "spree/0.1.1"
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,25 @@ class ModelTimeoutError(ModelError):
 
 class ModelStateError(ModelError):
     """Raised when provider-side conversation state can no longer be resumed."""
+
+
+class ModelOutputTruncated(ModelError):
+    """Raised when a provider exhausts the requested output-token budget."""
+
+    def __init__(
+            self,
+            message: str,
+            *,
+            operation: str,
+            requested_max_tokens: int | None,
+            retry_ceiling: int | None = None,
+            request_metadata: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.requested_max_tokens = requested_max_tokens
+        self.retry_ceiling = retry_ceiling
+        self.request_metadata = dict(request_metadata or {})
 
 
 @dataclass(frozen=True)
@@ -143,6 +163,8 @@ class ModelAdapter(Protocol):
 
     def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch: ...
 
+    def utility_text(self, messages: list[ModelMessage], operation: str = "compaction") -> str: ...
+
 
 class TextChatAdapter:
     """Base class for chat APIs that return plain text."""
@@ -154,38 +176,59 @@ class TextChatAdapter:
     last_response_id: str | None = None
     last_usage: dict[str, object] | None = None
     last_provider_metadata: dict[str, object] | None = None
+    last_request_metadata: dict[str, object] | None = None
     output_filters: tuple[OutputFilter, ...] | None = None
 
     def decide(self, prompt: DecisionPrompt, policy: ActionPolicy | None = None) -> Action:
         self._reset_response_trace()
         self.last_response = self.chat(prompt.messages())
         self.last_parsed_response = self._filter_output(self.last_response).strip()
+        self._ensure_complete_response("decision")
         return parse_action(self.last_parsed_response, policy)
 
     def compact(self, prompt: CompactionPrompt) -> SessionSummary:
-        self._reset_response_trace()
-        self.last_response = self.compaction_chat(prompt.messages()).strip()
-        self.last_parsed_response = self._filter_output(self.last_response).strip()
-        self._ensure_complete_utility_response("compaction")
-        data = _json_mapping_from_text(self.last_parsed_response)
+        text = self.utility_text(prompt.messages(), "compaction")
+        data = _json_mapping_from_text(text)
         if data is None:
-            data = {"current_state": self._fallback_output_text()}
+            # A prose response must never silently replace a structured summary
+            # with one blob and zero facts; failing routes into the runner's
+            # compaction retry/backoff instead.
+            raise ModelError("compaction response was not a JSON object")
         summary = SessionSummary.from_mapping(data)
         if summary.is_empty():
             raise ModelError("compaction returned an empty session summary")
         return summary
 
     def commit_memory(self, prompt: MemoryCommitPrompt) -> MemoryPatch:
-        self._reset_response_trace()
-        self.last_response = self.memory_chat(prompt.messages()).strip()
-        self.last_parsed_response = self._filter_output(self.last_response).strip()
-        self._ensure_complete_utility_response("memory commit")
-        data = _json_mapping_from_text(self.last_parsed_response)
+        text = self.utility_text(prompt.messages(), "memory")
+        data = _json_mapping_from_text(text)
         if data is None:
-            data = {"summary": self._fallback_output_text()}
-        if not data:
-            raise ModelError("memory commit returned an empty patch")
+            # Same rule as compaction: prose must not be persisted as a patch.
+            raise ModelError("memory commit response was not a JSON object")
+        # An explicit `{}` is an honest no-change patch and merges as a no-op.
         return MemoryPatch(data)
+
+    def utility_text(self, messages: list[ModelMessage], operation: str = "compaction") -> str:
+        """Run one utility request with full trace/filter/completeness handling.
+
+        This is the raw text surface memory subsystems build on: it routes to
+        the operation's chat seam (so per-operation reasoning/extra-body
+        settings apply), applies output filters, and raises ``ModelError`` on
+        truncated, incomplete, or empty responses.
+        """
+
+        self._reset_response_trace()
+        if operation == "memory":
+            chat = self.memory_chat
+        elif operation == "audit":
+            chat = self.audit_chat
+        else:
+            chat = self.compaction_chat
+        self.last_response = chat(messages).strip()
+        self.last_parsed_response = self._filter_output(self.last_response).strip()
+        operation_name = {"memory": "memory commit", "audit": "memory audit"}.get(operation, "compaction")
+        self._ensure_complete_response(operation_name)
+        return self.last_parsed_response
 
     def chat(self, messages: list[ModelMessage]) -> str:
         raise NotImplementedError
@@ -199,6 +242,11 @@ class TextChatAdapter:
         """Run a memory-commit request, allowing adapters to select utility settings."""
 
         return self.chat(messages)
+
+    def audit_chat(self, messages: list[ModelMessage]) -> str:
+        """Run a final memory audit, inheriting memory settings by default."""
+
+        return self.memory_chat(messages)
 
     def _filter_output(self, text: str) -> str:
         filtered = text
@@ -214,22 +262,88 @@ class TextChatAdapter:
         self.last_response_id = None
         self.last_usage = None
         self.last_provider_metadata = None
+        self.last_request_metadata = None
 
-    def _fallback_output_text(self) -> str:
-        # Deliberately the filtered text, not the raw response: when filters strip
-        # a response down to nothing the model only emitted reasoning, and raw
-        # reasoning must not be stored as a summary or memory patch.
-        return self.last_parsed_response
-
-    def _ensure_complete_utility_response(self, operation: str) -> None:
+    def _ensure_complete_response(self, operation: str) -> None:
         metadata = self.last_provider_metadata or {}
         finish_reason = metadata.get("finish_reason")
-        if finish_reason in {"length", "max_tokens"}:
-            raise ModelError(f"{operation} response was truncated ({finish_reason=})")
+        stop_reason = metadata.get("stop_reason")
+        if finish_reason in {"length", "max_tokens"} or stop_reason == "max_tokens":
+            reason = finish_reason or stop_reason
+            raise ModelOutputTruncated(
+                f"{operation} response was truncated (reason={reason!r})",
+                operation=operation,
+                requested_max_tokens=None,
+            )
         if metadata.get("status") == "incomplete":
             raise ModelError(f"{operation} response was incomplete: {metadata.get('incomplete_details')!r}")
-        if not self.last_parsed_response:
+        if operation != "decision" and not self.last_parsed_response:
             raise ModelError(f"{operation} returned no usable content")
+
+    def _adaptive_output_request(
+            self,
+            *,
+            operation: str,
+            initial_max_tokens: int,
+            retry_ceiling: int | None,
+            request: Callable[[int], str],
+            remember_max_tokens: Callable[[int], None],
+    ) -> str:
+        """Retry token-limited HTTP calls at a larger, sticky output budget."""
+
+        requested = initial_max_tokens
+        ceiling = max(requested, retry_ceiling if retry_ceiling is not None else requested)
+        attempts: list[dict[str, object]] = []
+        while True:
+            try:
+                response = request(requested)
+            except ModelOutputTruncated as exc:
+                attempts.append(self._output_attempt_record(requested, truncated=True))
+                next_requested = min(ceiling, max(requested + 1, requested * 2))
+                if next_requested <= requested:
+                    self._set_output_request_metadata(operation, initial_max_tokens, requested, ceiling, attempts)
+                    raise ModelOutputTruncated(
+                        str(exc),
+                        operation=operation,
+                        requested_max_tokens=requested,
+                        retry_ceiling=ceiling,
+                        request_metadata=self.last_request_metadata,
+                    ) from exc
+                requested = next_requested
+                remember_max_tokens(requested)
+                continue
+            attempts.append(self._output_attempt_record(requested, truncated=False))
+            self._set_output_request_metadata(operation, initial_max_tokens, requested, ceiling, attempts)
+            return response
+
+    def _output_attempt_record(self, max_tokens: int, *, truncated: bool) -> dict[str, object]:
+        record: dict[str, object] = {
+            "max_tokens": max_tokens,
+            "truncated": truncated,
+        }
+        if self.last_usage is not None:
+            record["usage"] = dict(self.last_usage)
+            reasoning_tokens = _reasoning_token_count(self.last_usage)
+            if reasoning_tokens is not None:
+                record["reasoning_tokens"] = reasoning_tokens
+        return record
+
+    def _set_output_request_metadata(
+            self,
+            operation: str,
+            initial_max_tokens: int,
+            effective_max_tokens: int,
+            retry_ceiling: int,
+            attempts: list[dict[str, object]],
+    ) -> None:
+        self.last_request_metadata = {
+            "operation": operation,
+            "initial_max_tokens": initial_max_tokens,
+            "effective_max_tokens": effective_max_tokens,
+            "retry_ceiling": retry_ceiling,
+            "output_token_retries": max(0, len(attempts) - 1),
+            "attempts": list(attempts),
+        }
 
 
 class OpenAICompatibleAdapter(TextChatAdapter):
@@ -251,6 +365,12 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             compaction_extra_body: dict[str, object] | None = None,
             memory_reasoning: bool | None = None,
             memory_extra_body: dict[str, object] | None = None,
+            compaction_max_tokens: int | None = None,
+            memory_max_tokens: int | None = None,
+            max_tokens_retry_ceiling: int | None = None,
+            compaction_max_tokens_retry_ceiling: int | None = None,
+            memory_max_tokens_retry_ceiling: int | None = None,
+            audit_temperature: float | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -265,29 +385,82 @@ class OpenAICompatibleAdapter(TextChatAdapter):
         self.compaction_extra_body = dict(compaction_extra_body or {})
         self.memory_reasoning = memory_reasoning
         self.memory_extra_body = dict(memory_extra_body or {})
+        self.audit_temperature = temperature if audit_temperature is None else audit_temperature
+        self.compaction_max_tokens = max_tokens if compaction_max_tokens is None else compaction_max_tokens
+        self.memory_max_tokens = max_tokens if memory_max_tokens is None else memory_max_tokens
+        self.max_tokens_retry_ceiling = max_tokens_retry_ceiling
+        self.compaction_max_tokens_retry_ceiling = compaction_max_tokens_retry_ceiling
+        self.memory_max_tokens_retry_ceiling = memory_max_tokens_retry_ceiling
         self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
-        return self._chat(messages, extra_body=self.extra_body)
+        return self._adaptive_output_request(
+            operation="decision",
+            initial_max_tokens=self.max_tokens,
+            retry_ceiling=self.max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(
+                messages,
+                extra_body=self.extra_body,
+                max_tokens=max_tokens,
+                operation="decision",
+            ),
+            remember_max_tokens=lambda value: setattr(self, "max_tokens", value),
+        )
 
     def compaction_chat(self, messages: list[ModelMessage]) -> str:
-        return self._chat(
-            messages,
-            extra_body=_operation_extra_body(
-                self.extra_body,
-                self.compaction_extra_body,
-                self.compaction_reasoning,
+        return self._adaptive_output_request(
+            operation="compaction",
+            initial_max_tokens=self.compaction_max_tokens,
+            retry_ceiling=self.compaction_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(
+                messages,
+                extra_body=_operation_extra_body(
+                    self.extra_body,
+                    self.compaction_extra_body,
+                    self.compaction_reasoning,
+                ),
+                max_tokens=max_tokens,
+                operation="compaction",
             ),
+            remember_max_tokens=lambda value: setattr(self, "compaction_max_tokens", value),
         )
 
     def memory_chat(self, messages: list[ModelMessage]) -> str:
-        return self._chat(
-            messages,
-            extra_body=_operation_extra_body(
-                self.extra_body,
-                self.memory_extra_body,
-                self.memory_reasoning,
+        return self._adaptive_output_request(
+            operation="memory",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(
+                messages,
+                extra_body=_operation_extra_body(
+                    self.extra_body,
+                    self.memory_extra_body,
+                    self.memory_reasoning,
+                ),
+                max_tokens=max_tokens,
+                operation="memory",
             ),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
+        )
+
+    def audit_chat(self, messages: list[ModelMessage]) -> str:
+        extra_body = _operation_extra_body(
+            self.extra_body,
+            self.memory_extra_body,
+            self.memory_reasoning,
+        )
+        extra_body["temperature"] = self.audit_temperature
+        return self._adaptive_output_request(
+            operation="audit",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(
+                messages,
+                extra_body=extra_body,
+                max_tokens=max_tokens,
+                operation="audit",
+            ),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
         )
 
     def _chat(
@@ -295,6 +468,8 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             messages: list[ModelMessage],
             *,
             extra_body: dict[str, object],
+            max_tokens: int,
+            operation: str,
     ) -> str:
         payload = {
             "model": self.model,
@@ -303,6 +478,9 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             "max_tokens": self.max_tokens,
         }
         payload.update(extra_body)
+        # Token ceilings are typed adapter settings, not provider-specific
+        # extra-body fields. Keep the selected operation's ceiling authoritative.
+        payload["max_tokens"] = max_tokens
         response = _post_json(
             f"{self.base_url}/chat/completions",
             payload,
@@ -335,6 +513,13 @@ class OpenAICompatibleAdapter(TextChatAdapter):
             # Silently coercing a malformed message to "" would surface later as
             # an inexplicable invalid-action retry instead of a provider error.
             raise ModelError(f"unexpected OpenAI-compatible response: {response!r}")
+        self.last_response = content
+        if finish_reason in {"length", "max_tokens"}:
+            raise ModelOutputTruncated(
+                f"{operation} response was truncated (finish_reason={finish_reason!r})",
+                operation=operation,
+                requested_max_tokens=max_tokens,
+            )
         return content
 
 
@@ -342,8 +527,9 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
     """Adapter for OpenAI-compatible ``/v1/responses`` servers.
 
     Only terminal decisions participate in the optional provider-side chain.
-    Compaction, memory commits, and campaign-social prompts remain stateless so
-    their utility instructions do not pollute the gameplay conversation.
+    Compaction, memory commits, memory audits, and campaign-social prompts
+    remain stateless so their utility instructions do not pollute the gameplay
+    conversation.
     """
 
     def __init__(
@@ -366,6 +552,12 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
             compaction_extra_body: dict[str, object] | None = None,
             memory_reasoning: bool | None = None,
             memory_extra_body: dict[str, object] | None = None,
+            compaction_max_tokens: int | None = None,
+            memory_max_tokens: int | None = None,
+            max_tokens_retry_ceiling: int | None = None,
+            compaction_max_tokens_retry_ceiling: int | None = None,
+            memory_max_tokens_retry_ceiling: int | None = None,
+            audit_temperature: float | None = None,
     ) -> None:
         if response_id is not None and not stateful:
             raise ValueError("response_id requires stateful Responses mode")
@@ -388,6 +580,12 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
         self.compaction_extra_body = dict(compaction_extra_body or {})
         self.memory_reasoning = memory_reasoning
         self.memory_extra_body = dict(memory_extra_body or {})
+        self.audit_temperature = temperature if audit_temperature is None else audit_temperature
+        self.compaction_max_tokens = max_tokens if compaction_max_tokens is None else compaction_max_tokens
+        self.memory_max_tokens = max_tokens if memory_max_tokens is None else memory_max_tokens
+        self.max_tokens_retry_ceiling = max_tokens_retry_ceiling
+        self.compaction_max_tokens_retry_ceiling = compaction_max_tokens_retry_ceiling
+        self.memory_max_tokens_retry_ceiling = memory_max_tokens_retry_ceiling
         self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
         self.stateful = stateful
         self.response_id = response_id
@@ -430,47 +628,103 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
                 ModelMessage("system", f"{self._decision_instructions}\n\n{prompt.system}"),
                 ModelMessage("user", prompt.user),
             ]
-        self.last_response = self._request(
-            request_messages,
-            use_state=use_state,
-            allow_state_restart=prompt.stage == "bootstrap",
-            extra_body=self.extra_body,
+        self.last_response = self._adaptive_output_request(
+            operation="decision",
+            initial_max_tokens=self.max_tokens,
+            retry_ceiling=self.max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._request(
+                request_messages,
+                use_state=use_state,
+                allow_state_restart=prompt.stage == "bootstrap",
+                extra_body=self.extra_body,
+                max_output_tokens=max_tokens,
+                operation="decision",
+            ),
+            remember_max_tokens=lambda value: setattr(self, "max_tokens", value),
         )
         self.last_parsed_response = self._filter_output(self.last_response).strip()
+        self._ensure_complete_response("decision")
         return parse_action(self.last_parsed_response, policy)
 
     def chat(self, messages: list[ModelMessage]) -> str:
-        return self._request(
-            messages,
-            use_state=False,
-            allow_state_restart=False,
-            extra_body=self.extra_body,
+        return self._adaptive_output_request(
+            operation="decision",
+            initial_max_tokens=self.max_tokens,
+            retry_ceiling=self.max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._request(
+                messages,
+                use_state=False,
+                allow_state_restart=False,
+                extra_body=self.extra_body,
+                max_output_tokens=max_tokens,
+                operation="decision",
+            ),
+            remember_max_tokens=lambda value: setattr(self, "max_tokens", value),
         )
 
     def compaction_chat(self, messages: list[ModelMessage]) -> str:
-        return self._request(
-            messages,
-            use_state=False,
-            allow_state_restart=False,
-            extra_body=_operation_extra_body(
-                self.extra_body,
-                self.compaction_extra_body,
-                self.compaction_reasoning,
-                reasoning_format="responses_effort",
+        return self._adaptive_output_request(
+            operation="compaction",
+            initial_max_tokens=self.compaction_max_tokens,
+            retry_ceiling=self.compaction_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._request(
+                messages,
+                use_state=False,
+                allow_state_restart=False,
+                extra_body=_operation_extra_body(
+                    self.extra_body,
+                    self.compaction_extra_body,
+                    self.compaction_reasoning,
+                    reasoning_format="responses_effort",
+                ),
+                max_output_tokens=max_tokens,
+                operation="compaction",
             ),
+            remember_max_tokens=lambda value: setattr(self, "compaction_max_tokens", value),
         )
 
     def memory_chat(self, messages: list[ModelMessage]) -> str:
-        return self._request(
-            messages,
-            use_state=False,
-            allow_state_restart=False,
-            extra_body=_operation_extra_body(
-                self.extra_body,
-                self.memory_extra_body,
-                self.memory_reasoning,
-                reasoning_format="responses_effort",
+        return self._adaptive_output_request(
+            operation="memory",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._request(
+                messages,
+                use_state=False,
+                allow_state_restart=False,
+                extra_body=_operation_extra_body(
+                    self.extra_body,
+                    self.memory_extra_body,
+                    self.memory_reasoning,
+                    reasoning_format="responses_effort",
+                ),
+                max_output_tokens=max_tokens,
+                operation="memory",
             ),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
+        )
+
+    def audit_chat(self, messages: list[ModelMessage]) -> str:
+        extra_body = _operation_extra_body(
+            self.extra_body,
+            self.memory_extra_body,
+            self.memory_reasoning,
+            reasoning_format="responses_effort",
+        )
+        extra_body["temperature"] = self.audit_temperature
+        return self._adaptive_output_request(
+            operation="audit",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._request(
+                messages,
+                use_state=False,
+                allow_state_restart=False,
+                extra_body=extra_body,
+                max_output_tokens=max_tokens,
+                operation="audit",
+            ),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
         )
 
     def _request(
@@ -480,6 +734,8 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
             use_state: bool,
             allow_state_restart: bool,
             extra_body: dict[str, object],
+            max_output_tokens: int,
+            operation: str,
     ) -> str:
         instructions, response_input = _responses_prompt(messages)
         payload: dict[str, object] = {
@@ -487,7 +743,7 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
             **extra_body,
             "model": self.model,
             "input": response_input,
-            "max_output_tokens": self.max_tokens,
+            "max_output_tokens": max_output_tokens,
             "store": use_state,
         }
         if instructions:
@@ -513,18 +769,18 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
             payload.pop("previous_response_id", None)
             response = self._post_response(payload)
 
-        status = response.get("status")
-        if status in {"failed", "cancelled"}:
-            raise ModelError(f"Responses request ended with status {status!r}: {response.get('error')!r}")
-
         response_id = _optional_nonempty_string(response.get("id"))
-        if use_state:
-            if response_id is None:
-                raise ModelError(f"stored Responses result had no response id: {response!r}")
-            self._set_response_id(response_id)
         self.last_response_id = response_id
         self.last_usage = _optional_mapping(response.get("usage"))
         self.last_reasoning = _responses_reasoning_text(response)
+        status = response.get("status")
+        try:
+            output_text = _responses_output_text(response)
+        except ModelError:
+            if status != "incomplete":
+                raise
+            output_text = ""
+        self.last_response = output_text
         provider_metadata: dict[str, object] = {}
         if isinstance(status, str):
             provider_metadata["status"] = status
@@ -532,7 +788,25 @@ class ResponsesCompatibleAdapter(TextChatAdapter):
         if incomplete_details is not None:
             provider_metadata["incomplete_details"] = incomplete_details
         self.last_provider_metadata = provider_metadata or None
-        return _responses_output_text(response)
+        if status in {"failed", "cancelled"}:
+            raise ModelError(f"Responses request ended with status {status!r}: {response.get('error')!r}")
+        if status == "incomplete":
+            reason = str((incomplete_details or {}).get("reason", ""))
+            if reason in {"max_output_tokens", "max_tokens"}:
+                # Keep the locally committed response id on the last complete
+                # response. Retrying the same delta therefore creates a fresh
+                # sibling, not a child of this incomplete result.
+                raise ModelOutputTruncated(
+                    f"{operation} response was truncated (incomplete reason={reason!r})",
+                    operation=operation,
+                    requested_max_tokens=max_output_tokens,
+                )
+            raise ModelError(f"Responses request was incomplete: {incomplete_details!r}")
+        if use_state:
+            if response_id is None:
+                raise ModelError(f"stored Responses result had no response id: {response!r}")
+            self._set_response_id(response_id)
+        return output_text
 
     def _post_response(self, payload: dict[str, object]) -> dict[str, object]:
         return _post_json(
@@ -616,6 +890,12 @@ class AnthropicAdapter(TextChatAdapter):
             max_tokens: int = 512,
             cache_system_prompt: bool = True,
             output_filters: tuple[OutputFilter, ...] | None = None,
+            compaction_max_tokens: int | None = None,
+            memory_max_tokens: int | None = None,
+            max_tokens_retry_ceiling: int | None = None,
+            compaction_max_tokens_retry_ceiling: int | None = None,
+            memory_max_tokens_retry_ceiling: int | None = None,
+            audit_temperature: float | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key if api_key is not None else os.getenv("ANTHROPIC_API_KEY", "")
@@ -624,11 +904,65 @@ class AnthropicAdapter(TextChatAdapter):
         self.anthropic_version = anthropic_version
         self.timeout = timeout
         self.temperature = temperature
+        self.audit_temperature = temperature if audit_temperature is None else audit_temperature
         self.max_tokens = max_tokens
+        self.compaction_max_tokens = max_tokens if compaction_max_tokens is None else compaction_max_tokens
+        self.memory_max_tokens = max_tokens if memory_max_tokens is None else memory_max_tokens
+        self.max_tokens_retry_ceiling = max_tokens_retry_ceiling
+        self.compaction_max_tokens_retry_ceiling = compaction_max_tokens_retry_ceiling
+        self.memory_max_tokens_retry_ceiling = memory_max_tokens_retry_ceiling
         self.cache_system_prompt = cache_system_prompt
         self.output_filters = output_filters_for_model(model) if output_filters is None else output_filters
 
     def chat(self, messages: list[ModelMessage]) -> str:
+        return self._adaptive_output_request(
+            operation="decision",
+            initial_max_tokens=self.max_tokens,
+            retry_ceiling=self.max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(messages, max_tokens=max_tokens, operation="decision"),
+            remember_max_tokens=lambda value: setattr(self, "max_tokens", value),
+        )
+
+    def compaction_chat(self, messages: list[ModelMessage]) -> str:
+        return self._adaptive_output_request(
+            operation="compaction",
+            initial_max_tokens=self.compaction_max_tokens,
+            retry_ceiling=self.compaction_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(messages, max_tokens=max_tokens, operation="compaction"),
+            remember_max_tokens=lambda value: setattr(self, "compaction_max_tokens", value),
+        )
+
+    def memory_chat(self, messages: list[ModelMessage]) -> str:
+        return self._adaptive_output_request(
+            operation="memory",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(messages, max_tokens=max_tokens, operation="memory"),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
+        )
+
+    def audit_chat(self, messages: list[ModelMessage]) -> str:
+        return self._adaptive_output_request(
+            operation="audit",
+            initial_max_tokens=self.memory_max_tokens,
+            retry_ceiling=self.memory_max_tokens_retry_ceiling,
+            request=lambda max_tokens: self._chat(
+                messages,
+                max_tokens=max_tokens,
+                operation="audit",
+                temperature=self.audit_temperature,
+            ),
+            remember_max_tokens=lambda value: setattr(self, "memory_max_tokens", value),
+        )
+
+    def _chat(
+            self,
+            messages: list[ModelMessage],
+            *,
+            max_tokens: int,
+            operation: str,
+            temperature: float | None = None,
+    ) -> str:
         system = "\n\n".join(message.content for message in messages if message.role == "system")
         chat_messages = [
             {"role": message.role, "content": message.content}
@@ -637,8 +971,8 @@ class AnthropicAdapter(TextChatAdapter):
         ]
         payload = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            "max_tokens": max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
             "messages": chat_messages,
         }
         if system:
@@ -667,6 +1001,9 @@ class AnthropicAdapter(TextChatAdapter):
             raise ModelError(f"unexpected Anthropic response: {response!r}") from exc
         if not isinstance(parts, list):
             raise ModelError(f"unexpected Anthropic response: {response!r}")
+        self.last_usage = _optional_mapping(response.get("usage"))
+        stop_reason = response.get("stop_reason")
+        self.last_provider_metadata = {"stop_reason": stop_reason} if isinstance(stop_reason, str) else None
         texts: list[str] = []
         for part in parts:
             if not isinstance(part, dict):
@@ -676,11 +1013,19 @@ class AnthropicAdapter(TextChatAdapter):
             if not isinstance(part.get("text"), str):
                 raise ModelError(f"unexpected Anthropic response: {response!r}")
             texts.append(part["text"])
+        content = "".join(texts)
+        self.last_response = content
+        if stop_reason == "max_tokens":
+            raise ModelOutputTruncated(
+                f"{operation} response was truncated (stop_reason='max_tokens')",
+                operation=operation,
+                requested_max_tokens=max_tokens,
+            )
         if not texts:
             # Thinking-only or empty content is a malformed completion for this
             # API shape; do not coerce it to an empty reply.
             raise ModelError(f"Anthropic response contained no text blocks: {response!r}")
-        return "".join(texts)
+        return content
 
 
 class SubprocessCliAdapter(TextChatAdapter):
@@ -704,6 +1049,28 @@ class SubprocessCliAdapter(TextChatAdapter):
             return
         self.session_file.parent.mkdir(parents=True, exist_ok=True)
         self.session_file.write_text(self.session_id + "\n", encoding="utf-8")
+
+    def compaction_chat(self, messages: list[ModelMessage]) -> str:
+        return self._isolated_utility_chat(messages)
+
+    def memory_chat(self, messages: list[ModelMessage]) -> str:
+        return self._isolated_utility_chat(messages)
+
+    def _isolated_utility_chat(self, messages: list[ModelMessage]) -> str:
+        """Run a utility request outside the gameplay conversation.
+
+        A stateful CLI session must only contain decision turns; appending a
+        compaction, memory, or audit request to it would pollute the resumed
+        gameplay context, so utility calls always run as one-shot stateless
+        commands.
+        """
+
+        previous_stateful, previous_session = self.stateful, self.session_id
+        self.stateful = False
+        try:
+            return self.chat(messages)
+        finally:
+            self.stateful, self.session_id = previous_stateful, previous_session
 
 
 class CodexCliAdapter(SubprocessCliAdapter):
@@ -1222,6 +1589,9 @@ def _post_json(
         data=body,
         headers={
             "Content-Type": "application/json",
+            # urllib otherwise identifies every request as Python-urllib/*,
+            # which some provider edge filters reject before authentication.
+            "User-Agent": DEFAULT_HTTP_USER_AGENT,
             **(headers or {}),
         },
         method="POST",
@@ -1282,6 +1652,20 @@ def _optional_nonempty_string(value: object) -> str | None:
 
 def _optional_mapping(value: object) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
+
+
+def _reasoning_token_count(usage: dict[str, object]) -> int | None:
+    direct = usage.get("reasoning_tokens")
+    if isinstance(direct, int) and not isinstance(direct, bool):
+        return direct
+    for key in ("completion_tokens_details", "output_tokens_details"):
+        details = usage.get(key)
+        if not isinstance(details, dict):
+            continue
+        value = details.get("reasoning_tokens")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 def _responses_prompt(messages: list[ModelMessage]) -> tuple[str, object]:

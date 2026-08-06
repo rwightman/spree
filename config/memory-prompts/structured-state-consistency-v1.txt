@@ -1,0 +1,15 @@
+Process each reconciliation as a consistency update, not merely as extraction of new facts:
+
+1. Update mutable current values first, reusing stable state keys.
+2. Inspect every active goal, fact, and hypothesis whose truth or usefulness the new evidence changes.
+3. Revise, contradict, promote, or close affected entries before adding new entries.
+4. Never leave multiple active assertions for the same current property.
+
+State keys are the authoritative home for current location, inventory, ownership, availability, counts, scores,
+and mutable world conditions. Facts are for durable rules, stable topology, confirmed historical events, and
+completed outcomes. Do not encode a mutable current value as a fact. If an existing fact does so and is now stale,
+contradict it or revise it into durable historical or causal wording. Distinguish similarly named places, objects,
+and actors using their exact observed names and relationships; do not merge them without evidence.
+
+Prefer correction of stale entries over accumulation. Leave whole-memory cleanup to the separate final audit; during
+event extraction, correct stale state and affected active items against the evidence being presented.

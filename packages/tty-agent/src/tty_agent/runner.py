@@ -12,7 +12,15 @@ from .agent import ActionExecution, TerminalAgent
 from .actions import Action, ActionError, ActionPolicy, render_action_schema
 from .evaluation import EvaluationProfile, EvaluationRecord, EvaluationResult, EvaluationSource
 from .hints import InputModalityProfile, ObservationHints
-from .memory import JsonMemoryStore
+from .ids import validate_agent_id
+from .memory import JsonMemoryStore, MemoryDocumentLimits, bound_memory_document
+from .memory_subsystem import (
+    MemoryEvent,
+    MemoryHandle,
+    MemorySubsystem,
+    mutation_record,
+    write_journal_records,
+)
 from .models import (
     CompactionPrompt,
     DecisionPrompt,
@@ -20,6 +28,7 @@ from .models import (
     MemoryPatch,
     ModelAdapter,
     ModelError,
+    ModelOutputTruncated,
     ModelStateError,
     SessionSummary,
 )
@@ -89,6 +98,215 @@ class ActivityBudget:
 
 
 @dataclass(frozen=True)
+class LegacyMemoryLimits:
+    """Bounded working and durable memory for the legacy rewrite path."""
+
+    summary_max_chars: int = 8_000
+    current_state_max_chars: int = 1_000
+    last_error_max_chars: int = 500
+    item_max_chars: int = 400
+    max_open_subgoals: int = 10
+    max_discovered_facts: int = 40
+    max_failed_actions: int = 12
+    max_strategy_notes: int = 12
+    repair_min_previous_items: int = 10
+    repair_min_retained_fraction: float = 0.4
+    campaign_max_chars: int = 12_000
+    campaign_max_string_chars: int = 500
+    campaign_max_list_items: int = 40
+
+    def __post_init__(self) -> None:
+        positive = (
+            "summary_max_chars",
+            "current_state_max_chars",
+            "last_error_max_chars",
+            "item_max_chars",
+            "max_open_subgoals",
+            "max_discovered_facts",
+            "max_failed_actions",
+            "max_strategy_notes",
+            "campaign_max_chars",
+            "campaign_max_string_chars",
+            "campaign_max_list_items",
+        )
+        for name in positive:
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1")
+        empty_summary_chars = _session_summary_chars(SessionSummary())
+        if self.summary_max_chars < empty_summary_chars:
+            raise ValueError(
+                f"summary_max_chars must be >= {empty_summary_chars} to fit the empty summary schema"
+            )
+        if self.repair_min_previous_items < 0:
+            raise ValueError("repair_min_previous_items must be >= 0")
+        if not 0.0 <= self.repair_min_retained_fraction <= 1.0:
+            raise ValueError("repair_min_retained_fraction must be between 0 and 1")
+
+    def campaign_limits(self) -> MemoryDocumentLimits:
+        return MemoryDocumentLimits(
+            max_document_chars=self.campaign_max_chars,
+            max_string_chars=self.campaign_max_string_chars,
+            max_list_items=self.campaign_max_list_items,
+        )
+
+
+def _bound_session_summary(
+        summary: SessionSummary,
+        limits: LegacyMemoryLimits,
+) -> tuple[SessionSummary, dict[str, Any]]:
+    stats = {
+        "clipped_strings": 0,
+        "deduped_items": 0,
+        "count_trimmed_items": 0,
+        "total_trimmed_items": 0,
+    }
+    current_state = _bound_legacy_string(summary.current_state, limits.current_state_max_chars, stats)
+    last_error = _bound_legacy_string(summary.last_error, limits.last_error_max_chars, stats)
+    list_limits = {
+        "open_subgoals": limits.max_open_subgoals,
+        "discovered_facts": limits.max_discovered_facts,
+        "failed_actions": limits.max_failed_actions,
+        "strategy_notes": limits.max_strategy_notes,
+    }
+    values: dict[str, list[str]] = {}
+    for key, max_items in list_limits.items():
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in getattr(summary, key):
+            item = _bound_legacy_string(raw, limits.item_max_chars, stats)
+            if not item:
+                continue
+            # Only exact repeats are safe to collapse. Case and punctuation
+            # can distinguish proper names, room labels, and command tokens.
+            identity = item
+            if identity in seen:
+                stats["deduped_items"] += 1
+                continue
+            seen.add(identity)
+            normalized.append(item)
+        if len(normalized) > max_items:
+            stats["count_trimmed_items"] += len(normalized) - max_items
+            normalized = normalized[:max_items]
+        values[key] = normalized
+
+    def build() -> SessionSummary:
+        return SessionSummary(
+            current_state=current_state,
+            last_error=last_error,
+            open_subgoals=tuple(values["open_subgoals"]),
+            discovered_facts=tuple(values["discovered_facts"]),
+            failed_actions=tuple(values["failed_actions"]),
+            strategy_notes=tuple(values["strategy_notes"]),
+        )
+
+    bounded = build()
+    # Lists are model-ordered by future value. Remove their tails in a stable
+    # low-value-first section order until the whole working set fits.
+    prune_order = ("failed_actions", "strategy_notes", "discovered_facts", "open_subgoals")
+    while _session_summary_chars(bounded) > limits.summary_max_chars:
+        removed = False
+        for key in prune_order:
+            if values[key]:
+                values[key].pop()
+                stats["total_trimmed_items"] += 1
+                removed = True
+                bounded = build()
+                break
+        if removed:
+            continue
+        excess = _session_summary_chars(bounded) - limits.summary_max_chars
+        if last_error:
+            last_error = last_error[: max(0, len(last_error) - max(1, excess))]
+        elif current_state:
+            current_state = current_state[: max(0, len(current_state) - max(1, excess))]
+        else:
+            break
+        stats["clipped_strings"] += 1
+        bounded = build()
+
+    before_counts = _session_summary_counts(summary)
+    after_counts = _session_summary_counts(bounded)
+    return bounded, {
+        "changed": bounded != summary,
+        "before_chars": _session_summary_chars(summary),
+        "after_chars": _session_summary_chars(bounded),
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        **stats,
+    }
+
+
+def _bound_legacy_string(value: str, limit: int, stats: dict[str, int]) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    stats["clipped_strings"] += 1
+    marker = "…"
+    return value[: max(0, limit - len(marker))] + marker
+
+
+def _session_summary_chars(summary: SessionSummary) -> int:
+    return len(json.dumps(summary.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+
+
+def _session_summary_counts(summary: SessionSummary) -> dict[str, int]:
+    return {
+        "open_subgoals": len(summary.open_subgoals),
+        "discovered_facts": len(summary.discovered_facts),
+        "failed_actions": len(summary.failed_actions),
+        "strategy_notes": len(summary.strategy_notes),
+    }
+
+
+@dataclass(frozen=True)
+class _LegacyRepairNeed:
+    kind: Literal["bounds", "retention"]
+    reason: str
+
+
+def _legacy_compaction_repair_need(
+        previous: SessionSummary,
+        proposed: SessionSummary,
+        limits: LegacyMemoryLimits,
+        *,
+        proposed_chars: int | None = None,
+        bounds_violated: bool = False,
+) -> _LegacyRepairNeed | None:
+    proposed_chars = _session_summary_chars(proposed) if proposed_chars is None else proposed_chars
+    previous_items = sum(_session_summary_counts(previous).values())
+    proposed_items = sum(_session_summary_counts(proposed).values())
+    if (
+        previous_items >= limits.repair_min_previous_items
+        and proposed_items < previous_items * limits.repair_min_retained_fraction
+    ):
+        return _LegacyRepairNeed(
+            kind="retention",
+            reason=(
+                f"draft retained only {proposed_items} of {previous_items} prior list items; "
+                f"minimum expected fraction is {limits.repair_min_retained_fraction:g}"
+            ),
+        )
+    if proposed_chars > limits.summary_max_chars:
+        return _LegacyRepairNeed(
+            kind="bounds",
+            reason=f"draft has {proposed_chars} characters; limit is {limits.summary_max_chars}",
+        )
+    if bounds_violated:
+        return _LegacyRepairNeed(
+            kind="bounds",
+            reason="draft exceeded one or more configured field or item-count limits",
+        )
+    return None
+
+
+def _summary_bounds_violated(bounds: dict[str, Any]) -> bool:
+    return any(
+        int(bounds.get(key, 0)) > 0
+        for key in ("clipped_strings", "count_trimmed_items", "total_trimmed_items")
+    )
+
+
+@dataclass(frozen=True)
 class ActivityProfile:
     name: str
     objective: str
@@ -105,6 +323,7 @@ class ActivityProfile:
     compact_recent_chars: int = 12_000
     invalid_json_retries: int = 1
     model_error_retries: int = 1
+    legacy_memory_limits: LegacyMemoryLimits = field(default_factory=LegacyMemoryLimits)
     include_model_responses_in_context: bool = False
     prompt_mode: PromptMode = "stateless_full"
     prompt_layout: PromptLayout = "timeline_first"
@@ -199,6 +418,7 @@ class ActivityRunState:
     last_action_for_hints: Action | None = None
     active_profile: ActivityProfile | None = None
     active_route_name: str = "default"
+    memory_handle: MemoryHandle | None = None
     decision_prompts_sent: dict[str, int] = field(default_factory=dict)
     evaluation_records: list[EvaluationRecord] = field(default_factory=list)
     response_pending: bool = False
@@ -217,6 +437,20 @@ class PreparedActivityStep:
     terminal_step: StepRecord | None = None
 
 
+@dataclass(frozen=True)
+class _LegacyCompactionResult:
+    summary: SessionSummary
+    bounds: dict[str, Any]
+    repair: dict[str, Any]
+    model_response: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _LegacyCommitResult:
+    patch: MemoryPatch
+    accepted: bool
+
+
 class ActivityRunner:
     def __init__(
             self,
@@ -226,6 +460,8 @@ class ActivityRunner:
             run_objective: str = "",
             evaluation_profile: EvaluationProfile | None = None,
             evaluation_log_path: Path | str | None = None,
+            memory_subsystem: MemorySubsystem | None = None,
+            memory_context_id: str | None = None,
     ) -> None:
         self.profile = profile
         self.memory_store = memory_store or JsonMemoryStore()
@@ -233,6 +469,10 @@ class ActivityRunner:
         self.run_objective = run_objective.strip()
         self.evaluation_profile = evaluation_profile
         self.evaluation_log_path = Path(evaluation_log_path) if evaluation_log_path else None
+        # Optional swappable memory subsystem (docs/memory-simple.md). When
+        # set, it replaces the legacy compaction + campaign-memory paths.
+        self.memory_subsystem = memory_subsystem
+        self.memory_context_id = memory_context_id
 
     def run(self, agent: TerminalAgent, model: ModelAdapter, budget: ActivityBudget | None = None) -> ActivityResult:
         return self._run(agent, model, budget, stop_on_completion=True)
@@ -244,13 +484,32 @@ class ActivityRunner:
             budget: ActivityBudget | None = None,
     ) -> ActivityRunState:
         agent_id = getattr(agent, "agent_id", "agent")
+        memory_handle: MemoryHandle | None = None
+        campaign_memory: dict[str, Any] = {}
+        if self.memory_subsystem is not None:
+            context_id = self.memory_context_id or self.profile.name
+            memory_handle = self.memory_subsystem.open_context(agent_id, context_id)
+            # Arm identity in the run log, so metric tooling can attribute the
+            # run's journal to a subsystem + fingerprint set.
+            self._append_log_record(
+                {
+                    "type": "memory_context",
+                    "subsystem": getattr(self.memory_subsystem, "name", ""),
+                    "fingerprints": self.memory_subsystem.fingerprints(),
+                    "agent_id": agent_id,
+                    "context_id": context_id,
+                }
+            )
+        else:
+            campaign_memory = self.memory_store.load(agent_id)
         return ActivityRunState(
             agent=agent,
             model=model,
             budget=budget or ActivityBudget(),
             agent_id=agent_id,
-            campaign_memory=self.memory_store.load(agent_id),
+            campaign_memory=campaign_memory,
             active_profile=self.profile,
+            memory_handle=memory_handle,
         )
 
     def run_step(
@@ -324,7 +583,13 @@ class ActivityRunner:
                 )
             )
 
-        unsummarized_steps = state.recent_steps[state.summarized_recent_steps:]
+        if state.memory_handle is not None:
+            reconcile_outcome = state.memory_handle.maybe_reconcile(state.model)
+            if reconcile_outcome is not None:
+                route_events.append({"type": "memory_reconcile", **reconcile_outcome.to_dict()})
+        unsummarized_steps = (
+            [] if state.memory_handle is not None else (state.recent_steps[state.summarized_recent_steps:])
+        )
         if unsummarized_steps and self._should_compact(
             active_profile,
             state.all_steps,
@@ -332,7 +597,7 @@ class ActivityRunner:
             retry_after_step=state.compaction_retry_after_step,
         ):
             try:
-                session_summary = self._compact(
+                compaction = self._compact(
                     active_profile,
                     state.model,
                     state.session_summary,
@@ -349,8 +614,20 @@ class ActivityRunner:
                         error=exc,
                     )
                 )
+                self._write_legacy_memory_record(
+                    state.agent_id,
+                    mutation_record(
+                        op="legacy_replace_summary",
+                        origin="model",
+                        accepted=False,
+                        batch="reconcile",
+                        section="summary",
+                        reason=str(exc),
+                        source_steps=tuple(step.step for step in unsummarized_steps),
+                    ),
+                )
             else:
-                state.session_summary = session_summary
+                state.session_summary = compaction.summary
                 state.recent_steps = _recent_window(state.recent_steps, active_profile.recent_steps_to_keep)
                 state.summarized_recent_steps = len(state.recent_steps)
                 state.compaction_retry_after_step = 0
@@ -358,8 +635,27 @@ class ActivityRunner:
                     self._compaction_event(
                         state.model,
                         unsummarized_steps,
-                        summary=session_summary,
+                        summary=compaction.summary,
+                        bounds=compaction.bounds,
+                        repair=compaction.repair,
+                        model_response=compaction.model_response,
                     )
+                )
+                self._write_legacy_memory_record(
+                    state.agent_id,
+                    mutation_record(
+                        op="legacy_replace_summary",
+                        origin="model",
+                        accepted=True,
+                        batch="reconcile",
+                        section="summary",
+                        source_steps=tuple(step.step for step in unsummarized_steps),
+                        fields={
+                            "summary": compaction.summary.to_dict(),
+                            "bounds": compaction.bounds,
+                            "repair": compaction.repair,
+                        },
+                    ),
                 )
 
         hints = ObservationHints.from_observation(
@@ -390,6 +686,25 @@ class ActivityRunner:
             # profile must bootstrap again before it can safely send deltas.
             state.decision_prompts_sent.clear()
             profile_prompt_count = 0
+        memory_text: str | None = None
+        if state.memory_handle is not None:
+            if prompt_stage == "bootstrap":
+                # A bootstrap prompt seeds a fresh context (initial or after
+                # state loss) and must not lose pending history that cadence
+                # had not folded yet: drain the whole backlog in forced
+                # catch-up passes (free when nothing is pending), then render
+                # the larger bootstrap view. On failure, whatever stayed
+                # pending is rendered as raw evidence by render_bootstrap.
+                while True:
+                    catchup_outcome = state.memory_handle.maybe_reconcile(state.model, force=True)
+                    if catchup_outcome is None:
+                        break
+                    route_events.append({"type": "memory_reconcile", **catchup_outcome.to_dict()})
+                    if catchup_outcome.status == "failed":
+                        break
+                memory_text = state.memory_handle.render_bootstrap()
+            else:
+                memory_text = state.memory_handle.render_context()
         prompt = self._build_decision_prompt(
             active_profile,
             agent_id=state.agent_id,
@@ -399,6 +714,7 @@ class ActivityRunner:
             budget=state.budget,
             prompt_module_results=prompt_module_results,
             prompt_stage=prompt_stage,
+            memory_text=memory_text,
         )
 
         action, validation = self._decide_with_retry(active_profile, state.model, prompt)
@@ -489,6 +805,7 @@ class ActivityRunner:
         state.all_steps.append(step)
         state.recent_steps.append(step)
         self._write_step(step)
+        self._observe_memory_event(state, step)
         state.previous_observation = observation
         state.last_action_for_hints = executed_action
         state.response_pending = bool(executed_action is not None and executed_action.action != "hangup")
@@ -514,17 +831,47 @@ class ActivityRunner:
         self._drain_final_observation(state)
         self._run_final_evaluation_probe(state)
 
-        if self._has_decision_steps(state.all_steps) and state.last_observation is not None:
+        if state.memory_handle is not None:
+            try:
+                if self._has_decision_steps(state.all_steps):
+                    commit_outcome = state.memory_handle.commit(state.model)
+                    self._append_log_record({"type": "memory_commit", **commit_outcome.to_dict()})
+            finally:
+                state.memory_handle.close()
+                state.memory_handle = None
+        elif self._has_decision_steps(state.all_steps) and state.last_observation is not None:
             active_profile = state.active_profile or self.profile
-            patch = self._commit_memory(
+            commit = self._commit_memory(
                 active_profile,
                 state.model,
                 state.campaign_memory,
                 state.session_summary,
                 state.recent_steps,
                 state.last_observation,
+                state.agent_id,
             )
-            self.memory_store.save_patch(state.agent_id, patch)
+            if commit.accepted:
+                _saved, bound_report = self.memory_store.save_patch_with_report(
+                    state.agent_id,
+                    commit.patch,
+                    limits=active_profile.legacy_memory_limits.campaign_limits(),
+                )
+                if bound_report["document"]["changed"]:
+                    self._write_legacy_memory_record(
+                        state.agent_id,
+                        mutation_record(
+                            op="legacy_bound_campaign",
+                            origin="system",
+                            accepted=True,
+                            batch="commit",
+                            section="campaign",
+                            reason="configured durable-memory bounds",
+                            fields={"bounds": bound_report["document"]},
+                        ),
+                    )
+            # A failed commit leaves the old document byte-for-byte alone. A
+            # successful explicit `{}` still passes through the bounded store
+            # path, allowing old pre-limit memory to converge safely.
 
         active_profile = state.active_profile or self.profile
         return ActivityResult(
@@ -548,16 +895,26 @@ class ActivityRunner:
             stop_on_completion: bool = True,
     ) -> ActivityResult:
         state = self.start_state(agent, model, budget)
-        while not state.completed and state.budget.remaining():
-            self.run_step(
-                state,
-                profile_selector=profile_selector,
-                stop_on_completion=stop_on_completion,
-            )
-        if not state.completed and not state.budget.remaining():
-            state.stop_reason = "budget"
-            state.completed = True
-        return self.finish_state(state)
+        try:
+            while not state.completed and state.budget.remaining():
+                self.run_step(
+                    state,
+                    profile_selector=profile_selector,
+                    stop_on_completion=stop_on_completion,
+                )
+            if not state.completed and not state.budget.remaining():
+                state.stop_reason = "budget"
+                state.completed = True
+            return self.finish_state(state)
+        except BaseException:
+            # An unexpected model/agent/prompt failure must not strand the
+            # memory-context lock behind a live traceback reference.
+            if state.memory_handle is not None:
+                try:
+                    state.memory_handle.close()
+                finally:
+                    state.memory_handle = None
+            raise
 
     def _build_decision_prompt(
             self,
@@ -569,6 +926,7 @@ class ActivityRunner:
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
             prompt_stage: PromptStage,
+            memory_text: str | None = None,
     ) -> DecisionPrompt:
         if profile.prompt_mode == "stateful_delta" and prompt_stage == "delta":
             return self._build_stateful_delta_prompt(
@@ -578,6 +936,7 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
                 prompt_module_results=prompt_module_results,
+                memory_text=memory_text,
             )
         return self._build_stateless_full_prompt(
             profile,
@@ -588,7 +947,23 @@ class ActivityRunner:
             budget=budget,
             prompt_module_results=prompt_module_results,
             prompt_stage=prompt_stage,
+            memory_text=memory_text,
         )
+
+    def _memory_prompt_sections(
+            self,
+            campaign_memory: dict[str, Any],
+            session_summary: SessionSummary,
+            memory_text: str | None,
+    ) -> list[str]:
+        # A memory subsystem owns the whole memory section of the prompt;
+        # otherwise the legacy campaign-memory + session-summary pair renders.
+        if memory_text is not None:
+            return [f"Memory:\n{memory_text}"]
+        return [
+            f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
+            f"Session summary: {self._summary_text(session_summary)}",
+        ]
 
     def _build_stateless_full_prompt(
             self,
@@ -600,6 +975,7 @@ class ActivityRunner:
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
             prompt_stage: PromptStage,
+            memory_text: str | None = None,
     ) -> DecisionPrompt:
         system = self._build_full_system_prompt(profile, prompt_stage)
         if profile.prompt_layout == "cache_friendly":
@@ -611,6 +987,7 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
                 prompt_module_results=prompt_module_results,
+                memory_text=memory_text,
             )
         else:
             user = self._build_timeline_first_user_prompt(
@@ -621,6 +998,7 @@ class ActivityRunner:
                 recent_steps=recent_steps,
                 budget=budget,
                 prompt_module_results=prompt_module_results,
+                memory_text=memory_text,
             )
         return DecisionPrompt(system=system, user=user, mode=profile.prompt_mode, stage=prompt_stage)
 
@@ -649,6 +1027,7 @@ class ActivityRunner:
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
+            memory_text: str | None = None,
     ) -> str:
         module_text = render_prompt_modules(prompt_module_results)
         return "\n\n".join(
@@ -657,8 +1036,9 @@ class ActivityRunner:
                 f"Agent: {agent_id}",
                 f"Activity: {profile.name}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
-                f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
-                f"Session summary: {self._summary_text(session_summary)}",
+            ]
+            + self._memory_prompt_sections(campaign_memory, session_summary, memory_text)
+            + [
                 f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
@@ -676,25 +1056,30 @@ class ActivityRunner:
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
+            memory_text: str | None = None,
     ) -> str:
         stable_module_text = render_prompt_modules(prompt_module_results, levels=profile.stable_prompt_module_levels)
         tactical_module_text = render_prompt_modules(
             prompt_module_results,
             levels=profile.tactical_prompt_module_levels,
         )
-        sections = self._objective_prompt_lines(profile) + [
-            f"Agent: {agent_id}",
-            f"Activity: {profile.name}",
-            stable_module_text,
-            f"Campaign memory: {json.dumps(campaign_memory, indent=2, sort_keys=True)}",
-            f"Session summary: {self._summary_text(session_summary)}",
-            f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
-            "---",
-            f"Current step: {budget.decision_ticks + 1}",
-            f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
-            tactical_module_text,
-            "---",
-        ]
+        sections = (
+            self._objective_prompt_lines(profile)
+            + [
+                f"Agent: {agent_id}",
+                f"Activity: {profile.name}",
+                stable_module_text,
+            ]
+            + self._memory_prompt_sections(campaign_memory, session_summary, memory_text)
+            + [
+                f"Recent steps:\n{self._recent_steps_text(profile, recent_steps)}",
+                "---",
+                f"Current step: {budget.decision_ticks + 1}",
+                f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
+                tactical_module_text,
+                "---",
+            ]
+        )
         return "\n\n".join(section for section in sections if section)
 
     def _build_stateful_delta_prompt(
@@ -705,6 +1090,7 @@ class ActivityRunner:
             recent_steps: list[StepRecord],
             budget: ActivityBudget,
             prompt_module_results: list[PromptModuleResult],
+            memory_text: str | None = None,
     ) -> DecisionPrompt:
         system = "\n".join(
             [
@@ -721,7 +1107,11 @@ class ActivityRunner:
                 f"Agent: {agent_id}",
                 f"Activity: {profile.name}",
                 f"Budget: {json.dumps(budget.to_dict(), sort_keys=True)}",
-                f"Session summary update: {self._summary_text(session_summary)}",
+                (
+                    f"Memory update:\n{memory_text}"
+                    if memory_text is not None
+                    else f"Session summary update: {self._summary_text(session_summary)}"
+                ),
                 f"Previous step:\n{self._previous_step_delta_text(profile, recent_steps)}",
                 "---",
                 f"Current step: {budget.decision_ticks + 1}",
@@ -853,6 +1243,9 @@ class ActivityRunner:
             "notes": list(notes or []),
             "model_response": self._model_response_record(model),
         }
+        request_metadata = getattr(model, "last_request_metadata", None)
+        if isinstance(request_metadata, dict) and request_metadata.get("output_token_retries", 0):
+            validation["notes"].append("recovered_after_output_truncation")
         if invalid_responses:
             validation["invalid_responses"] = invalid_responses
         if model_errors:
@@ -1142,7 +1535,29 @@ class ActivityRunner:
         state.all_steps.append(step)
         state.recent_steps.append(step)
         self._write_step(step)
+        self._observe_memory_event(state, step)
         return step
+
+    def _observe_memory_event(self, state: ActivityRunState, step: StepRecord) -> None:
+        if state.memory_handle is None:
+            return
+        # A rejected or failed action must not read as an executed one:
+        # surface the validation notes so memory does not learn the wrong
+        # causal outcome. (Terminal observation records carry no accepted
+        # flag and stay warning-free.)
+        warnings: tuple[str, ...] = ()
+        if step.validation.get("accepted") is False:
+            notes = tuple(str(note) for note in step.validation.get("notes", []) if note)
+            warnings = notes or ("action was rejected and not executed",)
+        state.memory_handle.observe(
+            MemoryEvent(
+                kind="terminal_step",
+                step=step.step,
+                observation=str(step.observation.get("model_text", "")),
+                action=json.dumps(step.action, sort_keys=True) if step.action else "",
+                warnings=warnings,
+            )
+        )
 
     def _execution_record(self, result: ActionExecution) -> dict[str, Any]:
         return result.to_dict()
@@ -1175,13 +1590,95 @@ class ActivityRunner:
             session_summary: SessionSummary,
             recent_steps: list[StepRecord],
             observation: Observation,
-    ) -> SessionSummary:
-        prompt = CompactionPrompt(
+    ) -> _LegacyCompactionResult:
+        limits = profile.legacy_memory_limits
+        prompt = self._legacy_compaction_prompt(
+            profile,
+            session_summary,
+            recent_steps,
+            observation,
+        )
+        first_summary = model.compact(prompt)
+        first_response = self._model_response_record(model)
+        bounded_summary, bounds = _bound_session_summary(first_summary, limits)
+        repair_need = _legacy_compaction_repair_need(
+            session_summary,
+            bounded_summary,
+            limits,
+            proposed_chars=_session_summary_chars(first_summary),
+            bounds_violated=_summary_bounds_violated(bounds),
+        )
+        repair: dict[str, Any] = {"attempted": False}
+        accepted_response = first_response
+        if repair_need is not None:
+            repair["attempted"] = True
+            repair["reason"] = repair_need.reason
+            repair_prompt = CompactionPrompt(
+                system=prompt.system,
+                user="\n\n".join(
+                    [
+                        prompt.user,
+                        "The first draft needs one bounded repair pass.",
+                        f"Repair reason: {repair_need.reason}",
+                        f"First bounded draft:\n{self._summary_text(bounded_summary)}",
+                        (
+                            "Return a corrected replacement. Retain still-useful durable knowledge; "
+                            "a current-state reset does not erase learned history. Stay within every listed limit."
+                        ),
+                    ]
+                ),
+            )
+            try:
+                repaired_summary = model.compact(repair_prompt)
+            except ModelError as exc:
+                if repair_need.kind == "retention":
+                    raise ModelError(f"unsafe compaction draft could not be repaired: {exc}") from exc
+                repair["status"] = "error"
+                repair["error"] = self._model_error_record(exc, "compaction-repair", 0)
+            else:
+                repaired_bounded, repaired_bounds = _bound_session_summary(repaired_summary, limits)
+                remaining_need = _legacy_compaction_repair_need(
+                    session_summary,
+                    repaired_bounded,
+                    limits,
+                    proposed_chars=_session_summary_chars(repaired_summary),
+                    bounds_violated=_summary_bounds_violated(repaired_bounds),
+                )
+                if remaining_need is not None and remaining_need.kind == "retention":
+                    raise ModelError(
+                        f"unsafe compaction draft remained destructive after repair: {remaining_need.reason}"
+                    )
+                bounded_summary = repaired_bounded
+                bounds = repaired_bounds
+                accepted_response = self._model_response_record(model)
+                repair["status"] = "accepted"
+        return _LegacyCompactionResult(
+            summary=bounded_summary,
+            bounds=bounds,
+            repair=repair,
+            model_response=accepted_response,
+        )
+
+    def _legacy_compaction_prompt(
+            self,
+            profile: ActivityProfile,
+            session_summary: SessionSummary,
+            recent_steps: list[StepRecord],
+            observation: Observation,
+    ) -> CompactionPrompt:
+        limits = profile.legacy_memory_limits
+        return CompactionPrompt(
             system=(
-                "Compact older terminal activity into a conservative JSON session summary. "
+                "Compact older terminal activity by rewriting it into a selective, bounded JSON working summary. "
                 "Return only JSON with keys: current_state, last_error, open_subgoals, "
                 "discovered_facts, failed_actions, strategy_notes. Each list field must "
-                "be a list of strings."
+                "be a list of strings. This is a replacement working set, not a transcript. "
+                "Order every list from most to least useful for future decisions. Merge duplicates; "
+                "remove contradicted, obsolete, or subsumed entries. Treat exact labels and proper names "
+                "as distinct subjects. Put changing present conditions in current_state; retain stable "
+                "knowledge and useful historical outcomes in discovered_facts. Keep failed actions only "
+                "when they prevent a likely repeated mistake. Keep reasoning concise and reserve enough "
+                "output for the required JSON; emit the JSON as soon as the memory update is determined."
             ),
             user="\n\n".join(
                 self._objective_prompt_lines(profile)
@@ -1189,11 +1686,20 @@ class ActivityRunner:
                     f"Previous summary:\n{self._summary_text(session_summary)}",
                     f"Steps to summarize:\n{self._recent_steps_text(profile, recent_steps)}",
                     f"Current screen:\n{observation.model_text}",
-                    "Preserve observed facts, failed commands, exact error messages, and unresolved goals.",
+                    (
+                        "Hard limits: "
+                        f"at most {limits.summary_max_chars} serialized characters; "
+                        f"current_state {limits.current_state_max_chars} characters; "
+                        f"last_error {limits.last_error_max_chars} characters; "
+                        f"each list item {limits.item_max_chars} characters; "
+                        f"{limits.max_open_subgoals} open_subgoals; "
+                        f"{limits.max_discovered_facts} discovered_facts; "
+                        f"{limits.max_failed_actions} failed_actions; "
+                        f"{limits.max_strategy_notes} strategy_notes."
+                    ),
                 ]
             ),
         )
-        return model.compact(prompt)
 
     def _compaction_event(
             self,
@@ -1202,6 +1708,9 @@ class ActivityRunner:
             *,
             summary: SessionSummary | None = None,
             error: ModelError | None = None,
+            bounds: dict[str, Any] | None = None,
+            repair: dict[str, Any] | None = None,
+            model_response: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         event: dict[str, Any] = {
             "type": "model_utility",
@@ -1210,10 +1719,14 @@ class ActivityRunner:
             "step_count": len(steps),
             "first_step": steps[0].step,
             "last_step": steps[-1].step,
-            "model_response": self._model_response_record(model),
+            "model_response": model_response or self._model_response_record(model),
         }
         if summary is not None:
             event["summary"] = summary.to_dict()
+        if bounds is not None:
+            event["bounds"] = bounds
+        if repair is not None:
+            event["repair"] = repair
         if error is not None:
             event["error"] = self._model_error_record(error, "compaction", 0)
         return event
@@ -1226,24 +1739,105 @@ class ActivityRunner:
             session_summary: SessionSummary,
             recent_steps: list[StepRecord],
             observation: Observation,
-    ):
+            agent_id: str,
+    ) -> _LegacyCommitResult:
+        limits = profile.legacy_memory_limits
+        bounded_campaign_memory, _existing_bounds = bound_memory_document(
+            campaign_memory,
+            limits.campaign_limits(),
+        )
+        bounded_session_summary, _summary_bounds = _bound_session_summary(session_summary, limits)
         prompt = MemoryCommitPrompt(
-            system="Return a JSON memory patch for durable campaign memory.",
+            system=(
+                "Return only a selective JSON memory patch for durable campaign memory, using keys "
+                "durable_facts, strategy_notes, open_tasks, and errors_to_avoid when applicable. "
+                "This is not a transcript: include only stable, reusable information or unresolved work. "
+                "Treat exact labels as distinct; merge duplicates; omit obsolete current-state details. "
+                "Order lists from most to least useful. Each patch list becomes the priority prefix for that "
+                "field: re-emit an existing entry when it must rank ahead of a new one; unmentioned entries "
+                "persist only in remaining capacity. Keep reasoning concise and reserve enough output for "
+                "the required JSON; emit the JSON as soon as the memory update is determined."
+            ),
             user="\n\n".join(
                 self._objective_prompt_lines(profile)
                 + [
-                    f"Existing campaign memory:\n{json.dumps(campaign_memory, indent=2, sort_keys=True)}",
-                    f"Session summary:\n{self._summary_text(session_summary)}",
+                    f"Existing campaign memory:\n{json.dumps(bounded_campaign_memory, indent=2, sort_keys=True)}",
+                    f"Session summary:\n{self._summary_text(bounded_session_summary)}",
                     f"Recent steps:\n{self._bounded_recent_steps_text(profile, recent_steps)}",
                     f"Final screen:\n{observation.model_text}",
-                    "Return JSON with durable_facts, strategy_notes, open_tasks, and errors_to_avoid when applicable.",
+                    (
+                        "Hard limits for the merged campaign document: "
+                        f"{limits.campaign_max_chars} serialized characters, "
+                        f"{limits.campaign_max_string_chars} characters per string, and "
+                        f"{limits.campaign_max_list_items} items per list."
+                    ),
                 ]
             ),
         )
-        try:
-            return model.commit_memory(prompt)
-        except ModelError:
-            return MemoryPatch()
+        last_error: ModelError | None = None
+        for _ in range(1 + max(0, profile.model_error_retries)):
+            try:
+                patch = model.commit_memory(prompt)
+            except ModelError as exc:
+                last_error = exc
+            else:
+                bounded_data, bounds = bound_memory_document(patch.data, limits.campaign_limits())
+                patch = MemoryPatch(bounded_data)
+                self._write_legacy_memory_record(
+                    agent_id,
+                    mutation_record(
+                        op="legacy_merge_patch",
+                        origin="model",
+                        accepted=True,
+                        batch="commit",
+                        section="campaign",
+                        source_steps=tuple(step.step for step in recent_steps),
+                        fields={"patch": patch.data, "bounds": bounds},
+                    ),
+                )
+                return _LegacyCommitResult(patch=patch, accepted=True)
+        # A failed commit must not vanish: record it, then keep the run's
+        # result-building alive by committing nothing.
+        self._write_memory_commit_failure(last_error, model)
+        self._write_legacy_memory_record(
+            agent_id,
+            mutation_record(
+                op="legacy_merge_patch",
+                origin="model",
+                accepted=False,
+                batch="commit",
+                section="campaign",
+                reason=str(last_error) if last_error is not None else "",
+                source_steps=tuple(step.step for step in recent_steps),
+            ),
+        )
+        return _LegacyCommitResult(patch=MemoryPatch(), accepted=False)
+
+    def _legacy_memory_journal_path(self, agent_id: str) -> Path:
+        return Path(self.memory_store.root) / validate_agent_id(agent_id) / "ops.jsonl"
+
+    def _write_legacy_memory_record(self, agent_id: str, record: dict[str, Any]) -> None:
+        # Metric parity with memory subsystems (docs/memory-simple.md): the
+        # legacy inline path journals its two pseudo-ops in the common
+        # mutation-record schema, beside its campaign.json.
+        write_journal_records(self._legacy_memory_journal_path(agent_id), [record])
+
+    def _write_memory_commit_failure(self, error: ModelError | None, model: ModelAdapter) -> None:
+        self._append_log_record(
+            {
+                "type": "memory_commit_failed",
+                "error": self._truncate(str(error), 2_000) if error is not None else "",
+                "model_response": self._model_response_record(model),
+            }
+        )
+
+    def _append_log_record(self, record: dict[str, Any]) -> None:
+        if self.log_path is None:
+            return
+        record = {**record, "timestamp": time.time()}
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     def _summary_text(self, summary: SessionSummary) -> str:
         return "(empty)" if summary.is_empty() else json.dumps(summary.to_dict(), indent=2, sort_keys=True)
@@ -1270,6 +1864,12 @@ class ActivityRunner:
         }
         if error.status_code is not None:
             record["status_code"] = error.status_code
+        if isinstance(error, ModelOutputTruncated):
+            record["operation"] = error.operation
+            record["requested_max_tokens"] = error.requested_max_tokens
+            record["retry_ceiling"] = error.retry_ceiling
+            if error.request_metadata:
+                record["request_metadata"] = error.request_metadata
         if isinstance(error, ModelStateError):
             record["requires_bootstrap"] = True
         return record
@@ -1293,6 +1893,9 @@ class ActivityRunner:
         provider_metadata = getattr(model, "last_provider_metadata", None)
         if isinstance(provider_metadata, dict):
             record["provider_metadata"] = provider_metadata
+        request_metadata = getattr(model, "last_request_metadata", None)
+        if isinstance(request_metadata, dict):
+            record["request_metadata"] = request_metadata
         return record
 
     def _truncate(self, text: str, limit: int) -> str:

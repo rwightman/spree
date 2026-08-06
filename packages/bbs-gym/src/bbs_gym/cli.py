@@ -28,6 +28,7 @@ from tty_agent.models import (
 )
 from tty_agent.models import output_filters_for_model
 from tty_agent.runner import ActivityBudget, ActivityProfile, ActivityRunner, RoutedActivityRunner
+from tty_agent.structured_memory import StructuredMemorySubsystem
 from tty_agent.terminal import TerminalScreen, TurnObserver
 from tty_agent.transports.base import SessionDisconnected
 from tty_agent.transports.telnet import TelnetSession
@@ -149,12 +150,20 @@ def run_activity(args: argparse.Namespace) -> int:
         return 2
 
     evaluation_profile = _activity_evaluation_profile(profile.name)
+    memory_subsystem = None
+    if getattr(args, "memory_system", "legacy") == "structured":
+        memory_subsystem = StructuredMemorySubsystem(Path(args.memory_root))
     runner = ActivityRunner(
         profile,
         log_path=args.log_path,
         run_objective=args.run_objective or "",
         evaluation_profile=evaluation_profile,
         evaluation_log_path=args.metrics_path if evaluation_profile is not None else None,
+        # --memory-root governs the legacy store and journal too, so per-arm
+        # root isolation works in both modes.
+        memory_store=JsonMemoryStore(Path(args.memory_root)),
+        memory_subsystem=memory_subsystem,
+        memory_context_id=args.activity,
     )
 
     try:
@@ -862,8 +871,30 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             model=model_name,
             api_key=args.api_key or _config_secret(model_config, "api_key", "api_key_env"),
             base_url=args.base_url or _config_str(model_config, "base_url") or "https://api.anthropic.com/v1",
+            timeout=_config_float(getattr(args, "model_timeout", None), model_config, "timeout", 120.0),
             temperature=_config_float(args.temperature, model_config, "temperature", 0.2),
+            audit_temperature=_model_audit_temperature(args, model_config),
             max_tokens=_config_int(args.max_tokens, model_config, "max_tokens", 512),
+            compaction_max_tokens=_model_operation_max_tokens(args, model_config, "compaction_max_tokens"),
+            memory_max_tokens=_model_operation_max_tokens(args, model_config, "memory_max_tokens"),
+            max_tokens_retry_ceiling=_model_retry_ceiling(
+                args,
+                model_config,
+                "max_tokens_retry_ceiling",
+                16_384,
+            ),
+            compaction_max_tokens_retry_ceiling=_model_retry_ceiling(
+                args,
+                model_config,
+                "compaction_max_tokens_retry_ceiling",
+                32_768,
+            ),
+            memory_max_tokens_retry_ceiling=_model_retry_ceiling(
+                args,
+                model_config,
+                "memory_max_tokens_retry_ceiling",
+                32_768,
+            ),
             cache_system_prompt=not args.no_anthropic_cache,
             output_filters=output_filters_for_model(
                 model_name,
@@ -930,8 +961,30 @@ def build_model(args: argparse.Namespace, registry: AgentRegistry | None):
             "model": model_name,
             "base_url": base_url,
             "api_key": api_key,
+            "timeout": _config_float(getattr(args, "model_timeout", None), model_config, "timeout", 120.0),
             "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+            "audit_temperature": _model_audit_temperature(args, model_config),
             "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+            "compaction_max_tokens": _model_operation_max_tokens(args, model_config, "compaction_max_tokens"),
+            "memory_max_tokens": _model_operation_max_tokens(args, model_config, "memory_max_tokens"),
+            "max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "max_tokens_retry_ceiling",
+                16_384,
+            ),
+            "compaction_max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "compaction_max_tokens_retry_ceiling",
+                32_768,
+            ),
+            "memory_max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "memory_max_tokens_retry_ceiling",
+                32_768,
+            ),
             "extra_body": extra_body,
             "extra_headers": _config_str_dict(model_config, "extra_headers"),
             "compaction_reasoning": _model_operation_reasoning(args, model_config, "compaction_reasoning"),
@@ -978,8 +1031,30 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
             "provider": "anthropic",
             "model": model_name,
             "base_url": args.base_url or _config_str(model_config, "base_url") or "https://api.anthropic.com/v1",
+            "timeout": _config_float(getattr(args, "model_timeout", None), model_config, "timeout", 120.0),
             "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+            "audit_temperature": _model_audit_temperature(args, model_config),
             "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+            "compaction_max_tokens": _model_operation_max_tokens(args, model_config, "compaction_max_tokens"),
+            "memory_max_tokens": _model_operation_max_tokens(args, model_config, "memory_max_tokens"),
+            "max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "max_tokens_retry_ceiling",
+                16_384,
+            ),
+            "compaction_max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "compaction_max_tokens_retry_ceiling",
+                32_768,
+            ),
+            "memory_max_tokens_retry_ceiling": _model_retry_ceiling(
+                args,
+                model_config,
+                "memory_max_tokens_retry_ceiling",
+                32_768,
+            ),
             "cache_system_prompt": not args.no_anthropic_cache,
             "response_filter": args.response_filter or _config_str(model_config, "response_filter") or "auto",
         }
@@ -1052,8 +1127,34 @@ def build_model_metadata(args: argparse.Namespace, registry: AgentRegistry | Non
                 "api": model_api,
                 "model": model_name,
                 "base_url": args.base_url or _config_str(model_config, "base_url") or default_base_url,
+                "timeout": _config_float(getattr(args, "model_timeout", None), model_config, "timeout", 120.0),
                 "temperature": _config_float(args.temperature, model_config, "temperature", 0.2),
+                "audit_temperature": _model_audit_temperature(args, model_config),
                 "max_tokens": _config_int(args.max_tokens, model_config, "max_tokens", 512),
+                "compaction_max_tokens": _model_operation_max_tokens(
+                    args,
+                    model_config,
+                    "compaction_max_tokens",
+                ),
+                "memory_max_tokens": _model_operation_max_tokens(args, model_config, "memory_max_tokens"),
+                "max_tokens_retry_ceiling": _model_retry_ceiling(
+                    args,
+                    model_config,
+                    "max_tokens_retry_ceiling",
+                    16_384,
+                ),
+                "compaction_max_tokens_retry_ceiling": _model_retry_ceiling(
+                    args,
+                    model_config,
+                    "compaction_max_tokens_retry_ceiling",
+                    32_768,
+                ),
+                "memory_max_tokens_retry_ceiling": _model_retry_ceiling(
+                    args,
+                    model_config,
+                    "memory_max_tokens_retry_ceiling",
+                    32_768,
+                ),
                 "extra_body": extra_body,
                 "compaction_reasoning": _model_operation_reasoning(
                     args,
@@ -1208,6 +1309,41 @@ def _model_operation_reasoning(
     return config_value if isinstance(config_value, bool) else None
 
 
+def _model_audit_temperature(args: argparse.Namespace, model_config: dict[str, Any]) -> float:
+    """Resolve audit sampling independently, inheriting decision temperature."""
+
+    decision_temperature = _config_float(getattr(args, "temperature", None), model_config, "temperature", 0.2)
+    return _config_float(
+        getattr(args, "audit_temperature", None),
+        model_config,
+        "audit_temperature",
+        decision_temperature,
+    )
+
+
+def _model_operation_max_tokens(
+        args: argparse.Namespace,
+        model_config: dict[str, Any],
+        key: str,
+) -> int | None:
+    value = getattr(args, key, None)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    config_value = model_config.get(key)
+    if isinstance(config_value, int) and not isinstance(config_value, bool):
+        return config_value
+    return None
+
+
+def _model_retry_ceiling(
+        args: argparse.Namespace,
+        model_config: dict[str, Any],
+        key: str,
+        default: int,
+) -> int:
+    return _config_int(getattr(args, key, None), model_config, key, default)
+
+
 def _model_api(args: argparse.Namespace, model_config: dict[str, Any]) -> str:
     value = getattr(args, "model_api", None) or _config_str(model_config, "api") or MODEL_API_CHAT_COMPLETIONS
     if value not in MODEL_APIS:
@@ -1318,7 +1454,42 @@ def _add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model")
     parser.add_argument("--scripted-response", action="append", default=[])
     parser.add_argument("--temperature", type=float)
+    parser.add_argument(
+        "--audit-temperature",
+        type=float,
+        help="sampling temperature for structured final-memory audits; omitted inherits --temperature",
+    )
+    parser.add_argument(
+        "--model-timeout",
+        type=float,
+        help="HTTP model-request timeout in seconds (including utility calls)",
+    )
     parser.add_argument("--max-tokens", type=int)
+    parser.add_argument(
+        "--max-tokens-retry-ceiling",
+        type=int,
+        help="maximum adaptive output-token budget for a truncated decision (default: 16384)",
+    )
+    parser.add_argument(
+        "--compaction-max-tokens",
+        type=int,
+        help="initial output-token budget for periodic compaction/reconciliation calls",
+    )
+    parser.add_argument(
+        "--memory-max-tokens",
+        type=int,
+        help="initial output-token budget for final durable-memory calls",
+    )
+    parser.add_argument(
+        "--compaction-max-tokens-retry-ceiling",
+        type=int,
+        help="maximum adaptive output-token budget for truncated compaction calls (default: 32768)",
+    )
+    parser.add_argument(
+        "--memory-max-tokens-retry-ceiling",
+        type=int,
+        help="maximum adaptive output-token budget for truncated final-memory calls (default: 32768)",
+    )
     parser.add_argument(
         "--compaction-reasoning",
         action=argparse.BooleanOptionalAction,
@@ -1427,6 +1598,17 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = subparsers.add_parser("run-activity", help="run a bounded model-driven BBS activity")
     _add_connection_args(run_parser)
+    run_parser.add_argument(
+        "--memory-system",
+        choices=["legacy", "structured"],
+        default="legacy",
+        help="memory subsystem for this run (docs/memory-simple.md)",
+    )
+    run_parser.add_argument(
+        "--memory-root",
+        default="runtime/memory",
+        help="root directory for structured memory contexts",
+    )
     run_parser.add_argument("--agent-id", default="agent-001")
     run_parser.add_argument(
         "--run-id",

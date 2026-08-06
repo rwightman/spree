@@ -162,10 +162,17 @@ def test_build_model_uses_hosted_openai_compatible_provider_defaults(
                     "model": model_name,
                     "extra_body": {"response_format": {"type": "json_object"}},
                     "extra_headers": extra_headers,
+                    "timeout": 600,
+                    "max_tokens_retry_ceiling": 8_192,
                     "compaction_reasoning": False,
+                    "compaction_max_tokens": 16_384,
+                    "compaction_max_tokens_retry_ceiling": 24_576,
                     "compaction_extra_body": {"utility_operation": "compact"},
                     "memory_reasoning": True,
+                    "memory_max_tokens": 32_768,
+                    "memory_max_tokens_retry_ceiling": 49_152,
                     "memory_extra_body": {"utility_operation": "memory"},
+                    "audit_temperature": 0.4,
                 },
             )
         }
@@ -189,18 +196,32 @@ def test_build_model_uses_hosted_openai_compatible_provider_defaults(
         )
     assert model.extra_body == expected_extra_body
     assert model.extra_headers == extra_headers
+    assert model.timeout == 600
+    assert model.max_tokens_retry_ceiling == 8_192
     assert model.compaction_reasoning is False
+    assert model.compaction_max_tokens == 16_384
+    assert model.compaction_max_tokens_retry_ceiling == 24_576
     assert model.compaction_extra_body == {"utility_operation": "compact"}
     assert model.memory_reasoning is True
+    assert model.memory_max_tokens == 32_768
+    assert model.memory_max_tokens_retry_ceiling == 49_152
     assert model.memory_extra_body == {"utility_operation": "memory"}
+    assert model.audit_temperature == 0.4
     assert metadata["provider"] == provider
     assert metadata["api"] == "chat_completions"
     assert metadata["base_url"] == base_url
+    assert metadata["timeout"] == 600
+    assert metadata["max_tokens_retry_ceiling"] == 8_192
     assert metadata["extra_body"] == expected_extra_body
     assert metadata["compaction_reasoning"] is False
+    assert metadata["compaction_max_tokens"] == 16_384
+    assert metadata["compaction_max_tokens_retry_ceiling"] == 24_576
     assert metadata["compaction_extra_body"] == {"utility_operation": "compact"}
     assert metadata["memory_reasoning"] is True
+    assert metadata["memory_max_tokens"] == 32_768
+    assert metadata["memory_max_tokens_retry_ceiling"] == 49_152
     assert metadata["memory_extra_body"] == {"utility_operation": "memory"}
+    assert metadata["audit_temperature"] == 0.4
     assert "extra_headers" not in metadata
 
 

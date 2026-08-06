@@ -1,4 +1,4 @@
-from tty_agent.memory import JsonMemoryStore
+from tty_agent.memory import JsonMemoryStore, MemoryDocumentLimits, bound_memory_document
 from tty_agent.models import MemoryPatch
 
 
@@ -9,6 +9,40 @@ def test_memory_store_dedupes_and_caps_lists(tmp_path):
     merged = store.save_patch("agent", MemoryPatch({"durable_facts": ["repeat", "new1", "new2", "new3"]}))
 
     assert merged == {"durable_facts": ["new1", "new2", "new3"]}
+
+
+def test_bound_memory_document_enforces_string_list_and_total_limits():
+    bounded, report = bound_memory_document(
+        {
+            "durable_facts": ["Alpha", "Alpha", "alpha", "discarded by count"],
+            "notes": {"location": "x" * 80},
+        },
+        MemoryDocumentLimits(max_document_chars=100, max_string_chars=20, max_list_items=2),
+    )
+
+    # Dedupe is exact and deterministic: names that differ by case are not
+    # conflated, while an exact repeat is removed.
+    assert bounded["durable_facts"] == ["Alpha", "alpha"]
+    assert len(bounded["notes"]["location"]) <= 20
+    assert report["after_chars"] <= 100
+    assert report["deduped_list_items"] == 1
+    assert report["trimmed_list_items"] == 1
+    assert report["changed"] is True
+
+
+def test_bounded_memory_merge_prefers_ranked_patch_then_preserves_old_entries(tmp_path):
+    store = JsonMemoryStore(tmp_path / "memory")
+    store.save("agent", {"durable_facts": ["old-a", "old-b"]})
+
+    merged, report = store.save_patch_with_report(
+        "agent",
+        MemoryPatch({"durable_facts": ["new-high", "new-low"]}),
+        limits=MemoryDocumentLimits(max_document_chars=500, max_string_chars=100, max_list_items=3),
+    )
+
+    assert merged == {"durable_facts": ["new-high", "new-low", "old-a"]}
+    assert report["document"]["changed"] is True
+    assert report["document"]["trimmed_list_items"] == 1
 
 
 def test_memory_store_merges_nested_dicts(tmp_path):

@@ -14,6 +14,7 @@ from tty_agent.agent import TerminalSessionAgent
 from tty_agent.evaluation import EvaluationProbe, EvaluationProfile
 from tty_agent.hints import InputModalityProfile, InputModeRule
 from tty_agent.memory import JsonMemoryStore
+from tty_agent.structured_memory import StructuredMemorySubsystem
 from tty_agent.models import (
     ClaudeCliAdapter,
     CodexCliAdapter,
@@ -166,8 +167,15 @@ def main() -> None:
             "model": args.model,
             "base_url": args.base_url,
             "api_key": api_key,
+            "timeout": args.model_timeout,
             "temperature": args.temperature,
+            "audit_temperature": args.audit_temperature,
             "max_tokens": args.max_tokens,
+            "compaction_max_tokens": args.compaction_max_tokens,
+            "memory_max_tokens": args.memory_max_tokens,
+            "max_tokens_retry_ceiling": args.max_tokens_retry_ceiling,
+            "compaction_max_tokens_retry_ceiling": args.compaction_max_tokens_retry_ceiling,
+            "memory_max_tokens_retry_ceiling": args.memory_max_tokens_retry_ceiling,
             "extra_body": args.extra_body_json,
             "extra_headers": dict(args.extra_header),
             "compaction_reasoning": args.compaction_reasoning,
@@ -232,6 +240,7 @@ def main() -> None:
             },
         )
         agent = TerminalSessionAgent(args.agent_id, session, observer, observer.metadata)
+        memory_subsystem = StructuredMemorySubsystem(args.memory_root) if args.memory_system == "structured" else None
         runner = ActivityRunner(
             profile,
             memory_store=JsonMemoryStore(args.memory_root),
@@ -239,6 +248,8 @@ def main() -> None:
             run_objective=args.run_objective,
             evaluation_profile=ZORK_EVALUATION_PROFILE,
             evaluation_log_path=args.metrics_path,
+            memory_subsystem=memory_subsystem,
+            memory_context_id="zork",
         )
         result = runner.run(
             agent,
@@ -334,7 +345,48 @@ def parse_args() -> argparse.Namespace:
         help="JSON object applied only to final memory requests",
     )
     parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--audit-temperature",
+        type=float,
+        help="sampling temperature for the structured final-memory audit; omitted inherits --temperature",
+    )
+    parser.add_argument(
+        "--model-timeout",
+        type=float,
+        default=600.0,
+        help="HTTP model-request timeout in seconds (including utility calls)",
+    )
+    parser.add_argument("--max-tokens", type=int, default=4096, help="initial decision output-token budget")
+    parser.add_argument(
+        "--max-tokens-retry-ceiling",
+        type=int,
+        default=16_384,
+        help="maximum adaptive output-token budget for a truncated decision",
+    )
+    parser.add_argument(
+        "--compaction-max-tokens",
+        type=int,
+        default=16_384,
+        help="initial output-token budget for periodic compaction/reconciliation calls",
+    )
+    parser.add_argument(
+        "--memory-max-tokens",
+        type=int,
+        default=32_768,
+        help="initial output-token budget for final durable-memory calls",
+    )
+    parser.add_argument(
+        "--compaction-max-tokens-retry-ceiling",
+        type=int,
+        default=32_768,
+        help="maximum adaptive output-token budget for truncated compaction/reconciliation calls",
+    )
+    parser.add_argument(
+        "--memory-max-tokens-retry-ceiling",
+        type=int,
+        default=32_768,
+        help="maximum adaptive output-token budget for truncated final-memory calls",
+    )
     parser.add_argument("--response-filter", choices=["auto", "default", "gemma4", "none"], default="auto")
     parser.add_argument("--codex-profile")
     parser.add_argument("--codex-executable", default="codex")
@@ -365,6 +417,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-path", type=Path, default=Path("runtime/logs/zork-activity.jsonl"))
     parser.add_argument("--metrics-path", type=Path, default=Path("runtime/metrics/zork-activity.jsonl"))
     parser.add_argument("--memory-root", type=Path, default=Path("runtime/memory"))
+    parser.add_argument(
+        "--memory-system",
+        choices=["legacy", "structured"],
+        default="legacy",
+        help="memory subsystem for this run (docs/memory-simple.md)",
+    )
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--columns", type=int, default=100)
     parser.add_argument("--lines", type=int, default=30)

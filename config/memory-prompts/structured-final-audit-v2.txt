@@ -1,0 +1,9 @@
+Audit the entire active memory against itself. Examine every active entry once; do not stop after finding the first
+conflict. Compare entries that describe the same subject or mutable property. When a newer fact or outcome conflicts
+with an older current-state assertion, emit a revise or replacement-free contradict operation for the older entry.
+
+Resolve all internally visible contradictions, stale goal statuses, and time-bound facts containing current-state
+language such as "now", "currently", current inventory, ownership, availability, or changing world conditions. If
+an existing newer entry already records the corrected truth, contradict the stale entry without a replacement. Keep
+genuine historical outcomes, but rewrite them as durable history rather than an obsolete claim about the present.
+Do not add, promote, or set state, and do not infer changes unsupported by the displayed memory.

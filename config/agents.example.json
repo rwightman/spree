@@ -10,6 +10,7 @@
         "base_url": "http://localhost:8000/v1",
         "model": "Qwen/Qwen3-32B",
         "max_tokens": 512,
+        "max_tokens_retry_ceiling": 16384,
         "temperature": 0
       }
     },
@@ -24,6 +25,12 @@
         "api_key_env": "FIREWORKS_API_KEY",
         "model": "accounts/fireworks/models/qwen3p7-plus",
         "max_tokens": 512,
+        "max_tokens_retry_ceiling": 16384,
+        "compaction_max_tokens": 16384,
+        "compaction_max_tokens_retry_ceiling": 32768,
+        "memory_max_tokens": 32768,
+        "memory_max_tokens_retry_ceiling": 32768,
+        "audit_temperature": 0.2,
         "temperature": 0.2
       }
     },
@@ -38,6 +45,11 @@
         "api_key_env": "FIREWORKS_API_KEY",
         "model": "accounts/fireworks/models/qwen3p7-plus",
         "max_tokens": 512,
+        "max_tokens_retry_ceiling": 16384,
+        "compaction_max_tokens": 16384,
+        "compaction_max_tokens_retry_ceiling": 32768,
+        "memory_max_tokens": 32768,
+        "memory_max_tokens_retry_ceiling": 32768,
         "temperature": 0.2,
         "stateful": true
       }
@@ -52,6 +64,7 @@
         "api_key_env": "XAI_API_KEY",
         "model": "grok-4.5",
         "max_tokens": 2048,
+        "max_tokens_retry_ceiling": 16384,
         "temperature": 0.2,
         "extra_headers": {
           "x-grok-conv-id": "xai-grok-001"

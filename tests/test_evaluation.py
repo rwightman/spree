@@ -105,15 +105,24 @@ def test_zork_provider_utility_reasoning_options(monkeypatch):
             "--memory-reasoning",
             "--memory-extra-body-json",
             '{"response_format":{"type":"json_object"}}',
+            "--audit-temperature",
+            "0.25",
         ],
     )
 
     args = zork_activity.parse_args()
 
     assert args.compaction_reasoning is False
+    assert args.model_timeout == 600.0
+    assert args.max_tokens_retry_ceiling == 16_384
+    assert args.compaction_max_tokens == 16_384
+    assert args.compaction_max_tokens_retry_ceiling == 32_768
     assert args.compaction_extra_body_json == {"response_format": {"type": "json_object"}}
     assert args.memory_reasoning is True
+    assert args.memory_max_tokens == 32_768
+    assert args.memory_max_tokens_retry_ceiling == 32_768
     assert args.memory_extra_body_json == {"response_format": {"type": "json_object"}}
+    assert args.audit_temperature == 0.25
 
 
 def test_zork_responses_state_options(monkeypatch, tmp_path):
