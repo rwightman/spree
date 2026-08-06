@@ -469,7 +469,7 @@ class ActivityRunner:
         self.run_objective = run_objective.strip()
         self.evaluation_profile = evaluation_profile
         self.evaluation_log_path = Path(evaluation_log_path) if evaluation_log_path else None
-        # Optional swappable memory subsystem (docs/memory-simple.md). When
+        # Optional swappable memory subsystem (docs/memory-structured.md). When
         # set, it replaces the legacy compaction + campaign-memory paths.
         self.memory_subsystem = memory_subsystem
         self.memory_context_id = memory_context_id
@@ -1817,7 +1817,7 @@ class ActivityRunner:
         return Path(self.memory_store.root) / validate_agent_id(agent_id) / "ops.jsonl"
 
     def _write_legacy_memory_record(self, agent_id: str, record: dict[str, Any]) -> None:
-        # Metric parity with memory subsystems (docs/memory-simple.md): the
+        # Metric parity with memory subsystems (docs/memory-structured.md): the
         # legacy inline path journals its two pseudo-ops in the common
         # mutation-record schema, beside its campaign.json.
         write_journal_records(self._legacy_memory_journal_path(agent_id), [record])

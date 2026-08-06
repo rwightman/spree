@@ -1,4 +1,4 @@
-"""The ``structured`` memory subsystem from ``docs/memory-simple.md``.
+"""The ``structured`` memory subsystem from ``docs/memory-structured.md``.
 
 One store per (agent, context): a JSON document cache plus an append-only ops
 journal, guarded by flock and atomic replacement. The journal is the source
@@ -10,7 +10,7 @@ is entirely code-owned; unmentioned items persist.
 Crash safety is forward-only: everything journaled survives (each batch is one
 fsynced JSONL line, applied atomically or not at all on replay), while pending
 un-reconciled events and the covered/overlap boundary live only in process
-memory and are lost with the process. That is the deliberate simple-arm trade;
+memory and are lost with the process. That is the deliberate structured-arm trade;
 the full design in ``docs/memory-design.md`` owns durable evidence logs.
 """
 

@@ -92,11 +92,11 @@ Missing:
 - Snapshot/reset orchestration beyond individual door reset scripts.
 - Optional PNG/image observations for multimodal models.
 - Stronger memory consolidation for long matches and repeated coordination
-  failures. The proposed design — pluggable memory policies, an
-  operations-based reconciliation contract with typed exits instead of lossy
-  summary rewrites, an intent channel, and provider-chain rollover — is in
-  `docs/memory-design.md`. A distilled subsystem and the common swap seam for
-  trialing implementations side by side is in `docs/memory-simple.md`.
+  failures. The common swap seam and the implemented `structured` subsystem
+  are in `docs/memory-structured.md`; the staged plan for the next arm
+  (`ledger`: durable event ledger, cursors, progression-scoped batch
+  disposition for campaigns) is in `docs/memory-ledger.md`; the full component menu with
+  per-component triggers and escalation paths is `docs/memory-design.md`.
 
 The `tty_agent` package is intentionally separate from `bbs_gym`.
 Terminal observation, action validation, model adapters, memory, and the

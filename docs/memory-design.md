@@ -1,10 +1,17 @@
 # Working memory, goals, and compaction
 
-Status: proposed design for experimentation, revised after external review.
-This describes one complete target implementation, not a staged plan; nothing
-is implemented yet. The control arm ("legacy" below) is derived from the
-current behavior in `packages/tty-agent/src/tty_agent/runner.py` and
-`packages/tty-agent/src/tty_agent/models.py`.
+Status: **component menu with per-component triggers, no longer one target
+implementation.** After the `structured` arm shipped
+(`docs/memory-structured.md`) and the first qwen Zork runs plus point-replay
+experiments came back, this document was re-scoped: a substantial share of it
+is now implemented (absorbed into the seam, the `structured` subsystem, and
+the provider layer), another share is deliberately deleted (evidence from
+real runs says the model-facing complexity is the enemy), and the remainder
+is deferred behind named triggers, with `docs/memory-ledger.md` as the staged
+build plan for the next arm. Section-level status notes below mark which is
+which; unmarked material is retained as design reference for the deferred
+components. The control arm ("legacy") now runs bounded and instrumented in
+`packages/tty-agent/src/tty_agent/runner.py`.
 
 ## Problem
 
@@ -36,11 +43,12 @@ supposed to preserve. The mechanical causes, all in current code:
   code carries anything forward. Compaction re-fires every
   `compact_every_steps` / `compact_recent_chars`, so each fact re-rolls the
   survival dice every cycle.
-- The prose fallback wipes structure: when a compaction response is not
-  parseable JSON, `TextChatAdapter.compact` degrades to
+- *(Fixed.)* The prose fallback wipes structure: when a compaction response
+  is not parseable JSON, `TextChatAdapter.compact` degrades to
   `{"current_state": <the prose>}` — a summary with N facts becomes one prose
   blob and zero facts, and the empty-summary guard does not fire because
-  `current_state` is non-empty.
+  `current_state` is non-empty. Non-JSON now raises into the compaction
+  retry/backoff path.
 - Missing keys silently mean zero: `SessionSummary.from_mapping` maps an
   absent `discovered_facts` to `()`, so a partial response wipes sections with
   no signal.
@@ -51,9 +59,10 @@ supposed to preserve. The mechanical causes, all in current code:
   retry ceilings. An explicit hard-truncation signal doubles the applicable
   budget, makes the increase sticky, and is traced; a model that pre-shrinks to
   fit still produces no signal.
-- A failed memory commit is silently empty: `_commit_memory` catches
-  `ModelError` and returns `MemoryPatch()` with no retry and no journal
-  event, so a whole session's learning can vanish without trace.
+- *(Fixed.)* A failed memory commit is silently empty: `_commit_memory`
+  catches `ModelError` and returns `MemoryPatch()` with no retry and no
+  journal event, so a whole session's learning can vanish without trace. It
+  now retries, journals the failure, and leaves the prior document intact.
 - Loss propagates: the end-of-run memory commit sees only summary + recent
   steps, so a fact dropped mid-run never reaches `campaign.json` either.
 
@@ -63,20 +72,48 @@ problem and would confound any experiment run on top of them:
 - The Responses adapter isolates utility traffic (`store: false`, no
   `previous_response_id` for compaction/memory calls) and starts a fresh chain
   on every bootstrap.
-- The stateful codex and claude CLI adapters do neither: they retain their
-  session id across `runner.run()` calls, and because they do not override
-  `compaction_chat`/`memory_chat`, **compaction and memory-commit prompts are
-  appended to the resumed gameplay session today** — control-plane utility
-  traffic inside the agent's own conversation. Clearing
-  `decision_prompts_sent` re-sends a bootstrap but does not start a fresh CLI
-  session, so "rollover" would be a no-op for them.
+- The stateful codex and claude CLI adapters retain their session id across
+  `runner.run()` calls. *(Partially fixed:)* utility calls now always run
+  stateless (`--ephemeral` / `--no-session-persistence`), so compaction,
+  memory, and audit traffic no longer pollutes the resumed gameplay session.
+  Still true: clearing `decision_prompts_sent` re-sends a bootstrap but does
+  not start a fresh CLI session, so "rollover" would be a no-op for them —
+  the remaining lifecycle work below exists for this.
 - Campaign-social handling is divergent by accident: a CLI adapter's social
   `decide` resumes the gameplay session, while the Responses adapter treats
   social prompts as stateless one-shots. Neither is a bug in isolation, but
   the divergence is resolved deliberately below: social is agent-facing
   *activity*, not utility, and joins the agent's context on every provider.
 
+## Why keep `legacy` — and why explore beyond it
+
+The implemented `legacy` arm is now a credible control, not the unsafe
+baseline described by the original bug list. Code bounds its working summary
+and campaign document; malformed or explicitly truncated utility results
+preserve prior memory; destructive compaction gets a bounded retention-repair
+attempt; final commit retries and records failure; and both rewrite paths emit
+common-schema pseudo-ops for analysis. Those changes deliberately make new
+runs incomparable with the old buggy baseline.
+
+Legacy remains valuable because its compact, familiar summary grammar asks
+little of the utility model, and a strong model may curate it well. Its core
+limitation is still wholesale replacement: every retained item must be
+re-emitted, flat lists blur fact/belief/history/current state, campaign merge
+cannot express typed correction or goal closure, and its journal is
+observational rather than a replayable item store. `structured` isolates the
+semantic experiment — stable ids, default-persist operations, typed sections,
+and cleanup audit — without campaign machinery. `ledger` adds only the
+durability experiment warranted by campaigns: durable evidence and cursors,
+plus whole-progression disposition. Finer causal projection remains a named
+escalation, not the presumed destination.
+
 ## Principles
+
+These are requirements for the relevant operations-contract components, not
+a claim that every current arm already satisfies them. `legacy` shares the
+lifecycle and measurement normalization but remains a wholesale-summary
+control; `structured` implements the semantic subset; progression-aware
+durability in principle 8 belongs to `ledger` and its scheduler integration.
 
 1. **Persistence is the code's job; the model proposes changes.** Reconciliation
    emits operations against the previous state; anything unmentioned persists.
@@ -125,6 +162,16 @@ problem and would confound any experiment run on top of them:
    progression outcomes.
 
 ## Provider lifecycle normalization
+
+> **Status: partially implemented.** Done, in `models.py`: isolated utility
+> execution on every provider (CLI adapters run utility calls stateless), the
+> typed raw utility surface (`utility_text` with trace reset, output filters,
+> and truncation/incomplete/empty detection — superseding the `UtilityResult`
+> type sketched below), typed per-operation output budgets with adaptive
+> sticky retry ceilings (`ModelOutputTruncated`), and Responses incomplete
+> handling that never commits an incomplete response id. Remaining, scoped to
+> the `ledger` arm's rollover work: the `CallContext`/`ConversationKey` API,
+> the stage handshake, and `reset_decision_state`.
 
 The foundation the rest of the design assumes — and a standalone fix for the
 live utility-pollution issue above. Stateful adapters (Responses, codex CLI,
@@ -236,14 +283,15 @@ claude CLI) gain a small uniform capability surface:
   `no_memory_change` and dead-letter records so semantically omitted, already
   presented events are discoverable without pretending they remain pending;
   it obeys the same authority and scope permissions as every raw window.
-- **Isolated utility execution.** `compaction_chat`/`memory_chat` (purpose
-  `utility`) must never resume the decision session. For the CLI adapters
-  this means running utility calls stateless (`--ephemeral` /
-  `--no-session-persistence`) regardless of the adapter's decision-session
-  mode. The Responses adapter already conforms for utility; under the
-  call-context rules its *social* handling flips — social is `activity`, so
-  a stateful Responses adapter appends forum turns to the chain instead of
-  treating them as stateless one-shots.
+- **Isolated utility execution.** *(Implemented.)*
+  `compaction_chat`/`memory_chat`/`audit_chat` (purpose `utility`) never
+  resume the decision session. CLI adapters run utility calls stateless
+  (`--ephemeral` / `--no-session-persistence`) regardless of the adapter's
+  decision-session mode; the Responses adapter conforms. Under the
+  call-context rules, social handling flips — social is `activity`, so a
+  stateful Responses adapter appends forum turns to the chain instead of
+  treating them as stateless one-shots. *(The social flip is not yet
+  implemented.)*
 - **`reset_decision_state(conversation_key)`.** Discard provider-side
   conversation state for one key so
   the next bootstrap genuinely starts fresh: clear `response_id` for
@@ -263,6 +311,19 @@ claude CLI) gain a small uniform capability surface:
   token counts exist.
 
 ## Architecture: the `MemoryPolicy` seam
+
+> **Status: superseded as the public boundary.** The seam that shipped is the
+> deliberately coarser `MemorySubsystem`/`MemoryHandle` surface in
+> `docs/memory-structured.md` — the runner and campaign depend on that and
+> nothing else, and both the `structured` arm and the planned `ledger` arm
+> live behind it. The `MemoryPolicy`/`PersonaMemoryStore` split below is, at
+> most, *internal* structure for a future arm; it must not become a runner
+> dependency. `UtilityResult` was superseded by `utility_text` plus typed
+> `ModelOutputTruncated`. The `ProposedBatch` envelope and revision-vector
+> validation are deferred with the concurrency components (single-writer
+> contexts have held everywhere so far). What survives of this section
+> unconditionally: fingerprints, isolated roots, journal-before-boundary, and
+> policy-owned representation — all implemented.
 
 Same move that worked for scoring (`EvaluationProfile`): the representation,
 prompts, and parsing become pluggable, while `ActivityRunner` keeps the
@@ -335,7 +396,7 @@ class PersonaMemoryStore(Protocol):
     def load(self) -> PersonaMemoryState: ...
     def start_progression(self, started: ProgressionStarted) -> None: ...
     def append_events(self, events: tuple[ActivityEventDraft, ...]) -> tuple[ActivityEvent, ...]: ...
-    def finish_progression(self, disposition: ProgressionDisposition) -> None: ...
+    def resolve_progression(self, disposition: ProgressionDisposition) -> None: ...
     def pending_scopes(self, conversation_key: ConversationKey) -> tuple[ScopeKey, ...]: ...
     def pending_events(
         self,
@@ -454,21 +515,22 @@ the active conversation key. A later MVCC implementation may use fixed
 snapshots and split item revisions from event-head validation; it must preserve
 the same serializable result.
 
-The campaign commit parses into the same operations and uses the same store
-transaction, with the resulting `ReconciliationResult` tagged as a commit in
-the journal. It never returns the legacy `MemoryPatch` directly, so campaign
-mutations are revision-checked and journaled identically to session
-mutations. The `legacy` parser constructs two policy-internal operations that
-the model never emits: `LegacyReplaceSummary` for its full-rewrite compaction
-response and `LegacyMergePatch` for its campaign commit. Only the legacy policy
-validator accepts them, but both still pass through `apply_batch` for locking,
-revision checks, before/after journaling, and cursor handling. The revision
-vector recorded by the store is what epoch manifests record. Legacy summary
-replacements also retain their progression-supported version chain: the
-effective legacy view selects the newest committed replacement and falls back
-to its predecessor when a newer progression is pending or abandoned. This is
-coarse-grained, but gives interrupted campaign comparisons the same recovery
-semantics as the reconciling policy.
+For an operations-contract subsystem, campaign commit parses into the same
+operations and uses the same store transaction, with the resulting
+`ReconciliationResult` tagged as a commit in the journal. It never returns a
+legacy `MemoryPatch`, so session and campaign mutations share validation,
+locking, and replay semantics.
+
+The implemented `legacy` arm deliberately remains outside this seam. Its
+inline compaction and campaign merge emit `LegacyReplaceSummary` and
+`LegacyMergePatch` pseudo-ops through the common journal writer, but
+`campaign.json` and `SessionSummary` remain its stores of record. Those
+pseudo-ops are observational: they support comparable failure/churn metrics,
+but do not pass through `apply_batch`, reconstruct item state, or inherit
+progression disposition. Moving legacy behind the seam is deferred until a
+campaign comparison actually needs coarse recovery parity; at that point a
+versioned summary can select the newest committed replacement and fall back
+after abandonment without pretending current instrumentation already does so.
 
 Policies are selected per agent/persona runtime, exposed as
 `--memory-policy` and via registry participant/model config. The policy name
@@ -482,24 +544,43 @@ handling.
 Changing it need not always force migration, but every transaction and run
 records it and incompatible changes require explicit revalidation. Prompt text
 has its own fingerprint and never forces migration. Activity profiles add the
-view fingerprint. Three initial policies:
+view fingerprint. The arms, as they now stand:
 
-- **`legacy`** — the current `SessionSummary` representation, prompts, and
-  merge semantics, extracted verbatim (tests pin the representation) but
-  running under the normalized lifecycle and failure handling like every
-  other arm ("normalized legacy", not bit-for-bit).
-  It remains intentionally flat and exists as a compatibility/control policy,
-  not as the recommended multi-activity persona store.
-- **`reconciling`** — the schema and operations contract below.
-- **`raw-window-only`** — no internal summary at all; the memory commit is
-  built from `_bounded_recent_events_text` alone. (Named for what it *is* —
-  the arm also runs in stateless modes, where there is no provider state to
-  lean on.) Today compaction cannot actually be disabled
+- **`legacy`** *(exists)* — the `SessionSummary` representation and merge
+  semantics, inline in the runner, now bounded (`LegacyMemoryLimits`,
+  retention-guarded repair on destructive compactions, bounded campaign
+  documents) and instrumented with the common mutation journal. It remains
+  intentionally flat and exists as the control arm, not as the recommended
+  multi-activity persona store.
+- **`structured`** *(exists; see `docs/memory-structured.md`)* — the simplified
+  operations-contract arm that absorbed this design's seam, journaling,
+  typed exits, mechanical advancement, and fingerprints. It replaces
+  `reconciling` as the experimental arm in the matrix.
+- **`ledger`** *(planned; see `docs/memory-ledger.md`)* — `structured`'s
+  store core plus durable event ledger, durable cursors, and
+  progression-scoped batch disposition; the staged carrier for this
+  document's campaign-correctness components.
+- **`raw-window-only`** *(unbuilt, cheap behind the seam)* — no internal
+  summary at all; the memory commit is built from the bounded recent-events
+  text alone. Today compaction cannot actually be disabled
   (`compact_every_steps=0` leaves the char trigger live); this arm makes
   "off" first-class and is the null hypothesis that an internal summary
   helps at all.
+- **`reconciling`** — no longer a planned arm by this name; its schema and
+  contract below are retained as the escalation target the `ledger` stages
+  draw from.
 
 ## Persona memory schema v2
+
+> **Status: type menu for deferred components.** The id discipline, typed
+> sections, caps, archive-with-typed-exits, and keyed `StateEntry` discipline
+> are implemented (in `structured`, minus scopes/claims/corrections). The
+> scope, actor, claim, and progression types are staged in
+> `docs/memory-ledger.md` with their triggers. The support-predicate and
+> evidence-dependency types (`SupportPredicate`, `EvidenceRef`,
+> `OperationRecord.support`) are **model-facing never, code-derived at most**
+> — see the projection revision below; a utility model is not asked to author
+> this graph in any arm.
 
 Every item carries an **immutable, store-wide, code-issued id** (`m1`, `m2`,
 …). Positional indices dangle across mutations and content hashes break on
@@ -799,21 +880,52 @@ rewriting its source record. Related-scope visibility is additionally bounded
 by the current `ConversationKey`'s authority policy; sharing one persona store
 does not grant raw-event access across authority domains.
 
-Progression validity is an append-only overlay, not a mutable event Boolean.
-The scheduler fsyncs `ProgressionStarted` before paid activity, assigns the
-opaque id to every resulting event, and later mirrors one committed or
-abandoned `ProgressionDisposition` from the configured durability authority.
-Absence of an authority-resolved terminal outcome means pending. Different
-concurrent activities use different ids, so a global event sequence never
-invalidates unrelated work.
+Progression validity is an append-only disposition, not a mutable event
+Boolean. The scheduler fsyncs `ProgressionStarted` before paid activity,
+assigns the opaque id to every resulting event, and later mirrors one
+committed or abandoned outcome from the configured durability authority. In
+`ledger`, starts and resolutions are code-owned control records in
+`events.jsonl`; the fuller store may materialize the same information as a
+`ProgressionDisposition` index. Absence of an authority-resolved terminal
+outcome means pending. Different concurrent activities use different ids, so
+a global event sequence never invalidates unrelated work.
 
 The memory layer assigns no meaning to the id and stores no world/forum/message
 commit domain. A campaign scheduler may group an entire play epoch; another
 runtime may use one session, turn, or social round; a non-scheduled runner may
 commit one whole run or each successfully executed action. If effects become
 durable independently, the scheduler uses separate progression ids.
+The planned `ledger` arm makes the common standalone case cheaper:
+`progression_id=null` is immediately effective. A standalone runtime needs a
+store-local progression only if it actually wants a provisional durability
+boundary.
 
 ### Operation-causal effective projection
+
+> **Status: deferred escalation; superseded as the primary mechanism.** The
+> primary answer to "memory must not keep treating a discarded epoch's
+> effects as authoritative" is now the `ledger` arm's **progression-scoped
+> batch disposition** (`docs/memory-ledger.md`): every mutation batch
+> carries a code-owned `progression_id`, prefixes never cross a progression
+> boundary, at most one progression is unresolved per context, and on an
+> authority-resolved `abandoned` outcome the store is re-folded excluding
+> that progression's batches. The committed projection folds `ops.jsonl`
+> against authority-verified resolution controls from `events.jsonl`; a
+> handle explicitly bound to the one active progression may also fold that
+> whole unresolved branch. Ordinary open refuses an unresolved context until
+> the scheduler repairs authority, so a fresh session cannot inherit an
+> indeterminate branch. Exclusion reverts every mutation kind exactly —
+> revisions, contradictions, transitions, promotions, capacity demotions,
+> and state overwrites — which an item-level tombstone scan cannot do (a first
+> draft tried; mutations to committed items leak or lose state under any
+> current-item scan). There is no model grammar change and no per-operation
+> support overlay. The full projection below — the
+> `experience_occurred`/`external_effect_committed` distinction, pending
+> overlay, and effective folds — is retained as the escalation if campaign
+> data shows batch-granular disposition is too coarse (valuable confirmed
+> experience-history voided with the epoch's effects, or provisional
+> visibility mattering under genuinely concurrent progressions). Its trigger
+> must be named from real campaign journals before any of it is built.
 
 Progression status qualifies an operation, not merely its current item or flat
 evidence list. Every accepted operation becomes a durable `OperationRecord`.
@@ -890,6 +1002,20 @@ forward-only causal projection, not rollback.
 
 ## Reconciliation: an operations contract, not a rewrite
 
+> **Status: core implemented and validated.** The operations contract,
+> per-operation validation, mechanical no-attestation advancement, overlap,
+> the zero-ops retry + `no_memory_change` marker, and journal-before-boundary
+> all run today in `structured` — 25/25 parseable, advancing
+> reconciliations in the first
+> 500-tick qwen run, one rejected op, journaled. Two lessons from those runs
+> are now normative for every arm: (1) extraction and cleanup are **distinct
+> lifecycle operations** — the commit drains extraction prefixes, then a
+> separate cleanup-only audit (restricted to `revise`, replacement-free
+> `contradict`, `transition`) corrects stale entries without growing memory;
+> combining them encourages accumulation. (2) The model-facing grammar stays
+> small; per-operation independence replaced batch atomicity (see the
+> superseded paragraph below).
+
 The reconciliation prompt presents the previous memory view (items with their
 ids and scopes) plus the unsummarized `ActivityEvent`s, and asks for
 **operations only**. The model's response carries no envelope fields: a model
@@ -915,20 +1041,24 @@ overlap is a separately labeled context section and never changes the
 boundary. Token or relevance selection may shorten a prefix but may not punch
 holes in it.
 
-Cursor advancement is a compare-and-swap under the persona-store lock. The
-store verifies that the current cursor still equals `from_exclusive`, that the
-immutable log's exact authority-filtered, scope-filtered prefix ends at
-`through_inclusive`, and that no event in between was omitted. Applying,
-accepting no memory change, or dead-lettering the prefix advances the cursor
-and the owning scope revision even when no item changed. A stale no-op proposal
-therefore conflicts instead of journaling a second advancement.
+Cursor advancement is durable and atomic with batch application: the
+`ledger` arm records the covered-through sequence in the applied batch's
+journal envelope, so one fsynced line carries both and they cannot disagree
+after a crash. (The compare-and-swap formulation — verifying the cursor
+still equals `from_exclusive` under the store lock before advancing — is the
+concurrent-writer escalation; single-writer contexts make it unnecessary
+today.) Applying or accepting no memory change advances the cursor even when
+no item changed.
 
 Cursor advancement is **mechanical**. Cursors advance exactly when the
-response parses, every operation validates and the batch is accepted, the
-`ReconciliationResult` has been durably journaled (fsync, the same discipline
-as the campaign journal), and no truncation signal fired
-(`UtilityResult.finish_reason` length/incomplete, or `output_tokens` within a
-configured margin of `compaction_max_tokens`). Any failed condition routes to
+response parses, operations are validated and applied, the batch has been
+durably journaled (fsync, the same discipline as the campaign journal), and
+no truncation signal fired. Truncation means **explicit provider signals
+only** — a length/max-tokens finish reason, an incomplete status, or
+malformed/empty output; output tokens merely *near* a configured budget is
+telemetry, not rejection (reasoning models routinely approach large ceilings
+without semantic loss, and the adaptive sticky retry budgets handle genuine
+exhaustion). Any failed condition routes to
 the normal retry/backoff path and leaves the events in the pending queue;
 there is no model-controlled outcome between "accepted and advanced" and
 "failed and retried". One mechanical heuristic guards the lazy-empty case:
@@ -991,9 +1121,14 @@ archive holds every exit.
   — a rewrite, journal-audited, no exit. It means a more precise statement of
   the same proposition. Changed mutable state belongs in `set_state`; evidence
   that the old proposition was false uses `contradict`.
-- **`contradict`** is an exit-and-birth: the fact, hypothesis, or claim moves
-  to the archive (exit `contradicted`) and a traced `Correction` is created
-  from current evidence with a versioned `corrects` reference.
+- **`contradict`** exits the fact, hypothesis, or claim to the archive (exit
+  `contradicted`). Creating an active successor is **optional**, not
+  mandatory: a cleanup contradiction usually means "archive this stale
+  statement", and the journal plus archive already hold the evidence — an
+  active `Correction` (or, in the implemented arms, a replacement fact) is
+  created only when the corrected proposition is itself useful. Forcing a
+  new active object per contradiction reintroduces the clutter the operation
+  exists to remove.
 - **`transition`** changes a goal status according to the transition table
   below. A `done` transition must cite an existing outcome version/event or
   create an outcome fact/state entry in the same atomic group.
@@ -1082,22 +1217,19 @@ retry ceilings: explicit token-limit termination retries the same request at a
 doubled, sticky budget. Stateful Responses retries remain children of the last
 complete response; an incomplete response id is never committed locally.
 
-Each proposed operation has a call-local `proposal_op_id` and optional
-`depends_on_proposal_op_ids`. The store maps them to durable operation ids and
-persists the translated semantic edges in each `OperationRecord`; they are not
-item ids, but they remain necessary for later causal projection. Whole-batch
-atomicity has a bounded liveness escape. A rejected proposal first receives a
-structured repair prompt containing per-operation reasons. After N identical
-failures, code partitions operations only where a dependency graph proves
-independence (disjoint existing targets/scopes and no temporary-id or declared
-dependency edge), journals valid groups atomically, and re-prompts
-against the updated view. The cursor remains at the pending prefix until every
-dependent group is accepted. After a final configured limit, the unresolved
-group receives an explicit `reconciliation_dead_letter` record with its source
-events and rejection reasons; the prefix advances so compaction and rollover
-cannot remain blocked forever. Dead-lettered events stay searchable and are
-eligible for later explicit retrieval/reconciliation. Atomicity remains the
-default and is never guessed across dependent operations.
+*(Superseded — retained to record why.)* Earlier revisions gave each
+proposed operation a call-local `proposal_op_id` with dependency edges,
+whole-batch atomicity, a structured repair ladder, proof-of-independence
+partitioning, and `reconciliation_dead_letter` records. Real runs settled
+this the other way: **valid operations apply independently and invalid ones
+are individually rejected with journaled reasons.** Without model-authored
+dependency edges, operations are independent by construction, the
+repair/partition/dead-letter machinery protects an atomicity that cannot
+arise, and every increment of response grammar measurably raises structural
+failure rates on weaker models. All-or-nothing atomicity is reserved for
+**code-derived** groups only — for example a `done` transition paired with
+the outcome record it must cite — where code, not the model, declares the
+group.
 
 ## The intent channel
 
@@ -1118,21 +1250,26 @@ traces.
 
 ## Raw window
 
+> **Status: split.** `structured` keeps the current volatile terminal window;
+> `ledger` stage 1 derives the window and reconciliation queue independently
+> from one durable per-context event log. Persona-wide scope and authority
+> filtering applies only if those optional components are built.
+
 `recent_steps_to_keep` is already per-profile configuration, decoupled from
 compaction cadence. It becomes the backward-compatible terminal alias for a
 `recent_events_to_keep` view setting that also covers forum/message activity.
 The **decision window and the reconciliation queue are independent
-structures over the same persona event log**: the window is the last K events
-authorized for the current `ConversationKey` and resolved view profile; the
-queue is that key and scope's cursor→head prefix, consumed by reconciliation.
+structures over the same event log**: the window is the last K authorized
+events for the active context; the queue is its cursor→head prefix, consumed
+by reconciliation.
 Advancing one never affects the other, and both read from the durable log. Raw
 windows never cross authority domains merely because their events are recent.
-Likewise, `pending_events` requires a conversation key, and `search_history`
-intersects requested scopes with code-owned view permissions and rejects an
-unauthorized request rather than trusting `HistoryQuery.scopes`. Text-adventure
-profiles should carry a larger window (8–12 for Zork) so one imperfect
-reconciliation is less consequential. This is tuning, not design, and rides
-along in the experiment matrix.
+If shared persona scopes are added, `pending_events` also requires a
+conversation key, and `search_history` intersects requested scopes with
+code-owned view permissions rather than trusting `HistoryQuery.scopes`.
+Text-adventure profiles should carry a larger window (8–12 for Zork) so one
+imperfect reconciliation is less consequential. This is tuning, not design,
+and rides along in the experiment matrix.
 
 ## Stateful providers and chain rollover
 
@@ -1162,17 +1299,24 @@ usage). Two behaviors are defined rather than left implicit:
   unavailable (CLI adapters may not report it), `max_chain_decisions` is the
   only trigger.
 
-Rollover is **off by default** and stays off until the `reconciling`
-policy beats `legacy` in the harness — rolling over earlier would convert
-strong provider state into our weaker representation.
+Rollover is **off by default** and stays off until a reconciling arm
+(`structured`, or later `ledger`) beats `legacy` in paired runs — rolling
+over earlier would convert strong provider state into our weaker
+representation.
 
 ## Campaign memory
 
-Under `reconciling`, the end-of-epoch commit becomes the same operations
-contract against the campaign scopes in the participant's persona store
-(keyed state/goals/facts/hypotheses/claims/corrections replace the flat
-`durable_facts`/`open_tasks` lists), instead of `_merge_memory`'s
-append-and-cap.
+> **Status: split.** Post-social commit wiring is the next campaign integration
+> for `structured`; durable progression handling is `ledger` stage 3. Shared
+> persona scopes and dedicated claims/corrections are independent stage 4
+> triggers, not prerequisites for either milestone.
+
+The planned `structured` campaign integration replaces `_merge_memory`'s
+append-and-cap with the same operations contract against one participant
+context's keyed state, goals, facts, and hypotheses. `ledger` keeps that store
+shape while adding durable activity and progression disposition. If a real
+cross-context feature later triggers persona scopes or claims, the same commit
+can target that richer view without changing its scheduling boundary.
 
 **The commit boundary sits after socialization.** A participant's logical
 epoch is *game session → social rounds → reconcile/commit*: agreements,
@@ -1180,30 +1324,43 @@ threats, and deception from the forum must be able to shape next-epoch
 memory through the reconciliation contract, not only through raw
 forum-context injection. Mechanically this splits today's `finish_state`:
 session end still drains the terminal and runs the evaluation probe, but the
-commit reconciliation runs once socialization closes, with the epoch's typed
-forum/message `ActivityEvent`s in its input. This is **scheduling, not
-transactional atomicity**. Each game session and social visibility unit still
-resolves through its own scheduler-owned progression boundary. Mid-session
-reconciliations enter that session's pending overlay and become effective when
-its safe generation publishes; social evidence follows its configured
-visibility boundary. The post-social commit is a forced reconciliation over
-those resolved events, not a catch-all external checkpoint. Provider decision
+commit reconciliation runs once socialization closes. `structured` supplies
+forum text once through `extra_evidence`; `ledger` records terminal, forum,
+and message activity as typed events in one ordered context stream. This is
+**scheduling, not transactional atomicity**.
+
+The scheduler chooses the external durability unit. With today's checkpoint
+substrate it is initially the whole epoch; session/social units become
+independent only after per-unit generation publication exists. Reconciliations
+inside that unit enter the one progression-bound provisional fold and become
+committed when its safe generation publishes. The post-social commit is a
+forced reconciliation, not a catch-all external checkpoint. Provider decision
 state remains available throughout the social rounds; only after that
 reconciliation succeeds may a configured epoch-boundary policy reset it.
 
-Memory is **one logical store per persona with scoped records, not one store
-per campaign**. `ScopeKey` and `SourceRef` let rendering weight the active
-scope while cross-game relationships and general BBS knowledge remain
-available — an agent that plays multiple doors and posts in forums accumulates
-one coherent identity. A campaign may mutate only its most-specific campaign
-scopes; there is no automatic write into an ancestor or unrelated activity
-scope. The ownership rule is hygiene and auditability — every mutation is
-attributable to the activity that made it — while the common store and
-composed views still provide shared memory. Per-scope revision vectors and
-the persona-store lock keep all-or-nothing application coherent when several
-activities share the store.
+If shared persona scopes are later triggered, memory becomes one logical store
+per persona rather than one store per campaign. `ScopeKey` and `SourceRef`
+then let rendering weight the active scope while cross-game relationships and
+general BBS knowledge remain available. A campaign may mutate only its
+most-specific scopes; there is no automatic write into an ancestor or
+unrelated activity scope. Scope revision vectors and the persona-store lock
+provide coherent application when several activities share the store. None of
+this optional hierarchy requires isolating forum activity from gameplay within
+the same trusted campaign context.
 
 ## Progression commit authority and durability domains
+
+> **Status: retained in full — this and Recovery are the components both
+> post-run analyses agreed are worth building for SRE/BRE campaigns.** The
+> checkpoint substrate in `campaign.py` is currently **epoch-granular
+> only**: intra-epoch session checkpoints are in-memory, the durable state
+> pointer advances per completed epoch, and resume discards a crashed
+> epoch's earlier sessions. The `ledger` arm's stage 3 therefore either
+> defines the durability progression as the whole epoch initially or first
+> builds per-session generation publication — see `docs/memory-ledger.md`
+> for the normative resolution ordering. Under the whole-epoch option, a
+> repaired incomplete epoch advances as interrupted; it does not re-run paid
+> activity from the discarded partial epoch.
 
 `ConversationKey.authority_domain` is an input trust/visibility boundary;
 `ProgressionStarted.durability_domain` is an external checkpoint and rollback
@@ -1212,11 +1369,12 @@ same concept.
 
 Every external durability domain has exactly one normative commit authority.
 For campaigns, it is the atomic active-generation pointer and the progression
-outcome ledger inside the referenced generation manifest — not an independently
-appended persona-store disposition. A runtime with no external mutable state
-may use one store-local ledger record as its authority, but it still designates
-one source of truth. `ProgressionDisposition` in the persona store is an
-idempotent mirror/index used by projection and search.
+outcome ledger inside the referenced generation manifest — not an
+independently appended persona-store disposition. A runtime with no external
+mutable state may use one store-local ledger record as its authority, but it
+still designates one source of truth. The persona store keeps an idempotent
+mirror/index used by projection and search; `ledger` represents that mirror as
+a `progression_resolved` control record in `events.jsonl`.
 
 The active generation exposes a cumulative outcome ledger, either by carrying
 prior entries forward or by referencing an immutable ancestor chain. An
@@ -1227,30 +1385,34 @@ progression outcome history.
 The campaign commit protocol is ordered as follows:
 
 1. Under the durability-domain scheduler lock, read active generation `G0` and
-   fsync `ProgressionStarted(progression_id, durability_domain,
-   base_generation=G0)` before executing activity that may affect the domain.
-2. Stage generation `G1`, including the external-state snapshot or visibility
+   fsync the scheduler's
+   `ProgressionStarted(progression_id, durability_domain,
+   base_generation=G0)` record.
+2. Idempotently call the persona store's `start_progression` and fsync its
+   local control mirror before executing paid activity or mutating the domain.
+3. Stage generation `G1`, including the external-state snapshot or visibility
    state, the progression's committed/abandoned outcome, its base generation,
    and relevant persona operation/event-log heads. Fsync every artifact and
    the staging directory.
-3. Atomically publish `G1` through the domain's active-generation pointer.
+4. Atomically publish `G1` through the domain's active-generation pointer.
    The compare-and-swap requires that the active pointer still names `G0`;
    otherwise publication fails and the scheduler re-resolves the domain.
    Successful publication is the commit point and sole authority for both
    external effect validity and progression outcome.
-4. Idempotently call `finish_progression` to append/index the matching
-   `ProgressionDisposition` in the persona store. Projection must resolve its
-   `authority_ref` through the published ledger before treating it as
-   effective.
+5. After validating that the reference is published, idempotently call the
+   trusted `resolve_progression` boundary to append/index the matching mirror
+   in the persona store.
 
 Commit uses a generation containing the progression's durable effects.
 Abandonment first publishes a repaired/restored safe generation containing the
 abandoned outcome, then mirrors that outcome to the persona store. Repeating
 `start_progression` with the same id and fields succeeds idempotently, while a
-field mismatch fails. Repeating `finish_progression` with the same outcome and
-authority reference succeeds;
-attempting an opposite effective outcome fails. The normal API rejects a
-committed mirror whose reference is not already published.
+field mismatch fails. Repeating `resolve_progression` with the same outcome
+and authority reference succeeds; attempting a different outcome or reference
+fails. The scheduler is the trust boundary that validates publication before
+calling the subsystem; the memory implementation does not parse BBS-specific
+manifests. A runtime without that trusted boundary must inject an authority
+resolver rather than accepting arbitrary references.
 
 This ordering closes both split-brain windows. If publication succeeds but the
 persona mirror is missing, recovery synthesizes it idempotently from the active
@@ -1261,26 +1423,32 @@ abandoned outcome, and indexes that outcome. Invalid raw records remain
 forensic history but do not count as a terminal disposition, so there is still
 exactly one authority-resolved outcome.
 
-External rollback isolation is a scheduler invariant, not a property of the
-persona event log. At most one progression may be pending in a durability
+Starting a progression durably binds its context to that active id. A
+progression-aware play handle must present the same id; ordinary context open
+refuses while the id is unresolved. After a restart, the scheduler consults
+the generation authority and repairs or resolves the mirror before allowing
+ordinary rendering. `resolve_progression` may acquire the context internally
+under lock so recovery does not need to open the provisional play view.
+
+External rollback isolation is a scheduler invariant, not a property of an
+activity event log. At most one progression may be pending in a durability
 domain unless the domain supplies disjoint state, separate checkpoint domains,
 independently committable copy-on-write branches/deltas, or an explicitly
 grouped recovery unit. Overlapping progressions that mutate one monolithic
 world are one recovery unit. Restoring a torn progression may be described as
 leaving unrelated progression ids untouched only when this invariant proves
-their external effects are isolated. The current sequential campaign scheduler
-should publish a safe generation between player/social durability units and
-enforce the domain lock even if future execution becomes concurrent.
+their external effects are isolated. Today the whole epoch is one such unit.
+If per-session/social publication is added, the sequential scheduler must
+publish a safe generation between those units and retain the domain lock even
+if future execution becomes concurrent.
 
-Writable memory scopes are mapped to the same scheduler domain for the
-duration of effect-dependent pending work. The active progression may append
-several reconciliation batches to its own provisional overlay, but another
-progression cannot mutate those scopes until the first resolves. This makes the
-predecessor chosen by a causal capacity/exit operation stable. Disjoint domains
-are logically safe to append to the persona-wide event journal concurrently
-because their cursors, scopes, and external restore points are independent;
-the first implementation's coarse persona gate may still serialize them for
-liveness simplicity.
+The writable memory context is bound to the same scheduler domain for the
+unresolved progression. That progression may append several reconciliation
+batches to its one provisional fold, but another progression cannot mutate the
+context until the first resolves. If shared persona scopes are later built,
+the same exclusion applies to affected scopes. Independently durable domains
+may use separate context logs concurrently; cross-scope/persona concurrency
+remains behind its own trigger.
 
 ## Recovery
 
@@ -1313,15 +1481,16 @@ On restart with an unfinished epoch:
    committed progressions retain their effects only under the durability-domain
    isolation invariant above; an overlapping group is repaired as one unit.
    An epoch with no started paid activity may start normally.
-2. **Resolve evidence mechanically.** Events from the abandoned progression
-   remain durable experience. Experience-dependent historical operations stay
-   confirmed, while operations requiring committed external effects become
-   ineffective or need re-verification. Facts about current effects, goal
-   transitions, and keyed state updates therefore cannot remain authoritative
-   merely because reconciliation preceded the crash. The causal operation fold
-   also suppresses dependent exits, successors, demotions, and pruning.
-   Salvage-time code mutations are `OperationRecord`s with
-   `origin="system"`, `system_reason="salvage"`, and explicit causal support.
+2. **Resolve memory mechanically.** In the first `ledger` implementation, the
+   effective fold excludes every batch from the abandoned progression. Its raw
+   events remain durable and searchable, but extracted experience history is
+   recovered only by an optional salvage re-extraction; it is not silently
+   retained as committed state. If campaign evidence later triggers the finer
+   causal projection, experience-dependent historical operations stay
+   confirmed while operations requiring committed external effects become
+   ineffective or need re-verification. That escalation also suppresses
+   dependent exits, successors, demotions, and pruning. Salvage-time code
+   mutations are journaled and explicitly attributed to salvage.
 3. **Catch up when possible.** Folding already-journaled operations is
    deterministic; generating outstanding reconciliation operations is not.
    Recovery attempts the same contiguous-prefix catch-up used for live chain
@@ -1337,7 +1506,8 @@ On restart with an unfinished epoch:
 
 Because the operation journal never rolls back, there is no slice restore, no
 restore-time revision conflict, and no journal entry that is ever obliterated.
-Changing a progression outcome only changes the causal projection. Provider
+Changing a progression outcome changes only the effective fold (or the finer
+causal projection, if built). Provider
 conversations are never assumed to survive: recovery (like any abnormal
 session end) forces `reset_decision_state(conversation_key)` for affected
 keys, whose next activity call follows catch-up/degraded-bootstrap recovery.
@@ -1359,6 +1529,14 @@ checkpoint positions and provider conversations restore nowhere. Every
 recovery path above is forward-only.
 
 ## Implementation gates
+
+> **Status: split by stage.** The generation/mirror, cursor, timeout, and
+> authority gates apply to the `ledger` arm's progression stage. The gates
+> exercising the pending overlay and support-predicate projection (pending
+> adds/contradictions reverting, dependent-batch causal suppression) apply
+> only if that escalation is ever triggered — they are not entry criteria for
+> the batch-disposition mechanism, whose own gates live in
+> `docs/memory-ledger.md`.
 
 The design is not described as crash-consistent until deterministic tests cover
 these boundaries:
@@ -1408,7 +1586,8 @@ races, and every progression outcome ordering permitted by the commit protocol.
 ## Measurement
 
 Because unmentioned items persist by construction, raw retention rate is
-~100% under `reconciling` and measures the code, not the model. The
+~100% under any operations-contract arm and measures the code, not the
+model. The
 discriminating metrics, computable from the operation-record journal plus
 activity event logs:
 
@@ -1444,31 +1623,45 @@ retention/stateful mode, and recovery/rollover policy. Shared `runtime/memory`
 across arms with the same `agent_id` would contaminate every later arm, and a
 name alone cannot distinguish tuned variants of one policy.
 
-Experiment matrix: `{legacy, reconciling, raw-window-only}` ×
+Experiment matrix: `{legacy, structured, raw-window-only}` ×
 `{stateless_full, responses-chain, claude/codex stateful}` × window
-`{4, 12}` × intent `{on, off}`. The full cross is 36 arms; screen the intent
-factor on a subset (one policy per mode) rather than crossing everything.
-Zork first (free, deterministic, score extractor wired), winning arms to an
-SRE campaign where cross-epoch memory compounds. Zork arms need only the core
-design with isolated per-run memory roots; campaign arms additionally require
-the forum/message ingestion and the recovery semantics described above.
+`{4, 12}` × intent `{on, off}`, with `ledger` joining when campaign arms
+run. The full cross is 36 arms; screen the intent factor on a subset (one
+policy per mode) rather than crossing everything. Zork first (free,
+deterministic, score extractor wired), winning arms to an SRE campaign where
+cross-epoch memory compounds. Zork arms need only the seam and isolated
+per-run memory roots — both implemented, along with the journals,
+manifests/fingerprints, `memory_context` run records, and the fixed-context
+point-replay harness that already measures prompt-policy variants offline.
+Campaign arms additionally require the forum/message ingestion and the
+recovery semantics described above. The first structured-vs-legacy pair (54
+vs 49 on one run each) establishes nothing beyond both arms completing
+cleanly; paired repetition is the point of the matrix.
 
 These are configurations, not observations. Each selected cell runs repeated
 paired trials with a predeclared primary metric and reports dispersion or a
 confidence interval; seeds are recorded where a provider exposes them. Normal
 play may leave rollover disabled, but designated trials force rollover at a
 controlled decision/token boundary so post-rollover performance is actually
-measured. The gate "reconciling beats legacy" names its trial set, minimum
+measured. The gate "a reconciling arm beats legacy" names its trial set, minimum
 effect, uncertainty criterion, and cost ceiling before results are examined.
 
 ## Open questions
 
-Whether reconciliation may resurrect archived items unprompted or only via
-explicit retrieval; default keyed-state horizons per game; how much
-judge-based scoring the capture/closure metrics need before the Zork
-extractors alone are trustworthy ground truth; how aggressively rendering
-should weight the active scope of the persona store, and when a future
-explicit copy-to-ancestor operation is justified; event-log retention and
-archival policy for long-lived personas; and how to score claim handling —
-whether an agent tracks, verifies, and exploits other players' kept and broken
-promises.
+Whether the consistency-appendix + cleanup-audit prompt policy captures most
+of the staleness value that typed `StateEntry` horizons and `temporal_kind`
+would otherwise buy — the point-replay harness can answer this before any
+schema work; how coarse progression-granular batch disposition proves in
+practice (the
+trigger for the projection escalation); whether reconciliation may resurrect
+archived items unprompted or only via explicit retrieval; default
+keyed-state horizons per game; how much judge-based scoring the
+capture/closure metrics need before the Zork extractors alone are
+trustworthy ground truth; which capacity heuristic should replace
+oldest-updated as default, if any (it predictably penalizes stable
+foundational knowledge; the heuristic stays pluggable and fingerprinted
+rather than canonized); how aggressively rendering should weight the active
+scope of the persona store, and when a future explicit copy-to-ancestor
+operation is justified; event-log retention and archival policy for
+long-lived personas; and how to score claim handling — whether an agent
+tracks, verifies, and exploits other players' kept and broken promises.

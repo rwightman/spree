@@ -1,20 +1,22 @@
-# A simplified memory subsystem behind a common seam
+# The `structured` memory subsystem behind a common seam
 
-Status: companion to `docs/memory-design.md`. That document remains the full
-target design (the "causal" system below) and is not modified by this one.
+Status: companion to `docs/memory-design.md`. That document is now a
+component menu with per-component triggers; `docs/memory-ledger.md` is the
+staged plan for the next arm, built around this document's `structured` core.
 This document does two things: defines a **common subsystem interface** so
 memory implementations can be swapped per run and compared under identical
 metrics, and distills a **simplified subsystem ("structured")** that keeps
 the highest-value ideas from the full design at a fraction of its build cost.
 
-## Why a parallel simplified system
+## Why a parallel simplified system (`structured`)
 
 The full design is an event-sourced store with causal effectiveness
 projection, progression authorities, and a commit protocol. Its correctness
 story is strong, but two costs precede any experimental signal:
 
 1. **Build cost.** The storage engine, authority protocol, and implementation
-   gates must exist before the first `reconciling` arm runs.
+   gates would have to exist before the first operations-contract experiment
+   could run.
 2. **Model-grammar risk.** Support predicates, dependency edges, and
    proposal ids raise the structural failure rate of utility responses; a
    high dead-letter rate would measure format compliance, not memory quality.
@@ -24,12 +26,15 @@ contract, typed sections, caps-in-code, journaling, and mechanical cursor
 rules — the parts that directly attack the observed failure modes — and drops
 everything whose value is contingent on campaigns, concurrency, or crash
 windows we have not yet hit in practice. If the structured arm already beats
-`legacy`, we learn that cheaply; if it plateaus where the causal design's
-extra machinery would help, the limitation table below says exactly where and
-why, and the causal build is then justified by data.
+`legacy`, we learn that cheaply; if it plateaus where ledger or deferred
+components would help, the limitation list below says exactly where and why,
+and the next build is then justified by data.
 
-Both systems (and `legacy`, and `raw-window-only`) sit behind one seam, so
-trials are apples-to-apples and a run can swap systems by configuration.
+Operations-contract systems (including `structured`, planned `ledger`, and
+`raw-window-only`) sit behind one seam. The inline `legacy` control shares the
+same lifecycle and measurement contract even though it is not a subsystem, so
+runs remain selectable by configuration and comparable without pretending
+their internal representations are identical.
 
 ## The common seam: `MemorySubsystem`
 
@@ -41,7 +46,7 @@ service-level surface:
 
 ```python
 class MemorySubsystem(Protocol):
-    name: str                                  # "structured" | "causal" | "raw-window-only"
+    name: str                                  # "structured" | "ledger" | "raw-window-only"
     def fingerprints(self) -> dict[str, str]:  # schema/mutation/prompt fingerprints
         ...
     def open_context(self, agent_id: str, context_id: str) -> MemoryHandle: ...
@@ -76,10 +81,10 @@ measurement contract below through instrumentation.
   with campaign-supplied `extra_evidence` (forum text) in its input.
 
 The runner calls `observe` per step, `render_context` per decision,
-`maybe_reconcile` per tick, and `commit` at `finish_state`. The campaign
-calls `commit` at its post-social boundary instead. `ActivityRunner` keeps
-retry/backoff mechanics; the subsystem decides representation, prompts, and
-parsing.
+`maybe_reconcile` per tick, and `commit` at `finish_state`. The planned
+campaign integration moves that final `commit` to its post-social boundary.
+`ActivityRunner` keeps retry/backoff mechanics; the subsystem decides
+representation, prompts, and parsing.
 
 ### The interface carries the measurement contract
 
@@ -110,15 +115,37 @@ questions differently, so cross-arm metrics need a small arm-aware
 normalization layer in the analyzer — that layer does not exist yet, and no
 claim of metric identity should be made until it does.
 
-`legacy` satisfies this by wrapping its summary rewrite and merge patch as
-two journaled pseudo-ops, exactly as the full design specifies. Subsystems
-call the model through the typed `utility_text(messages, operation)` surface
+`legacy` satisfies the measurement portion by wrapping its summary rewrite
+and merge patch as two journaled pseudo-ops in the same record shape.
+Subsystems call the model through the typed
+`utility_text(messages, operation)` surface
 on `ModelAdapter`, which owns trace reset, output filtering, per-operation
 settings, and truncation/incomplete/empty detection; CLI adapters run utility
 calls stateless so they never pollute the resumed gameplay session. The rest
 of the provider-lifecycle work (call contexts, the stage handshake,
 `reset_decision_state`) lives in `docs/memory-design.md` and is not
 duplicated here.
+
+## Why `legacy` remains the control
+
+`legacy` is no longer the unsafe version that motivated this work. Its
+working summaries and campaign documents have code-enforced bounds; malformed
+or explicitly truncated utility output preserves the prior state; destructive
+compaction gets one retention-repair attempt; and final commit retries and
+journals failure instead of replacing memory with an empty or prose-shaped
+result. Its journaled `legacy_replace_summary` and `legacy_merge_patch`
+pseudo-ops make those outcomes observable.
+
+It is still a useful control because it asks the model for the smallest,
+familiar summary grammar and can perform well when a capable model curates a
+compact narrative. Its remaining weakness is representational, not a missing
+safety patch: every compaction is a wholesale rewrite, flat lists conflate
+fact, belief, history, and current state, and campaign merge semantics cannot
+express typed correction or goal closure. Its journal is observational and
+does not replay into item-level state. `structured` tests whether stable item
+identity, default-persist operations, typed sections, and a cleanup audit beat
+that compact baseline. `ledger` separately tests whether durable evidence,
+cursors, and progression disposition are worth their campaign-oriented cost.
 
 ## The `structured` subsystem
 
@@ -199,9 +226,11 @@ protecting cross-op atomicity that cannot arise here.
 
 The rules that killed the attestation flaw carry over verbatim: the covered
 boundary advances exactly when the response parses, accepted ops are applied,
-the journal record is fsynced, and no truncation signal fired
-(`finish_reason`, `output_tokens` near the utility budget). Zero ops against
-a non-trivial window → one retry → advance with a `no_memory_change` marker.
+the journal record is fsynced, and no explicit truncation signal fired
+(`finish_reason` of `length`/`max_tokens`, provider status `incomplete`, or
+malformed/empty output). Output usage near a configured ceiling is telemetry,
+not proof of truncation. Zero ops against a non-trivial window → one retry →
+advance with a `no_memory_change` marker.
 Each pass reconciles a **bounded contiguous prefix** of pending events
 (`max_events_per_reconcile`), so a backlog — especially one built up across
 failure retries — cannot grow the prompt without limit; the remainder stays
@@ -227,7 +256,7 @@ design. The property is held by a randomized replay test, not a single
 happy-path example. Stated volatility, deliberately accepted: pending
 un-reconciled events and the covered/overlap boundary live only in process
 memory — a crash loses evidence not yet folded in, never anything journaled.
-Durable evidence logs are full-design scope.
+Durable evidence logs and cursors are `ledger` scope.
 
 ### Commit and campaigns
 
@@ -257,17 +286,29 @@ channel, is still open.)
 
 ### Accepted limitations — the experiment's hypotheses
 
-Each row is a deliberate omission and names what the causal system buys; if
-the structured arm's failures cluster on a row, that row justifies the build.
+Each omission names a concrete escalation. If `structured` failures cluster
+on one of them, that evidence — not the existence of a larger design —
+justifies the build.
 
-| Limitation | Consequence | What the causal design buys |
-| --- | --- | --- |
-| No effect-dependent evidence | After a crash/abandoned progression, beliefs from discarded world effects persist unmarked | `experience_occurred` vs `external_effect_committed`; projection suppression |
-| Per-context stores | No cross-game persona identity; opponent knowledge does not follow the agent between doors | persona store, scopes, related-scope retrieval |
-| Single writer, no revisions | One activity per context at a time; concurrent activities need separate contexts | revision vectors, CAS cursors, serializable reads |
-| No pending overlay | Mid-session commits are immediately authoritative; an interrupted epoch keeps them | progression outcomes, pending/committed folds |
-| No history search / resurrect | Archived items recoverable only by post-hoc analysis | `search_history` + `resurrect` |
-| Flat provenance (step numbers) | Weaker audit; claims/speaker attribution unavailable | typed sources, actor ids, claims section |
+- **No effect-dependent evidence.** Beliefs from an abandoned progression's
+  discarded world effects remain unmarked. `ledger` adds whole-progression
+  disposition; only observed need would justify finer
+  `experience_occurred`/`external_effect_committed` projection.
+- **Per-context stores.** Cross-game persona identity and opponent knowledge
+  do not follow the agent between contexts. Scoped persona views are the
+  escalation.
+- **Single writer, no revisions.** Concurrent activities require separate
+  contexts. Revision vectors, cursor CAS, and serializable reads are the
+  escalation.
+- **No provisional progression fold.** Mid-session commits are immediately
+  authoritative, so an interrupted epoch keeps them. `ledger` adds durable
+  progression outcomes and committed/provisional folds.
+- **No history search or `resurrect`.** Archived items are recoverable only
+  through post-hoc analysis. An index and explicit resurrection verb are the
+  escalation.
+- **Flat provenance.** Step numbers provide weaker audit and cannot validate
+  speaker attribution. Typed sources, actor ids, and a claims section are the
+  escalation.
 
 ### What is shared, not duplicated
 
@@ -276,10 +317,8 @@ provider lifecycle normalization, the intent channel, typed initial
 `compaction_max_tokens` / `memory_max_tokens` budgets plus their adaptive retry
 ceilings, and the raw-window tuning all live in `docs/memory-design.md` and
 apply to every arm equally. The `structured` subsystem assumes them; it does
-not re-specify them. The inline legacy control additionally uses a selective
-compaction prompt and code-enforced working-summary/campaign-document bounds;
-those safeguards improve the control without changing its wholesale-summary
-representation.
+not re-specify them. The inline legacy safeguards are summarized above; they
+improve the control without changing its wholesale-summary representation.
 
 ## Measurement and the updated matrix
 
@@ -289,16 +328,19 @@ rate, stale-facts-active, goal-closure accuracy, repeated failed actions,
 churn, plus score/cost. The matrix gains an arm and an ordering:
 
 `{legacy, structured, raw-window-only}` are buildable immediately and run the
-Zork matrix first; `causal` joins the matrix when built, and the decision to
-build it is informed by where `structured` fails. The pre-registered gate
-discipline (trial set, minimum effect, uncertainty criterion, cost ceiling
-declared before results) applies unchanged.
+Zork matrix first; `ledger` joins campaign and forced-rollover experiments
+when its relevant stages are built. Deferred components join only when an
+observed failure triggers them. The pre-registered gate discipline (trial
+set, minimum effect, uncertainty criterion, cost ceiling declared before
+results) applies unchanged.
 
 ## Coexistence and migration
 
-A `structured` store can be imported into a causal persona store later: its
-ops journal replays as model-origin operations with `experience_occurred`
-support derived from recorded step ranges, into the scope matching its
-context id. The reverse direction is deliberately unsupported — projection
-semantics cannot be flattened without loss. Fingerprints keep imported
-history attributable to the system that produced it.
+A `structured` store can seed `ledger` as one explicitly committed migration
+batch. Its existing ops journal and step provenance remain attached as source
+artifacts, but migration must not fabricate an event ledger that never
+existed. If fine-grained causal projection is later built, ledger records can
+then be imported with their real progression history. The reverse direction
+is deliberately unsupported: disposition or projection semantics cannot be
+flattened without loss. Fingerprints keep imported history attributable to
+the system that produced it.

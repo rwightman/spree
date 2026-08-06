@@ -1,6 +1,6 @@
 """Common seam for swappable memory subsystems.
 
-Defined in ``docs/memory-simple.md``: the runner and campaign depend only on
+Defined in ``docs/memory-structured.md``: the runner and campaign depend only on
 this coarse service surface, while each implementation owns representation,
 prompts, parsing, and cadence internally. The seam also carries the
 measurement contract — every implementation journals mutations in the common

@@ -1602,7 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
         "--memory-system",
         choices=["legacy", "structured"],
         default="legacy",
-        help="memory subsystem for this run (docs/memory-simple.md)",
+        help="memory subsystem for this run (docs/memory-structured.md)",
     )
     run_parser.add_argument(
         "--memory-root",

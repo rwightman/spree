@@ -421,7 +421,7 @@ def parse_args() -> argparse.Namespace:
         "--memory-system",
         choices=["legacy", "structured"],
         default="legacy",
-        help="memory subsystem for this run (docs/memory-simple.md)",
+        help="memory subsystem for this run (docs/memory-structured.md)",
     )
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--columns", type=int, default=100)
